@@ -131,6 +131,31 @@ bereits sauber auf Daten-Ebene. Was fehlt, ist der lebende Sync:
 - Redis :6379 bleibt vorerst geteilt (Session/Cache, geringes Risiko);
   erst angehen, wenn ein konkreter Vorfall es rechtfertigt.
 
+## Status-Update — 2026-06-11 (Session Fable)
+
+- **W1 (teilweise umgesetzt):** mario-brain-db + ollama auf Root-Disk-Binds
+  (/var/lib/mario-brain/{pg,ollama}, compose angepasst, verifiziert healthy).
+  Rest-Cutover (/var/lib/docker/volumes weg von /dev/sdb) steht noch aus —
+  Alt-Volumes auf sdb bleiben bis dahin als Rollback liegen.
+- **W2 (umgesetzt):** weft-db (postgres:16-alpine, :54332, Daten
+  /var/lib/weft-pg) via /opt/weft/weft-db.compose.yml; Dump+Restore
+  verifiziert (6 projects, 1 execution); weft-api + weft-dashboard auf
+  EnvironmentFile /root/.secrets/weft-db.env umgestellt, health ok,
+  0 Verbindungen mehr auf quantbot-pg. Alte weft_local-DB auf :54330
+  bleibt vorerst als Fallback (Drop nach stabiler Laufzeit).
+- **W3 (umgesetzt):** Retention RawTick 21d (Job 1006), compress_after 24h
+  (Job 1000) — beide Mario-approved. Chunk-Backlog (9× 63-119G) wird über
+  temporäres Hetzner-Volume quantbot-cold (Tablespace cold_store)
+  verschoben + dort komprimiert; Volume wird danach gelöscht.
+  disk-pressure-alert-Abdeckung von /mnt/hc-tsdb noch zu prüfen.
+- **W4 (entschieden):** Mario 2026-06-11 — Domain master.stayawesome.app
+  bleibt; Portfolio-Scope dokumentiert hiermit.
+- **W5 (teilweise umgesetzt):** planfile-adapter live (fsnotify auf 5 Repos,
+  14 PRD-Initiativen synchron) + solartown-adapter --listen
+  (bead_created/bead_closed-NOTIFY, edge-triggered) — beide als
+  systemd-Services master-kanban-{planfile,solartown}. Offen:
+  vk_workspace-Adapter (Routing-Konvention nötig) + github_pr-Adapter.
+
 ## Reviewer-Verdict — quick — 2026-06-11T06:02:56Z
 
 - **Depth:** quick
