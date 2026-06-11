@@ -7,6 +7,7 @@
 !Makefile
 !apps/
 !docs/
+!tools/
 
 apps/**
 !apps/**/
@@ -14,6 +15,9 @@ apps/**
 !apps/**/*.mod
 !apps/**/*.sum
 !apps/**/*.md
+
+tools/*
+!tools/*.sh
 
 docs/*
 !docs/README.md
@@ -26,3 +30,13 @@ docs/*
 **/.env.*
 **/node_modules/
 **/.next/
+
+# Gas Town (added by gt)
+.runtime/
+.claude/
+.gemini/
+.logs/
+__pycache__/
+state.json
+CLAUDE.md
+CLAUDE.local.md
