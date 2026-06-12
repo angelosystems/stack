@@ -311,20 +311,26 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 	if lastStatus == fm.Status && !created {
 		return id
 	}
-	kind := "activity"
-	if fm.Status == "done" {
-		kind = "completed"
-	}
-	payload := map[string]any{
-		"plan_status": fm.Status, "slug": fm.Slug, "layer": fm.Layer,
-		"ref": path, "title": fm.Title, "plan_item": id,
-	}
-	if err := postEvent(initiativeID, kind, payload); err != nil {
-		fmt.Fprintf(os.Stderr, "  ✗ post %s: %v\n", initiativeID, err)
-		return id
-	}
-	// P3.1 — Status-Edge in den Town-Strom (Decomposer + Auto-Reviewer hören hier)
-	emitTown("plan.status-changed", map[string]any{
+	        kind := "activity"
+	        if fm.Status == "done" {
+	                kind = "completed"
+	        }
+	        payload := map[string]any{
+	                "plan_status": fm.Status, "slug": fm.Slug, "layer": fm.Layer,
+	                "ref": path, "title": fm.Title, "plan_item": id,
+	        }
+	        if err := postEvent(initiativeID, kind, payload); err != nil {
+	                fmt.Fprintf(os.Stderr, "  ✗ post %s: %v\n", initiativeID, err)
+	                return id
+	        }
+	
+	        // P2.1 Auto-Stage Verdrahtung
+	        if fm.Status == "approved" {
+	                _ = postEvent(initiativeID, "stage_proposed", map[string]any{"stage": "soon"})
+	        }
+	
+	                // P3.1 — Status-Edge in den Town-Strom (Decomposer + Auto-Reviewer hören hier)
+	                emitTown("plan.status-changed", map[string]any{
 		"plan_item": id, "slug": fm.Slug, "layer": fm.Layer,
 		"old": lastStatus, "new": fm.Status,
 		"repo": r.root, "path": path, "title": fm.Title, "initiative": initiativeID,

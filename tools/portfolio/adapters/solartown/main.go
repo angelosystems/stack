@@ -148,29 +148,57 @@ func runOnce(p *pgxpool.Pool) error {
 		return nil
 	}
 
-	fmt.Printf("scanning %d bead-links via bd CLI in %s\n", len(pairs), bdRig)
-	pushed := 0
-	for _, x := range pairs {
-		st, err := readBead(x.beadRef)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %s (%s): %v\n", x.beadRef, x.initiative, err)
-			continue
-		}
-		kind := "activity"
-		if st.status == "closed" {
-			kind = "completed"
-		}
-		payload := map[string]any{"bead_status": st.status, "bead_title": st.title, "ref": x.beadRef}
-		if err := postEvent(x.initiative, kind, payload); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ post %s (%s): %v\n", x.beadRef, x.initiative, err)
-			continue
-		}
-		fmt.Printf("  ✓ %s → %s (%s, %s)\n", x.beadRef, x.initiative, kind, st.status)
-		pushed++
-	}
-	fmt.Printf("pushed %d/%d events\n", pushed, len(pairs))
-	return nil
-}
+	        fmt.Printf("scanning %d bead-links via bd CLI in %s\n", len(pairs), bdRig)
+	        pushed := 0
+	        byInitiative := make(map[string][]*beadStatus)
+	
+	        for _, x := range pairs {
+	                st, err := readBead(x.beadRef)
+	                if err != nil {
+	                        fmt.Fprintf(os.Stderr, "  ✗ %s (%s): %v\n", x.beadRef, x.initiative, err)
+	                        continue
+	                }
+	                byInitiative[x.initiative] = append(byInitiative[x.initiative], st)
+	
+	                kind := "activity"
+	                if st.status == "closed" {
+	                        kind = "completed"
+	                }
+	                payload := map[string]any{"bead_status": st.status, "bead_title": st.title, "ref": x.beadRef}
+	                if err := postEvent(x.initiative, kind, payload); err != nil {
+	                        fmt.Fprintf(os.Stderr, "  ✗ post %s (%s): %v\n", x.beadRef, x.initiative, err)
+	                        continue
+	                }
+	                fmt.Printf("  ✓ %s → %s (%s, %s)\n", x.beadRef, x.initiative, kind, st.status)
+	                pushed++
+	        }
+	
+	        // P2.1 Auto-Stage Verdrahtung
+	        for initID, beads := range byInitiative {
+	                allClosed := true
+	                anyInProgress := false
+	                for _, b := range beads {
+	                        if b.status == "in_progress" {
+	                                anyInProgress = true
+	                        }
+	                        if b.status != "closed" {
+	                                allClosed = false
+	                        }
+	                }
+	                var proposed string
+	                if allClosed && len(beads) > 0 {
+	                        proposed = "watching"
+	                } else if anyInProgress {
+	                        proposed = "now"
+	                }
+	
+	                if proposed != "" {
+	                        _ = postEvent(initID, "stage_proposed", map[string]any{"stage": proposed})
+	                }
+	        }
+	
+	        fmt.Printf("pushed %d/%d events\n", pushed, len(pairs))
+	        return nil}
 
 func readBead(id string) (*beadStatus, error) {
 	cmd := exec.Command("bd", "show", id, "--json")

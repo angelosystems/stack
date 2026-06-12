@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS portfolio.initiative (
   id              text PRIMARY KEY,
   firma           text NOT NULL CHECK (firma IN ('stayawesome','solartown','quantbot','mariobrain','angeloos')),
   stage           text NOT NULL CHECK (stage IN ('idea','now','soon','watching','done')),
+  stage_locked_by_human boolean DEFAULT false,
   title           text NOT NULL,
   status_dot      text,
   wip_pinned      boolean DEFAULT false,
