@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -717,10 +720,90 @@ func cmdServe() *cobra.Command {
 				}
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
+			// GitHub-Webhook (Org angelosystems): HMAC-verifiziert, mappt
+			// pull_request-Events auf initiative_link kind=github_pr mit
+			// ref-Konvention owner/repo#N. Edge-triggered statt Polling.
+			// nginx routet diesen Pfad am SSO vorbei — Auth ist die Signatur.
+			http.HandleFunc("/api/github-webhook", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				secret := envOr("GITHUB_WEBHOOK_SECRET", "")
+				if secret == "" {
+					http.Error(w, "webhook nicht konfiguriert", 503)
+					return
+				}
+				raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+				if err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				mac := hmac.New(sha256.New, []byte(secret))
+				mac.Write(raw)
+				want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+				if !hmac.Equal([]byte(r.Header.Get("X-Hub-Signature-256")), []byte(want)) {
+					http.Error(w, "bad signature", 401)
+					return
+				}
+				if r.Header.Get("X-GitHub-Event") != "pull_request" {
+					fmt.Fprintln(w, `{"ok":true,"skipped":"event"}`)
+					return
+				}
+				var ev struct {
+					Action      string `json:"action"`
+					PullRequest struct {
+						Number int    `json:"number"`
+						Title  string `json:"title"`
+						Merged bool   `json:"merged"`
+						State  string `json:"state"`
+					} `json:"pull_request"`
+					Repository struct {
+						FullName string `json:"full_name"`
+					} `json:"repository"`
+				}
+				if err := json.Unmarshal(raw, &ev); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				ref := fmt.Sprintf("%s#%d", ev.Repository.FullName, ev.PullRequest.Number)
+				rows, err := p.Query(r.Context(),
+					`SELECT initiative_id FROM portfolio.initiative_link WHERE kind='github_pr' AND ref=$1`, ref)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				var ids []string
+				for rows.Next() {
+					var id string
+					if rows.Scan(&id) == nil {
+						ids = append(ids, id)
+					}
+				}
+				rows.Close()
+				kind := "activity"
+				if ev.Action == "closed" && ev.PullRequest.Merged {
+					kind = "completed"
+				}
+				payload, _ := json.Marshal(map[string]any{
+					"ref": ref, "action": ev.Action, "pr_state": ev.PullRequest.State,
+					"merged": ev.PullRequest.Merged, "title": ev.PullRequest.Title,
+				})
+				matched := 0
+				for _, id := range ids {
+					if _, err := p.Exec(r.Context(),
+						`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor) VALUES ($1,$2,'github',$3,'github-webhook')`,
+						id, kind, payload); err == nil {
+						matched++
+					}
+				}
+				fmt.Fprintf(w, `{"ok":true,"matched":%d}`+"\n", matched)
+			})
 			fmt.Println("master-kanban serve auf :" + port)
 			fmt.Println("  GET  /api/initiatives  — initiative_summary VIEW")
 			fmt.Println("  POST /api/move         — {id, stage}")
 			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
+			fmt.Println("  POST /api/github-webhook — GitHub pull_request (HMAC)")
 			return http.ListenAndServe(":"+port, nil)
 		},
 	}
