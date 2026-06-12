@@ -684,6 +684,74 @@ func cmdServe() *cobra.Command {
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
 
+			// P2.2 — Kapazitätsanzeige je Lane
+			http.HandleFunc("/api/capacity", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				sp, err := solartownPool()
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				
+				firmaRig := map[string]string{
+					"stayawesome": "stayawesomeOS",
+					"solartown":   "testrig",
+					"quantbot":    "quantumshift",
+					"stack":       "stack",
+					"angeloos":    "clean",
+					"mariobrain":  "mariobrain",
+				}
+				
+				type capData struct {
+					Polecats int `json:"polecats"`
+					VKSlots  int `json:"vkslots"`
+				}
+				res := make(map[string]capData)
+
+				q := `WITH all_polecats AS (
+					SELECT i.id, SUBSTRING(i.id FROM '-polecat-(.+)$') AS name
+					FROM beads.issues i
+					JOIN beads.labels l ON l.issue_id=i.id AND l.rig=i.rig AND l.label='gt:agent'
+					LEFT JOIN beads.labels lm ON lm.issue_id=i.id AND lm.rig=i.rig AND lm.label LIKE 'mode:%' AND lm.deleted_at IS NULL
+					WHERE i.rig=$1 AND i.id LIKE $2 AND (lm.label = $3 OR (lm.label IS NULL AND $4 = 'production'))
+				),
+				busy_assignees AS (
+					SELECT DISTINCT assignee FROM beads.issues
+					WHERE rig=$1 AND status IN ('in_progress','hooked') AND title NOT LIKE 'Merge:%' AND assignee LIKE $5
+				)
+				SELECT name FROM all_polecats
+				WHERE name IS NOT NULL AND name NOT LIKE '%reviewer%'
+				AND ($1 || '/polecats/' || name) NOT IN (SELECT assignee FROM busy_assignees)
+				AND ($1 || '/' || name) NOT IN (SELECT assignee FROM busy_assignees)
+				ORDER BY name`
+
+				for fID, rig := range firmaRig {
+					rows, err := sp.Query(r.Context(), q, rig, "%-"+rig+"-polecat-%", "mode:production", "production", rig+"/%")
+					if err != nil { continue }
+					
+					idle := 0
+					for rows.Next() {
+						var name string
+						if err := rows.Scan(&name); err == nil {
+							if _, err := os.Stat("/root/solartown/" + rig + "/polecats/" + name); err == nil {
+								idle++
+							}
+						}
+					}
+					rows.Close()
+					
+					var vkCount int
+					sp.QueryRow(r.Context(), "SELECT count(*) FROM beads.issues WHERE rig=$1 AND status='hooked' AND assignee LIKE 'vk/%'", rig).Scan(&vkCount)
+					
+					slots := 5 - vkCount
+					
+					res[fID] = capData{Polecats: idle, VKSlots: slots}
+				}
+				
+				json.NewEncoder(w).Encode(res)
+			})
+
 			http.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")

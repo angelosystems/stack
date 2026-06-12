@@ -72,6 +72,7 @@
                 <span class="text-xl" x-text="f.icon"></span>
                 <h2 class="font-semibold uppercase tracking-wide text-sm" x-text="f.label"></h2>
                 <span class="text-xs text-slate-400" x-text="(counts[f.id]||0) + ' total'"></span>
+                <span class="text-xs font-medium text-emerald-600 ml-4" x-show="capacity[f.id]" x-text="'🟢 ' + capacity[f.id].polecats + ' Polecats frei · ' + capacity[f.id].vkslots + ' vk-Slots'"></span>
               </div>
               <div class="text-xs text-slate-500">
                 now: <span x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span>
@@ -252,10 +253,12 @@ function liveKanban() {
     lastFetched: '',
 
     rollup: {},
+    capacity: {},
     async init() {
       await this.refresh();
       this.loadRollup();
-      setInterval(() => this.refresh(true), 30000);
+      this.loadCapacity();
+      setInterval(() => { this.refresh(true); this.loadCapacity(); }, 30000);
       // Deep-Link: #<initiative-id> öffnet Karte + Baum
       const h = location.hash.slice(1);
       if (h) this.$nextTick(async () => {
@@ -267,6 +270,12 @@ function liveKanban() {
     async loadRollup() {
       const r = await fetch(this.apiBase + '/api/rollup');
       if (r.ok) { const arr = await r.json(); this.rollup = Object.fromEntries(arr.map(x => [x.slug, x])); }
+    },
+    async loadCapacity() {
+      try {
+        const r = await fetch(this.apiBase + '/api/capacity');
+        if (r.ok) this.capacity = await r.json();
+      } catch (e) { console.error('capacity fetch:', e); }
     },
 
     async refresh(silent) {
