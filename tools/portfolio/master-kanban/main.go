@@ -159,6 +159,44 @@ func envOr(k, def string) string {
 	return def
 }
 
+// actorFrom — SSO-User aus oauth2-proxy (nginx snippets/oauth2-require.conf)
+func actorFrom(r *http.Request) string {
+	if a := r.Header.Get("X-Auth-Request-Email"); a != "" {
+		return a
+	}
+	return "mario"
+}
+
+var firmaPrefix = map[string]string{
+	"stayawesome": "sa", "solartown": "st", "quantbot": "qb",
+	"mariobrain": "mb", "stack": "sk", "angeloos": "ag",
+}
+
+func slugify(s string) string {
+	s = strings.NewReplacer(
+		"ä", "ae", "ö", "oe", "ü", "ue", "ß", "ss").Replace(strings.ToLower(s))
+	var b strings.Builder
+	prevDash := true
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		case !prevDash:
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 40 {
+		out = strings.Trim(out[:40], "-")
+	}
+	if out == "" {
+		out = "karte"
+	}
+	return out
+}
+
 func connect() *pgxpool.Pool {
 	if pool != nil {
 		return pool
@@ -366,6 +404,209 @@ func cmdServe() *cobra.Command {
 					return
 				}
 				w.Write(j)
+			})
+			// P5 — Kommentar zur Karte: landet als 'commented'-Event in der Historie
+			http.HandleFunc("/api/comment", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct{ Id, Text string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				body.Text = strings.TrimSpace(body.Text)
+				if body.Id == "" || body.Text == "" {
+					http.Error(w, "id und text erforderlich", 400)
+					return
+				}
+				if len(body.Text) > 4000 {
+					http.Error(w, "text zu lang (max 4000 Zeichen)", 400)
+					return
+				}
+				var exists bool
+				if err := p.QueryRow(r.Context(),
+					`SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id=$1)`, body.Id).Scan(&exists); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				if !exists {
+					http.Error(w, "initiative nicht gefunden: "+body.Id, 404)
+					return
+				}
+				actor := actorFrom(r)
+				payload, _ := json.Marshal(map[string]string{"text": body.Text})
+				var j json.RawMessage
+				err := p.QueryRow(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1,'commented','master',$2,$3)
+					 RETURNING json_build_object('kind',kind,'source_backend',source_backend,
+					   'from_stage',from_stage,'to_stage',to_stage,'payload',payload,'actor',actor,'at',at)`,
+					body.Id, payload, actor).Scan(&j)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(j)
+			})
+			// P5 — Felder editieren (title/description); Pointer unterscheiden „fehlt" von „leer"
+			http.HandleFunc("/api/update", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct {
+					Id          string  `json:"id"`
+					Title       *string `json:"title"`
+					Description *string `json:"description"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				sets := []string{"updated_at = now()"}
+				vals := []any{body.Id}
+				fields := []string{}
+				if body.Title != nil {
+					t := strings.TrimSpace(*body.Title)
+					if t == "" {
+						http.Error(w, "title darf nicht leer sein", 400)
+						return
+					}
+					vals = append(vals, t)
+					sets = append(sets, fmt.Sprintf("title = $%d", len(vals)))
+					fields = append(fields, "title")
+				}
+				if body.Description != nil {
+					vals = append(vals, strings.TrimSpace(*body.Description))
+					sets = append(sets, fmt.Sprintf("description = NULLIF($%d,'')", len(vals)))
+					fields = append(fields, "description")
+				}
+				if len(fields) == 0 {
+					http.Error(w, "nichts zu ändern (title/description)", 400)
+					return
+				}
+				tag, err := p.Exec(r.Context(),
+					`UPDATE portfolio.initiative SET `+strings.Join(sets, ", ")+` WHERE id = $1`, vals...)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				if tag.RowsAffected() == 0 {
+					http.Error(w, "initiative nicht gefunden: "+body.Id, 404)
+					return
+				}
+				payload, _ := json.Marshal(map[string]any{"fields": fields})
+				_, _ = p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1,'edited','master',$2,$3)`, body.Id, payload, actorFrom(r))
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+			// P5 — Karte aus der UI anlegen; id = <firma-prefix>-<slug(title)>
+			http.HandleFunc("/api/create", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct{ Firma, Title, Stage string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				body.Title = strings.TrimSpace(body.Title)
+				prefix, ok := firmaPrefix[body.Firma]
+				if !ok || body.Title == "" {
+					http.Error(w, "firma und title erforderlich", 400)
+					return
+				}
+				if body.Stage == "" {
+					body.Stage = "idea"
+				}
+				base := prefix + "-" + slugify(body.Title)
+				id := base
+				for i := 2; ; i++ {
+					var exists bool
+					if err := p.QueryRow(r.Context(),
+						`SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id=$1)`, id).Scan(&exists); err != nil {
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					if !exists {
+						break
+					}
+					id = fmt.Sprintf("%s-%d", base, i)
+				}
+				if _, err := p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
+					 VALUES ($1,$2,$3,$4,'plan_file')`, id, body.Firma, body.Stage, body.Title); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				payload, _ := json.Marshal(map[string]string{"title": body.Title})
+				_, _ = p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, to_stage, payload, actor)
+					 VALUES ($1,'created','master',$2,$3,$4)`, id, body.Stage, payload, actorFrom(r))
+				var j json.RawMessage
+				if err := p.QueryRow(r.Context(),
+					`SELECT row_to_json(s) FROM portfolio.initiative_summary s WHERE s.id=$1`, id).Scan(&j); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(j)
+			})
+			// P5 — Archivieren: Karte verschwindet vom Board (summary filtert archived_at)
+			http.HandleFunc("/api/archive", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct{ Id string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				tag, err := p.Exec(r.Context(),
+					`UPDATE portfolio.initiative SET archived_at = now(), updated_at = now()
+					 WHERE id = $1 AND archived_at IS NULL`, body.Id)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				if tag.RowsAffected() == 0 {
+					http.Error(w, "initiative nicht gefunden (oder schon archiviert): "+body.Id, 404)
+					return
+				}
+				_, _ = p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, actor)
+					 VALUES ($1,'archived','master',$2)`, body.Id, actorFrom(r))
+				fmt.Fprintln(w, `{"ok":true}`)
 			})
 			http.HandleFunc("/api/move", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")

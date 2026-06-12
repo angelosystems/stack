@@ -122,6 +122,15 @@
                       </div>
                     </article>
                   </template>
+                  <!-- Karte anlegen (P5): + Neu → Inline-Input, Enter erstellt -->
+                  <input x-show="adding === f.id + '/' + stage" x-model="newTitle"
+                    :data-newcard="f.id + '/' + stage"
+                    @keydown.enter="createCard(f.id, stage)" @keydown.escape.stop="adding = null"
+                    @blur="if (!newTitle.trim()) adding = null"
+                    placeholder="Titel… (Enter)"
+                    class="w-full text-sm border border-slate-300 rounded-md px-2 py-1 mb-1 focus:outline-none focus:ring-2 focus:ring-sky-300">
+                  <button @click="startAdd(f.id, stage)"
+                    class="w-full text-left text-xs text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded px-1.5 py-1">＋ Neu</button>
                 </div>
               </template>
             </div>
@@ -227,7 +236,8 @@
       <button @click="copyDetailLink()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500 text-sm"
         :title="copied ? 'kopiert' : 'Link kopieren'" x-text="copied ? '✓' : '🔗'"></button>
       <span class="text-xs text-slate-400 ml-2 font-mono truncate" x-text="detail ? detail.initiative.id : ''"></span>
-      <button @click="closeDetail()" class="ml-auto p-1.5 rounded hover:bg-slate-100 text-slate-500" title="schließen (Esc)">✕</button>
+      <button @click="archiveDetail()" class="ml-auto p-1.5 rounded hover:bg-slate-100 text-slate-500 text-sm" title="archivieren">🗄</button>
+      <button @click="closeDetail()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500" title="schließen (Esc)">✕</button>
     </div>
 
     <div class="overflow-y-auto flex-1 px-6 py-5">
@@ -235,18 +245,40 @@
       <template x-if="detail">
         <div class="space-y-6" :class="detailExpanded ? 'max-w-3xl mx-auto' : ''">
 
-          <!-- Titel + Stage -->
+          <!-- Titel (klick = editieren) + Stage-Dropdown -->
           <div>
             <div class="flex items-start gap-2">
               <span class="text-2xl leading-tight" x-text="(firmas.find(f => f.id === detail.initiative.firma) || {icon:'▣'}).icon"></span>
-              <h2 class="text-2xl font-semibold leading-tight" x-text="detail.initiative.title"></h2>
+              <h2 x-show="!editingTitle" @click="startTitleEdit()"
+                class="text-2xl font-semibold leading-tight cursor-text hover:bg-slate-50 rounded px-1 -mx-1"
+                title="klicken zum Bearbeiten" x-text="detail.initiative.title"></h2>
+              <input x-show="editingTitle" x-model="titleDraft" data-title-edit
+                @keydown.enter="saveTitle()" @keydown.escape.stop="editingTitle = false" @blur="saveTitle()"
+                class="text-2xl font-semibold leading-tight w-full border-b-2 border-sky-300 focus:outline-none px-1 -mx-1">
             </div>
             <div class="mt-2 flex items-center gap-2 text-xs">
-              <span class="px-2 py-0.5 rounded-full font-medium" :class="stageChipCls(detail.initiative.stage)"
-                x-text="stageLabel[detail.initiative.stage] || detail.initiative.stage"></span>
+              <select @change="moveFromDetail($event.target.value)"
+                class="px-2 py-0.5 rounded-full font-medium border-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-300"
+                :class="stageChipCls(detail.initiative.stage)" title="Stage ändern">
+                <option value="idea" :selected="detail.initiative.stage === 'idea'">Idea</option>
+                <option value="now" :selected="detail.initiative.stage === 'now'">Now</option>
+                <option value="soon" :selected="detail.initiative.stage === 'soon'">Soon</option>
+                <option value="watching" :selected="detail.initiative.stage === 'watching'">Watching</option>
+                <option value="done" :selected="detail.initiative.stage === 'done'">Done</option>
+              </select>
               <span class="text-slate-400" x-text="(firmas.find(f => f.id === detail.initiative.firma) || {label: detail.initiative.firma}).label"></span>
             </div>
           </div>
+
+          <!-- Beschreibung (Notion-Seiteninhalt; speichert bei Blur / ⌘+Enter) -->
+          <section>
+            <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">Beschreibung</h3>
+            <textarea x-model="descDraft" rows="5"
+              placeholder="Beschreibung hinzufügen…"
+              @blur="saveDesc()" @keydown.meta.enter="saveDesc()" @keydown.ctrl.enter="saveDesc()" @keydown.escape.stop
+              class="w-full text-sm leading-relaxed border border-transparent hover:border-slate-200 focus:border-slate-300 rounded-md px-2 py-1.5 -mx-2 resize-y focus:outline-none"></textarea>
+            <div class="text-[10px] text-emerald-600 h-3" x-text="descSaved"></div>
+          </section>
 
           <!-- Eigenschaften (Notion-Property-Block) -->
           <dl class="grid grid-cols-[130px_1fr] gap-y-1.5 text-sm">
@@ -304,17 +336,32 @@
             </div>
           </section>
 
-          <!-- Historie (initiative_event, neueste zuerst) -->
+          <!-- Kommentare + Historie (initiative_event, neueste zuerst) -->
           <section>
             <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">
-              Historie <span class="font-normal text-slate-400" x-text="'(' + detail.events.length + (detail.events.length === 40 ? '+' : '') + ')'"></span>
+              Kommentare &amp; Historie <span class="font-normal text-slate-400" x-text="'(' + detail.events.length + (detail.events.length === 40 ? '+' : '') + ')'"></span>
             </h3>
+            <div class="flex gap-2 mb-4">
+              <textarea x-model="commentText" rows="2"
+                placeholder="Kommentar hinzufügen… (⌘/Strg+Enter sendet)"
+                @keydown.meta.enter="postComment()" @keydown.ctrl.enter="postComment()"
+                class="flex-1 border border-slate-200 rounded-md px-2.5 py-1.5 text-sm resize-y focus:outline-none focus:ring-2 focus:ring-sky-300"></textarea>
+              <button @click="postComment()" :disabled="!commentText.trim() || commentBusy"
+                class="self-end px-3 py-1.5 rounded-md text-sm font-medium bg-slate-900 text-white disabled:opacity-40 hover:bg-slate-700"
+                x-text="commentBusy ? '…' : 'Senden'"></button>
+            </div>
             <ol class="space-y-2.5">
               <template x-for="(e, ei) in detail.events" :key="'e-' + ei">
                 <li class="flex gap-2 text-sm">
                   <span class="shrink-0 w-5 text-center" x-text="eventIcon(e.kind)"></span>
                   <div class="flex-1 min-w-0">
-                    <div class="leading-snug break-words" x-text="eventText(e)"></div>
+                    <template x-if="e.kind === 'commented'">
+                      <div class="bg-amber-50 border border-amber-100 rounded-md px-2.5 py-1.5 leading-snug break-words whitespace-pre-wrap"
+                        x-text="(e.payload || {}).text"></div>
+                    </template>
+                    <template x-if="e.kind !== 'commented'">
+                      <div class="leading-snug break-words" x-text="eventText(e)"></div>
+                    </template>
                     <div class="text-[11px] text-slate-400">
                       <span x-text="e.source_backend"></span><span x-show="e.actor"> · <span x-text="e.actor"></span></span> · <span x-text="fmtDateTime(e.at)"></span>
                     </div>
@@ -381,6 +428,14 @@ function liveKanban() {
     detailExpanded: false,
     copied: false,
     dragging: false,
+    commentText: '',
+    commentBusy: false,
+    editingTitle: false,
+    titleDraft: '',
+    descDraft: '',
+    descSaved: '',
+    adding: null,
+    newTitle: '',
 
     rollup: {},
     capacity: {},
@@ -403,12 +458,14 @@ function liveKanban() {
       if (this.dragging) return; // Klick direkt nach Drag-Drop nicht als Öffnen werten
       this.detailOpen = true;
       this.copied = false;
-      if (!this.detail || this.detail.initiative.id !== id) this.detail = null;
+      if (!this.detail || this.detail.initiative.id !== id) { this.detail = null; this.commentText = ''; }
       history.replaceState(null, '', location.pathname + '#' + id);
       try {
         const r = await fetch(this.apiBase + '/api/initiative?id=' + encodeURIComponent(id));
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.detail = await r.json();
+        this.descDraft = this.detail.initiative.description || '';
+        this.editingTitle = false;
         if (this.detail.initiative.plan_count > 0 && !this.plansCache[id]) {
           const pr = await fetch(this.apiBase + '/api/plans?initiative=' + encodeURIComponent(id));
           this.plansCache[id] = pr.ok ? await pr.json() : [];
@@ -430,6 +487,108 @@ function liveKanban() {
       this.copied = true;
       setTimeout(() => this.copied = false, 1500);
     },
+    // ── Drawer-Edits: Titel, Beschreibung, Stage, Archiv (P5) ──
+    startTitleEdit() {
+      this.titleDraft = this.detail.initiative.title;
+      this.editingTitle = true;
+      this.$nextTick(() => { const el = document.querySelector('[data-title-edit]'); if (el) el.focus(); });
+    },
+    async saveTitle() {
+      if (!this.editingTitle) return;
+      this.editingTitle = false;
+      const t = this.titleDraft.trim();
+      if (!t || t === this.detail.initiative.title) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/update', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.detail.initiative.id, title: t }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail.initiative.title = t;
+        const c = this.cards.find(x => x.id === this.detail.initiative.id);
+        if (c) c.title = t;
+      } catch (e) { alert('titel miss: ' + e.message); }
+    },
+    async saveDesc() {
+      if (!this.detail) return;
+      const d = this.descDraft.trim();
+      if (d === (this.detail.initiative.description || '')) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/update', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.detail.initiative.id, description: d }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail.initiative.description = d;
+        this.descSaved = 'gespeichert ✓';
+        setTimeout(() => this.descSaved = '', 2000);
+      } catch (e) { alert('beschreibung miss: ' + e.message); }
+    },
+    async moveFromDetail(stage) {
+      const id = this.detail.initiative.id;
+      try {
+        const r = await fetch(this.apiBase + '/api/move', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, stage }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail.initiative.stage = stage;
+        const c = this.cards.find(x => x.id === id);
+        if (c) c.stage = stage;
+      } catch (e) { alert('move miss: ' + e.message); this.refresh(); }
+    },
+    async archiveDetail() {
+      if (!this.detail) return;
+      const id = this.detail.initiative.id;
+      if (!confirm('Karte „' + this.detail.initiative.title + '" archivieren?')) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/archive', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.cards = this.cards.filter(x => x.id !== id);
+        this.closeDetail();
+      } catch (e) { alert('archiv miss: ' + e.message); }
+    },
+    // ── Karte anlegen (P5) ──
+    startAdd(firma, stage) {
+      this.adding = firma + '/' + stage;
+      this.newTitle = '';
+      this.$nextTick(() => { const el = document.querySelector('[data-newcard="' + firma + '/' + stage + '"]'); if (el) el.focus(); });
+    },
+    async createCard(firma, stage) {
+      const title = this.newTitle.trim();
+      if (!title) { this.adding = null; return; }
+      try {
+        const r = await fetch(this.apiBase + '/api/create', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ firma, title, stage }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.cards.push(await r.json());
+        this.adding = null;
+        this.newTitle = '';
+      } catch (e) { alert('anlegen miss: ' + e.message); }
+    },
+    async postComment() {
+      const text = this.commentText.trim();
+      if (!text || !this.detail || this.commentBusy) return;
+      this.commentBusy = true;
+      try {
+        const r = await fetch(this.apiBase + '/api/comment', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.detail.initiative.id, text }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail.events.unshift(await r.json());
+        this.commentText = '';
+      } catch (e) {
+        alert('kommentar miss: ' + e.message);
+      } finally {
+        this.commentBusy = false;
+      }
+    },
     detailLinks() { return ((this.detail && this.detail.links) || []).filter(l => l.kind !== 'plan_file'); },
     prUrl(ref) { const m = ref.match(/^(.+)#(\d+)$/); return m ? 'https://github.com/' + m[1] + '/pull/' + m[2] : '#'; },
     stageChipCls(s) {
@@ -441,7 +600,7 @@ function liveKanban() {
     },
     eventIcon(k) {
       return { created: '✨', moved: '➜', edited: '✏️', linked: '🔗', unlinked: '✂️',
-               activity: '⚡', stage_proposed: '💡', completed: '✅' }[k] || '•';
+               activity: '⚡', stage_proposed: '💡', completed: '✅', commented: '💬' }[k] || '•';
     },
     eventText(e) {
       const p = e.payload || {};
@@ -589,6 +748,7 @@ function liveKanban() {
         group: 'kanban-' + el.dataset.firma,
         animation: 150,
         ghostClass: 'opacity-30',
+        draggable: 'article[data-id]',
         onStart() { self.dragging = true; },
         async onEnd(evt) {
           setTimeout(() => self.dragging = false, 0); // Click-Event nach Drop verpufft
