@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>master-kanban (live)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  .lane-stripe-stayawesome { border-left: 4px solid #06b6d4; }
+  .lane-stripe-solartown   { border-left: 4px solid #f59e0b; }
+  .lane-stripe-quantbot    { border-left: 4px solid #10b981; }
+  .lane-stripe-mariobrain  { border-left: 4px solid #8b5cf6; }
+  .lane-stripe-angeloos    { border-left: 4px solid #64748b; }
+  .lane-stripe-stack       { border-left: 4px solid #f43f5e; }
+  .col-now-overflow { box-shadow: inset 0 0 0 2px #ef4444; }
+  .card-drag { cursor: grab; }
+  .card-drag:active { cursor: grabbing; }
+  .activity-spark { display:inline-block;width:36px;height:8px;background:linear-gradient(90deg,#e5e7eb 30%,#94a3b8 70%,#475569 100%);border-radius:2px;vertical-align:middle; }
+  .activity-fresh { background: linear-gradient(90deg,#dcfce7 0%,#22c55e 100%); }
+  .activity-stale { background: #f3f4f6; }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-900">
+
+<div x-data="liveKanban()" x-init="init()" class="min-h-screen">
+
+  <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
+    <h1 class="text-lg font-semibold tracking-tight">master-kanban <span class="text-xs text-emerald-600 ml-1" x-text="apiOk ? '● live' : '○ offline'"></span></h1>
+
+    <!-- View-Umschalter: Board | Pipeline | Backlog -->
+    <nav class="flex gap-1 bg-slate-100 rounded-lg p-1">
+      <template x-for="v in views" :key="v.id">
+        <button @click="switchView(v.id)"
+          :class="view === v.id ? 'bg-white shadow text-slate-900' : 'text-slate-500'"
+          class="px-3 py-1 rounded-md text-sm font-medium">
+          <span x-text="v.label"></span>
+          <span x-show="v.id==='backlog' && backlog.length" class="ml-1 text-[10px] bg-amber-200 text-amber-900 rounded-full px-1.5" x-text="backlog.length"></span>
+        </button>
+      </template>
+    </nav>
+
+    <div class="flex gap-2 flex-1" x-show="view==='board'">
+      <template x-for="f in firmas" :key="f.id">
+        <button @click="toggleFirma(f.id)"
+          :class="filter[f.id] ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-300'"
+          class="px-3 py-1 rounded-full text-sm font-medium hover:opacity-80">
+          <span x-text="f.icon"></span>
+          <span x-text="f.label"></span>
+          <span class="opacity-60 text-xs ml-1" x-text="counts[f.id] || 0"></span>
+        </button>
+      </template>
+    </div>
+    <div class="flex-1" x-show="view!=='board'"></div>
+
+    <div class="text-xs text-slate-500 flex gap-3 items-center">
+      <span x-text="lastFetched"></span>
+      <button @click="refresh()" class="px-2 py-1 border border-slate-300 rounded hover:bg-slate-100">↻</button>
+    </div>
+  </header>
+
+  <main class="p-6 space-y-6">
+
+    <!-- ════ BOARD-VIEW (Portfolio, wie gehabt + Plan-Baum pro Karte) ════ -->
+    <template x-if="view==='board'">
+      <div class="space-y-6">
+        <template x-for="f in firmas" :key="f.id">
+          <section x-show="filter[f.id]" :class="'lane-stripe-' + f.id" class="bg-white rounded-lg shadow-sm">
+            <header class="px-5 py-3 flex items-center justify-between border-b border-slate-200">
+              <div class="flex items-center gap-3">
+                <span class="text-xl" x-text="f.icon"></span>
+                <h2 class="font-semibold uppercase tracking-wide text-sm" x-text="f.label"></h2>
+                <span class="text-xs text-slate-400" x-text="(counts[f.id]||0) + ' total'"></span>
+              </div>
+              <div class="text-xs text-slate-500">
+                now: <span x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span>
+                <span x-show="nowCount(f.id) > f.wip" class="ml-2 text-red-600 font-semibold">WIP überschritten</span>
+              </div>
+            </header>
+            <div class="grid grid-cols-5 divide-x divide-slate-200">
+              <template x-for="stage in stages" :key="stage">
+                <div class="p-3 min-h-[120px]"
+                  :class="stage === 'now' && nowCount(f.id) > f.wip ? 'col-now-overflow' : ''"
+                  :data-firma="f.id" :data-stage="stage"
+                  x-init="$nextTick(() => initSortable($el))">
+                  <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center justify-between">
+                    <span x-text="stageLabel[stage]"></span>
+                    <span class="text-slate-400 font-normal" x-text="cardsIn(f.id, stage).length"></span>
+                  </div>
+                  <template x-for="c in cardsIn(f.id, stage)" :key="c.id">
+                    <article :data-id="c.id"
+                      class="card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm">
+                      <div class="font-medium leading-snug" x-text="c.title"></div>
+                      <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+                        <span class="text-[10px] text-slate-400" x-text="c.id"></span>
+                        <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
+                        <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
+                        <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
+                        <button x-show="c.plan_count > 0" @click.stop="toggleTree(c.id)"
+                          class="text-[11px] px-1 rounded border border-slate-300 hover:bg-white"
+                          :title="c.plan_count + ' plan-files — Baum auf/zu'">
+                          📄<span class="ml-0.5" x-text="c.plan_count"></span>
+                          <span x-text="expanded[c.id] ? '▾' : '▸'"></span>
+                        </button>
+                        <span class="activity-spark" :class="freshClass(c.last_activity)" :title="'last activity: ' + (c.last_activity || '—')"></span>
+                      </div>
+                      <!-- Plan-Hierarchie: Vision ▸ Phasen ▸ PRDs (P4.1/P4.2) -->
+                      <div x-show="expanded[c.id]" class="mt-2 pt-2 border-t border-slate-200 space-y-0.5" @click.stop>
+                        <template x-for="it in treeOf(c.id)" :key="it.id">
+                          <div class="flex items-center gap-1.5 text-xs" :style="'padding-left:' + (it.depth*14) + 'px'">
+                            <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
+                            <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" :title="'Review-Workbench öffnen'" x-text="it.title"></a>
+                            <span class="px-1 rounded text-[10px]" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
+                            <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500"
+                              :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                          </div>
+                        </template>
+                        <div x-show="!treeOf(c.id).length" class="text-[11px] text-slate-400">lade…</div>
+                      </div>
+                    </article>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </section>
+        </template>
+      </div>
+    </template>
+
+    <!-- ════ PIPELINE-VIEW (das Planungs-Kanban: Spalten = Plan-Status) ════ -->
+    <template x-if="view==='pipeline'">
+      <section class="bg-white rounded-lg shadow-sm">
+        <header class="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
+          <h2 class="font-semibold uppercase tracking-wide text-sm">Plan-Pipeline</h2>
+          <span class="text-xs text-slate-400">Spalten = Frontmatter-Status · Karten = Wurzel-Pläne mit Unterbaum</span>
+        </header>
+        <div class="grid grid-cols-5 divide-x divide-slate-200">
+          <template x-for="col in planCols" :key="col.id">
+            <div class="p-3 min-h-[160px]">
+              <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex justify-between">
+                <span x-text="col.label"></span>
+                <span class="text-slate-400 font-normal" x-text="rootsIn(col.id).length"></span>
+              </div>
+              <template x-for="it in rootsIn(col.id)" :key="it.id">
+                <article class="mb-2 bg-slate-50 border border-slate-200 rounded-md p-2 text-sm"
+                  :class="'lane-stripe-' + firmaOf(it)">
+                  <a :href="'/review?id=' + it.id" class="font-medium leading-snug hover:underline" title="Review-Workbench öffnen" x-text="it.title"></a>
+                  <div class="text-[10px] text-slate-400 mt-1 flex gap-2">
+                    <span x-text="layerIcon(it.layer) + ' ' + (it.layer||'plan')"></span>
+                    <span x-show="childCount(it.id)" x-text="'▸ ' + childCount(it.id) + ' Unterpläne'"></span>
+                    <span x-show="rollup[it.slug]" x-text="rollup[it.slug] ? '🐝 ' + rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span>
+                  </div>
+                  <div class="mt-1 space-y-0.5">
+                    <template x-for="ch in childrenOf(it.id)" :key="ch.id">
+                      <div class="flex items-center gap-1 text-[11px] text-slate-600 pl-2">
+                        <span x-text="layerIcon(ch.layer)"></span>
+                        <a :href="'/review?id=' + ch.id" class="hover:underline truncate" x-text="ch.title"></a>
+                        <span class="px-1 rounded text-[9px]" :class="statusChip(ch.status)" x-text="ch.status"></span>
+                      </div>
+                    </template>
+                  </div>
+                </article>
+              </template>
+            </div>
+          </template>
+        </div>
+      </section>
+    </template>
+
+    <!-- ════ BACKLOG-VIEW (lane-lose Beads + Triage, P2.3) ════ -->
+    <template x-if="view==='backlog'">
+      <section class="bg-white rounded-lg shadow-sm">
+        <header class="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
+          <h2 class="font-semibold uppercase tracking-wide text-sm">Backlog</h2>
+          <span class="text-xs text-slate-400">offene Beads ohne lane:*-Label · Triage routet in Hacker- oder Plan-Lane</span>
+          <select x-model="backlogRig" @change="loadBacklog()" class="ml-auto text-xs border border-slate-300 rounded px-2 py-1">
+            <option value="">alle rigs</option>
+            <option value="clean">clean</option>
+            <option value="testrig">testrig</option>
+            <option value="quantumshift">quantumshift</option>
+            <option value="stack">stack</option>
+            <option value="stayawesomeOS">stayawesomeOS</option>
+          </select>
+        </header>
+        <ul class="divide-y divide-slate-100">
+          <template x-for="b in backlogFiltered" :key="b.id">
+            <li class="px-5 py-2 flex items-center gap-3 text-sm hover:bg-slate-50">
+              <span class="text-[10px] text-slate-400 w-20 shrink-0" x-text="b.id"></span>
+              <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 shrink-0" x-text="b.rig"></span>
+              <span class="flex-1 truncate" x-text="b.title"></span>
+              <span class="text-[10px] text-slate-400 shrink-0" x-text="ageOf(b.created_at)"></span>
+              <button @click="triage(b, 'hacker')" class="shrink-0 text-xs px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-900">→ Hacker</button>
+              <button @click="triage(b, 'plan')" class="shrink-0 text-xs px-2 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900">→ Plan</button>
+            </li>
+          </template>
+        </ul>
+        <div x-show="!backlogFiltered.length" class="px-5 py-8 text-center text-sm text-slate-400">Backlog leer 🎉</div>
+      </section>
+    </template>
+
+    <footer class="text-xs text-slate-500 pt-4 pb-12">
+      Master-Kanban LIVE · Board = Portfolio · Pipeline = Plan-Status (git-Frontmatter) · Backlog = Beads ohne Lane ·
+      SoT: git + solartown_clean — dieses Board ist reine Projektion
+    </footer>
+  </main>
+</div>
+
+<script>
+function liveKanban() {
+  return {
+    apiBase: location.origin.includes('7780') ? location.origin : location.origin,
+    apiOk: false,
+    view: 'board',
+    views: [
+      { id: 'board',    label: 'Board' },
+      { id: 'pipeline', label: 'Pipeline' },
+      { id: 'backlog',  label: 'Backlog' },
+    ],
+    firmas: [
+      { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 4 },
+      { id: 'solartown',   label: 'Solartown',    icon: '⚡', wip: 6 },
+      { id: 'quantbot',    label: 'QuantBot',     icon: '💰', wip: 4 },
+      { id: 'mariobrain',  label: 'mario-brain',  icon: '🧠', wip: 4 },
+      { id: 'stack',       label: 'Stack (Plattform)', icon: '🧱', wip: 4 },
+      { id: 'angeloos',    label: 'AngeloOS',     icon: '⚙',  wip: 4 },
+    ],
+    prefixFirma: { sa: 'stayawesome', st: 'solartown', qb: 'quantbot', mb: 'mariobrain', ag: 'stack', sk: 'stack' },
+    ghRepos: {
+      '/root/solartown': 'angelosystems/solartown',
+      '/opt/quantbot': 'angelosystems/quantbot',
+      '/opt/stack': 'angelosystems/stack',
+      '/root/stayawesomeOS': 'angelosystems/stayawesomeOS',
+      '/root/mario-brain': 'angelosystems/mario-brain',
+    },
+    stages: ['idea', 'now', 'soon', 'watching', 'done'],
+    stageLabel: { idea: 'Idea', now: 'Now', soon: 'Soon', watching: 'Watching', done: 'Done' },
+    planCols: [
+      { id: 'draft',       label: 'Draft' },
+      { id: 'review',      label: 'In Review' },
+      { id: 'approved',    label: 'Approved' },
+      { id: 'in-progress', label: 'In Progress' },
+      { id: 'done',        label: 'Done' },
+    ],
+    filter: { stayawesome: true, solartown: true, quantbot: true, mariobrain: true, angeloos: true, stack: true },
+    cards: [],
+    allPlans: [],
+    plansCache: {},
+    expanded: {},
+    backlog: [],
+    backlogRig: '',
+    lastFetched: '',
+
+    rollup: {},
+    async init() {
+      await this.refresh();
+      this.loadRollup();
+      setInterval(() => this.refresh(true), 30000);
+      // Deep-Link: #<initiative-id> öffnet Karte + Baum
+      const h = location.hash.slice(1);
+      if (h) this.$nextTick(async () => {
+        await this.toggleTree(h);
+        const el = document.querySelector('[data-id="' + h + '"]');
+        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-sky-400'); }
+      });
+    },
+    async loadRollup() {
+      const r = await fetch(this.apiBase + '/api/rollup');
+      if (r.ok) { const arr = await r.json(); this.rollup = Object.fromEntries(arr.map(x => [x.slug, x])); }
+    },
+
+    async refresh(silent) {
+      try {
+        const r = await fetch(this.apiBase + '/api/initiatives');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.cards = await r.json();
+        this.apiOk = true;
+        if (this.view === 'pipeline') await this.loadAllPlans();
+        if (this.view === 'backlog') await this.loadBacklog();
+        const t = new Date().toLocaleTimeString('de-DE');
+        this.lastFetched = (silent ? 'auto-refresh' : 'geladen') + ' ' + t;
+      } catch (e) {
+        this.apiOk = false;
+        this.lastFetched = 'fetch miss: ' + e.message;
+      }
+    },
+
+    async switchView(v) {
+      this.view = v;
+      if (v === 'pipeline') await this.loadAllPlans();
+      if (v === 'backlog') await this.loadBacklog();
+    },
+
+    // ── Plan-Baum (P4.1) ──
+    async toggleTree(id) {
+      this.expanded[id] = !this.expanded[id];
+      if (this.expanded[id] && !this.plansCache[id]) {
+        const r = await fetch(this.apiBase + '/api/plans?initiative=' + encodeURIComponent(id));
+        this.plansCache[id] = r.ok ? await r.json() : [];
+      }
+    },
+    treeOf(id) {
+      const items = this.plansCache[id] || [];
+      const byParent = {};
+      items.forEach(i => { const k = i.parent_id || 'ROOT'; (byParent[k] = byParent[k] || []).push(i); });
+      const out = [], seen = new Set();
+      const walk = (pid, depth) => (byParent[pid] || []).forEach(i => {
+        if (seen.has(i.id)) return;
+        seen.add(i.id); out.push({ ...i, depth }); walk(i.id, depth + 1);
+      });
+      walk('ROOT', 0);
+      items.forEach(i => { if (!seen.has(i.id)) out.push({ ...i, depth: 0 }); });
+      return out;
+    },
+    layerIcon(l) { return { vision: '🌅', roadmap: '🗺️', prd: '📋', epic: '🧱', implementation: '🔧', session: '📝' }[l] || '📄'; },
+    statusChip(s) {
+      if (!s) return 'bg-slate-100 text-slate-500';
+      if (s.startsWith('approved')) return 'bg-emerald-100 text-emerald-800';
+      if (s === 'review') return 'bg-amber-100 text-amber-800';
+      if (s === 'in-progress') return 'bg-sky-100 text-sky-800';
+      if (s === 'done') return 'bg-slate-200 text-slate-500';
+      return 'bg-slate-100 text-slate-600';
+    },
+    ghUrl(it) {
+      const gh = this.ghRepos[it.repo];
+      if (!gh) return '#';
+      return 'https://github.com/' + gh + '/blob/main/' + it.path.slice(it.repo.length + 1);
+    },
+
+    // ── Pipeline-View (P4.2) ──
+    async loadAllPlans() {
+      const r = await fetch(this.apiBase + '/api/plans');
+      this.allPlans = r.ok ? await r.json() : [];
+    },
+    statusCol(s) {
+      if (!s) return 'draft';
+      if (s.startsWith('approved')) return 'approved';
+      if (['draft', 'review', 'in-progress', 'done'].includes(s)) return s;
+      return 'draft';
+    },
+    rootsIn(col) { return this.allPlans.filter(i => !i.parent_id && this.statusCol(i.status) === col); },
+    childrenOf(id) { return this.allPlans.filter(i => i.parent_id === id); },
+    childCount(id) { return this.childrenOf(id).length; },
+    firmaOf(it) { return this.prefixFirma[(it.id || '').split('-')[0]] || 'angeloos'; },
+
+    // ── Backlog + Triage (P2.3) ──
+    async loadBacklog() {
+      const r = await fetch(this.apiBase + '/api/backlog?limit=100');
+      this.backlog = r.ok ? await r.json() : [];
+    },
+    get backlogFiltered() { return this.backlog.filter(b => !this.backlogRig || b.rig === this.backlogRig); },
+    ageOf(ts) {
+      const d = Math.floor((Date.now() - new Date(ts).getTime()) / 86400000);
+      return d === 0 ? 'heute' : d + 'd';
+    },
+    async triage(b, lane) {
+      try {
+        const r = await fetch(this.apiBase + '/api/triage', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: b.id, lane }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.backlog = this.backlog.filter(x => x.id !== b.id);
+      } catch (e) { alert('triage miss: ' + e.message); }
+    },
+
+    // ── Board (unverändert) ──
+    toggleFirma(id) { this.filter[id] = !this.filter[id]; },
+    cardsIn(firma, stage) { return this.cards.filter(c => c.firma === firma && c.stage === stage); },
+    nowCount(firma) { return this.cardsIn(firma, 'now').length; },
+    get counts() { const o = {}; this.firmas.forEach(f => o[f.id] = this.cards.filter(c => c.firma === f.id).length); return o; },
+    freshClass(la) {
+      if (!la) return 'activity-stale';
+      const days = (Date.now() - new Date(la).getTime()) / 86400000;
+      return days < 2 ? 'activity-fresh' : days > 14 ? 'activity-stale' : '';
+    },
+    initSortable(el) {
+      const self = this;
+      Sortable.create(el, {
+        group: 'kanban-' + el.dataset.firma,
+        animation: 150,
+        ghostClass: 'opacity-30',
+        async onEnd(evt) {
+          const id = evt.item.dataset.id;
+          const newStage = evt.to.dataset.stage;
+          try {
+            const r = await fetch(self.apiBase + '/api/move', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id, stage: newStage }),
+            });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const c = self.cards.find(x => x.id === id);
+            if (c) c.stage = newStage;
+          } catch (e) {
+            alert('move miss: ' + e.message);
+            self.refresh();
+          }
+        },
+      });
+    },
+  };
+}
+</script>
+</body>
+</html>

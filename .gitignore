@@ -8,6 +8,8 @@
 !apps/
 !docs/
 !tools/
+!cockpit/
+!schema/
 
 apps/**
 !apps/**/
@@ -18,6 +20,8 @@ apps/**
 
 tools/*
 !tools/*.sh
+!tools/portfolio/
+!tools/portfolio/**
 
 docs/*
 !docs/README.md
@@ -40,3 +44,4 @@ __pycache__/
 state.json
 CLAUDE.md
 CLAUDE.local.md
+bin/

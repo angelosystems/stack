@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Review-Workbench</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  .prose-doc h1 { font-size:1.4rem; font-weight:700; margin:1rem 0 .5rem; }
+  .prose-doc h2 { font-size:1.15rem; font-weight:600; margin:1rem 0 .4rem; border-bottom:1px solid #e2e8f0; padding-bottom:.2rem; }
+  .prose-doc h3 { font-size:1rem; font-weight:600; margin:.8rem 0 .3rem; }
+  .prose-doc p, .prose-doc li { font-size:.85rem; line-height:1.5; margin:.25rem 0; }
+  .prose-doc ul { list-style:disc; padding-left:1.2rem; }
+  .prose-doc pre { background:#0f172a; color:#e2e8f0; font-size:.72rem; padding:.6rem; border-radius:.4rem; overflow-x:auto; margin:.4rem 0; }
+  .prose-doc code { font-size:.78rem; }
+  .prose-doc table { font-size:.8rem; border-collapse:collapse; }
+  .prose-doc td, .prose-doc th { border:1px solid #e2e8f0; padding:.2rem .5rem; }
+  .prose-doc .mermaid { background:#fff; display:flex; justify-content:center; margin:.5rem 0; }
+  .chat-md p { margin:.3rem 0; } .chat-md ul { list-style:disc; padding-left:1.1rem; }
+  .chat-md pre { background:#1e293b; color:#e2e8f0; font-size:.7rem; padding:.5rem; border-radius:.3rem; overflow-x:auto; }
+  .splitter { cursor: col-resize; width: 6px; background:#cbd5e1; }
+  .splitter:hover, .splitter.active { background:#0ea5e9; }
+  @keyframes flash-ok { 0% { background:#bbf7d0; } 100% { background:transparent; } }
+  .doc-flash { animation: flash-ok 1.6s ease-out; }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-900">
+
+<div x-data="workbench()" x-init="init()" class="h-screen flex flex-col">
+
+  <header class="bg-white border-b border-slate-200 px-5 py-2.5 flex items-center gap-3 shrink-0">
+    <a href="/cockpit" class="text-slate-400 hover:text-slate-700 text-sm">← Board</a>
+    <h1 class="font-semibold text-sm truncate max-w-[28rem]" x-text="meta.title || planId"></h1>
+    <span class="text-[10px] uppercase px-1.5 py-0.5 rounded bg-violet-100 text-violet-700" x-text="meta.layer || '…'"></span>
+    <span class="text-[11px] px-2 py-0.5 rounded-full" :class="chipFor(meta.status)" x-text="meta.status || '…'"></span>
+
+    <div class="ml-auto flex items-center gap-2">
+      <a :href="ghUrl()" target="_blank" class="text-xs text-slate-500 hover:underline">GitHub ↗</a>
+      <button @click="skeptiker()" :disabled="thinking"
+        class="text-xs px-2.5 py-1.5 rounded bg-fuchsia-100 hover:bg-fuchsia-200 text-fuchsia-900 disabled:opacity-40"
+        title="Kritischer Gegen-Review: aktiv nach Schwächen und Risiken suchen">🎭 Skeptiker</button>
+      <button @click="modal='constraint'" class="text-xs px-2.5 py-1.5 rounded bg-sky-100 hover:bg-sky-200 text-sky-900">Approve mit Constraint</button>
+      <button @click="modal='reject'" class="text-xs px-2.5 py-1.5 rounded bg-red-100 hover:bg-red-200 text-red-900">✕ Reject</button>
+      <button @click="modal='approve'" :disabled="busy"
+        class="relative text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-medium disabled:opacity-50">
+        ✓ Approven
+        <span x-show="checklist.open > 0" class="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-amber-400 border border-white"
+          :title="checklist.open + ' Checklist-Punkte offen'"></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Checkliste (aus dem Dokument geparst, Toggle schreibt ins File) -->
+  <div x-show="checklist.items.length" class="bg-white border-b border-slate-200 px-5 py-1.5 shrink-0">
+    <button @click="checklist.expanded = !checklist.expanded" class="text-xs text-slate-600 flex items-center gap-2 w-full">
+      <span x-text="checklist.expanded ? '▾' : '▸'"></span>
+      <span>Reviewer-Checklist (<span x-text="checklist.done"></span>/<span x-text="checklist.items.length"></span>)</span>
+      <span class="flex-1 h-1.5 bg-slate-200 rounded overflow-hidden ml-2">
+        <span class="block h-full bg-emerald-500 transition-all" :style="'width:' + (100*checklist.done/Math.max(1,checklist.items.length)) + '%'"></span>
+      </span>
+    </button>
+    <div x-show="checklist.expanded" class="mt-1.5 space-y-0.5 max-h-36 overflow-y-auto">
+      <template x-for="(it, i) in checklist.items" :key="i">
+        <label class="flex items-start gap-2 text-xs cursor-pointer hover:bg-slate-50 rounded px-1 py-0.5">
+          <input type="checkbox" :checked="it.done" @change="toggleCheck(it)" class="mt-0.5">
+          <span :class="it.done ? 'line-through text-slate-400' : 'text-slate-700'" x-text="it.text"></span>
+        </label>
+      </template>
+    </div>
+  </div>
+
+  <div class="flex flex-1 overflow-hidden" x-ref="split">
+
+    <!-- LINKS: pre-warmed GLM-Reviewer-Chat -->
+    <section class="flex flex-col bg-white min-w-[260px]" :style="'width:' + chatW + '%'">
+      <div class="px-4 py-2 border-b border-slate-200 flex items-center gap-2 shrink-0">
+        <span class="text-sm font-semibold">Reviewer</span>
+        <span class="text-[11px] text-slate-400">GLM-5.1 · Dokument im Kontext</span>
+        <span x-show="thinking" class="text-[11px] text-sky-600 animate-pulse ml-auto">✻ denkt…</span>
+      </div>
+      <div class="flex-1 overflow-y-auto p-4 space-y-3" x-ref="chatlog">
+        <template x-for="(m, i) in chat" :key="i">
+          <div :class="m.role === 'user' ? 'ml-8' : 'mr-4'">
+            <div class="text-[10px] uppercase tracking-wide text-slate-400 mb-0.5 flex items-center gap-2">
+              <span x-text="m.role === 'user' ? 'du' : 'reviewer'"></span>
+              <button @click="copyMsg(m)" class="hover:text-slate-700" :title="'kopieren'" x-text="m.copied ? '✓' : '📋'"></button>
+            </div>
+            <div class="rounded-lg p-3 text-sm chat-md"
+              :class="m.role === 'user' ? 'bg-slate-900 text-white' : 'bg-slate-100'"
+              x-html="renderChat(m.content)"></div>
+            <div x-show="(m.edits || []).filter(e => !e.applied).length > 1" class="mt-1.5">
+              <button @click="applyAll(m)" class="text-xs px-2 py-1 rounded bg-sky-700 text-white hover:bg-sky-800">
+                🔀 Alle <span x-text="(m.edits||[]).filter(e=>!e.applied).length"></span> Vorschläge übernehmen
+              </button>
+            </div>
+            <template x-for="(e, j) in m.edits || []" :key="j">
+              <div class="mt-2 border border-sky-200 bg-sky-50 rounded-md p-2 text-xs">
+                <div class="font-semibold text-sky-800 mb-1">Änderungsvorschlag <span x-text="(j+1)"></span>
+                  <span x-show="e.applied" class="text-emerald-600 ml-2">✓ übernommen</span>
+                  <span x-show="e.miss" class="text-red-600 ml-2" x-text="e.miss"></span>
+                </div>
+                <pre class="bg-red-50 text-red-900 p-1.5 rounded whitespace-pre-wrap mb-1" x-text="'− ' + e.search"></pre>
+                <pre class="bg-emerald-50 text-emerald-900 p-1.5 rounded whitespace-pre-wrap" x-text="'+ ' + e.replace"></pre>
+                <button x-show="!e.applied" @click="applyEdit(e)"
+                  class="mt-1.5 px-2 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white">Übernehmen</button>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+      <!-- Shortcut-Chips (layer-abhängig, wie alte Bench) -->
+      <div class="px-3 pt-2 flex flex-wrap gap-1.5 shrink-0">
+        <template x-for="s in shortcuts" :key="s.q">
+          <button @click="sendText(s.q)" :disabled="thinking"
+            class="text-[11px] px-2 py-0.5 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+            x-text="s.label"></button>
+        </template>
+      </div>
+      <form @submit.prevent="sendText(draft)" class="p-3 pt-2 flex gap-2 shrink-0">
+        <input x-model="draft" :disabled="thinking" placeholder="Rückfrage oder Anweisung an den Reviewer…"
+          class="flex-1 text-sm border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-sky-400">
+        <button :disabled="thinking || !draft.trim()" class="px-4 py-2 rounded-md bg-slate-900 text-white text-sm disabled:opacity-40">⏎</button>
+      </form>
+    </section>
+
+    <!-- Splitter: von links nach rechts ziehen -->
+    <div class="splitter shrink-0" :class="dragging && 'active'" @mousedown.prevent="startDrag($event)"></div>
+
+    <!-- RECHTS: das Dokument -->
+    <section class="flex-1 flex flex-col bg-white min-w-[300px]">
+      <div class="px-4 py-1.5 border-b border-slate-200 flex items-center gap-1 shrink-0">
+        <template x-for="t in [['doc','Dokument'],['diagrams','Diagramme'],['git','Git'],['files','Scope-Files']]" :key="t[0]">
+          <button @click="openTab(t[0])"
+            class="text-xs px-2.5 py-1 rounded-md"
+            :class="docTab === t[0] ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'"
+            x-text="t[1]"></button>
+        </template>
+        <span x-show="flash" class="text-[11px] text-emerald-600 ml-2">✨ übernommen + committed</span>
+        <button x-show="docTab==='doc'" @click="raw = !raw" class="ml-auto text-xs px-2 py-1 border border-slate-300 rounded hover:bg-slate-50"
+          x-text="raw ? 'gerendert' : 'roh (MD)'"></button>
+      </div>
+
+      <!-- Tab: Dokument -->
+      <div x-show="docTab==='doc'" class="flex-1 overflow-y-auto p-6" :class="flash && 'doc-flash'">
+        <div x-show="!raw" class="prose-doc max-w-3xl" x-html="renderedDoc" x-ref="rendered"></div>
+        <pre x-show="raw" class="text-xs whitespace-pre-wrap font-mono" x-text="meta.markdown"></pre>
+      </div>
+
+      <!-- Tab: Diagramme (Galerie + Zoom) -->
+      <div x-show="docTab==='diagrams'" class="flex-1 overflow-y-auto p-6 space-y-6">
+        <template x-for="(d, i) in diagrams" :key="i">
+          <div class="border border-slate-200 rounded-lg p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-semibold text-slate-600" x-text="d.title"></span>
+              <button @click="zoomed = d" class="text-xs px-2 py-0.5 border border-slate-300 rounded hover:bg-slate-50">⛶ Zoom</button>
+            </div>
+            <div class="mermaid flex justify-center" x-init="$nextTick(() => renderMermaidIn($el, d.code))"></div>
+          </div>
+        </template>
+        <div x-show="!diagrams.length" class="text-sm text-slate-400 text-center py-10">Keine Mermaid-Diagramme im Dokument.</div>
+      </div>
+
+      <!-- Tab: Git -->
+      <div x-show="docTab==='git'" class="flex-1 overflow-y-auto p-6">
+        <h3 class="text-xs font-semibold text-slate-600 mb-2">Letzte Commits auf dieses File</h3>
+        <ul class="space-y-1 mb-5">
+          <template x-for="c in git.commits" :key="c.Hash">
+            <li class="text-xs flex gap-2">
+              <code class="text-sky-700" x-text="c.Hash"></code>
+              <span class="text-slate-400" x-text="c.Date"></span>
+              <span class="text-slate-700" x-text="c.Msg"></span>
+            </li>
+          </template>
+        </ul>
+        <h3 class="text-xs font-semibold text-slate-600 mb-2">Letzter Diff</h3>
+        <pre class="text-[11px] font-mono whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded p-3"><template x-for="(l, i) in (git.diff || '').split('\n')" :key="i"><div :class="l.startsWith('+') ? 'text-emerald-700 bg-emerald-50' : l.startsWith('-') ? 'text-red-700 bg-red-50' : 'text-slate-500'" x-text="l || ' '"></div></template></pre>
+      </div>
+
+      <!-- Tab: Scope-Files (aus dem Dokument referenzierte Pfade) -->
+      <div x-show="docTab==='files'" class="flex-1 flex overflow-hidden">
+        <ul class="w-64 shrink-0 border-r border-slate-200 overflow-y-auto p-2 space-y-0.5">
+          <template x-for="f in scopeRefs" :key="f">
+            <li><button @click="openFile(f)"
+              class="w-full text-left text-[11px] px-2 py-1 rounded truncate"
+              :class="file.path && file.path.endsWith(f.replace(/^\//, '')) ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'"
+              x-text="f"></button></li>
+          </template>
+          <li x-show="!scopeRefs.length" class="text-[11px] text-slate-400 p-2">Keine File-Referenzen im Dokument gefunden.</li>
+        </ul>
+        <div class="flex-1 overflow-auto p-4">
+          <div class="text-[11px] text-slate-400 mb-1" x-text="file.path || 'File links wählen'"></div>
+          <pre class="text-[11px] font-mono whitespace-pre"><template x-for="(l, i) in (file.content || '').split('\n')" :key="i"><div><span class="text-slate-300 select-none inline-block w-10 text-right pr-2" x-text="i+1"></span><span x-text="l || ' '"></span></div></template></pre>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Diagramm-Zoom-Modal (ESC oder Klick schließt) -->
+  <div x-show="zoomed" @click="zoomed=null" @keydown.escape.window="zoomed=null"
+    class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-8">
+    <div class="bg-white rounded-lg p-6 max-w-[90vw] max-h-[90vh] overflow-auto">
+      <div class="mermaid flex justify-center" x-init="$watch('zoomed', z => z && $nextTick(() => renderMermaidIn($el, z.code)))"></div>
+    </div>
+  </div>
+
+  <!-- Modals: Approve / Reject / Constraint -->
+  <div x-show="modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click.self="modal=''">
+    <div class="bg-white rounded-lg shadow-xl p-5 w-[28rem]">
+      <h3 class="font-semibold text-sm mb-2"
+        x-text="modal==='approve' ? 'Plan approven' : modal==='reject' ? 'Plan zurückweisen' : 'Approve mit Constraint'"></h3>
+      <p x-show="modal==='approve' && checklist.open > 0" class="text-xs text-amber-700 bg-amber-50 rounded p-2 mb-2">
+        ⚠ <span x-text="checklist.open"></span> Checklist-Punkte sind noch offen.
+      </p>
+      <textarea x-model="modalNote" rows="3"
+        :placeholder="modal==='approve' ? 'Optionale Notiz…' : modal==='reject' ? 'Begründung (landet im Dokument)…' : 'Constraint — unter dieser Bedingung approved…'"
+        class="w-full text-sm border border-slate-300 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-sky-400"></textarea>
+      <div class="flex justify-end gap-2 mt-3">
+        <button @click="modal=''" class="text-xs px-3 py-1.5 rounded border border-slate-300">Abbrechen</button>
+        <button @click="submitModal()" :disabled="busy"
+          class="text-xs px-3 py-1.5 rounded text-white disabled:opacity-50"
+          :class="modal==='reject' ? 'bg-red-600' : 'bg-emerald-600'"
+          x-text="modal==='reject' ? 'Zurückweisen' : 'Approven'"></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });
+
+function workbench() {
+  return {
+    planId: new URLSearchParams(location.search).get('id') || '',
+    meta: {}, chat: [], draft: '', thinking: false, busy: false, raw: false,
+    modal: '', modalNote: '', flash: false, dragging: false,
+    docTab: 'doc', git: { commits: [], diff: '' }, file: {}, zoomed: null,
+    chatW: parseFloat(localStorage.getItem('wb-chatW') || '44'),
+    checklist: { items: [], done: 0, open: 0, expanded: false },
+    ghRepos: {
+      '/root/solartown': 'angelosystems/solartown', '/opt/quantbot': 'angelosystems/quantbot',
+      '/opt/stack': 'angelosystems/stack', '/root/stayawesomeOS': 'angelosystems/stayawesomeOS',
+      '/root/mario-brain': 'angelosystems/mario-brain',
+    },
+
+    async init() { await this.loadDoc(); this.warm(); },
+
+    async loadDoc() {
+      const r = await fetch('/api/plan-content?id=' + encodeURIComponent(this.planId));
+      if (r.ok) this.meta = await r.json();
+      this.parseChecklist();
+      this.$nextTick(() => this.renderMermaid());
+    },
+
+    get renderedDoc() {
+      let md = (this.meta.markdown || '').replace(/^---[\s\S]*?\n---\n/, '');
+      // mermaid-Blöcke für Render markieren
+      md = md.replace(/```mermaid\n([\s\S]*?)```/g, (_, code) =>
+        '<div class="mermaid">' + code.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>');
+      return marked.parse(md);
+    },
+    async renderMermaid() {
+      try { await mermaid.run({ nodes: this.$refs.rendered.querySelectorAll('.mermaid') }); } catch (e) {}
+    },
+    async renderMermaidIn(el, code) {
+      try {
+        const { svg } = await mermaid.render('mm' + Math.floor(performance.now() * 1000), code);
+        el.innerHTML = svg;
+      } catch (e) { el.innerHTML = '<pre class="text-xs text-red-600">' + e.message + '</pre>'; }
+    },
+
+    get diagrams() {
+      const md = this.meta.markdown || '';
+      const out = []; const re = /(?:^|\n)##\s+([^\n]+)[\s\S]*?```mermaid\n([\s\S]*?)```/g;
+      const seen = new Set(); let m;
+      const all = /```mermaid\n([\s\S]*?)```/g;
+      // Titel = nächstliegende H2 davor; Fallback "Diagramm n"
+      let i = 0, mm;
+      while ((mm = all.exec(md))) {
+        const before = md.slice(0, mm.index);
+        const h2 = [...before.matchAll(/^##\s+(.+)$/gm)].pop();
+        out.push({ title: h2 ? h2[1] : 'Diagramm ' + (++i), code: mm[1] });
+      }
+      return out;
+    },
+
+    get scopeRefs() {
+      const md = this.meta.markdown || '';
+      const re = /(?:^|[\s(`])((?:\/(?:root|opt|etc|usr|var)\/[\w@.\/-]+|(?:docs|scripts|tools|internal|settings|schema|cockpit)\/[\w@.\/-]+)\.[\w]+)/g;
+      const out = new Set(); let m;
+      while ((m = re.exec(md))) { if (m[1] !== this.meta.path) out.add(m[1]); }
+      return [...out].slice(0, 60);
+    },
+
+    async openTab(t) {
+      this.docTab = t;
+      if (t === 'git') {
+        const r = await fetch('/api/plan-git?id=' + encodeURIComponent(this.planId));
+        if (r.ok) this.git = await r.json();
+      }
+    },
+    async openFile(f) {
+      const r = await fetch('/api/plan-file?id=' + encodeURIComponent(this.planId) + '&path=' + encodeURIComponent(f));
+      this.file = r.ok ? await r.json() : { path: f, content: '⚠ ' + await r.text() };
+    },
+
+    get shortcuts() {
+      const generic = [
+        { label: 'TL;DR', q: 'Gib mir ein TL;DR dieses Plans in 5 Sätzen.' },
+        { label: 'Edge-Cases', q: 'Welche Edge-Cases und Ausfallpfade fehlen in diesem Plan?' },
+        { label: 'Scope-Check', q: 'Ist der Scope sauber geschnitten? Was gehört raus, was fehlt?' },
+        { label: 'Alternative', q: 'Skizziere die stärkste alternative Architektur und vergleiche sie ehrlich.' },
+        { label: 'Miss-Pfad', q: 'Spiele den wahrscheinlichsten Miss-Pfad durch: was geht zuerst schief, was ist der Blast-Radius, greift der Reverse Path?' },
+      ];
+      const byLayer = {
+        vision: [
+          { label: 'Market-Fit?', q: 'Bewerte den Market-Fit dieser Vision kritisch.' },
+          { label: 'Buy-vs-Build?', q: 'Buy vs. Build: was davon sollten wir nicht selbst bauen?' },
+          { label: 'Dependencies?', q: 'Welche externen Abhängigkeiten gefährden diese Vision?' },
+        ],
+        phase: [
+          { label: 'Reihenfolge?', q: 'Ist die Phasen-Reihenfolge richtig? Welche Abhängigkeiten sind verdeckt?' },
+          { label: 'Gate scharf?', q: 'Sind die Gate-Kriterien dieser Phase scharf genug formuliert, um objektiv zu entscheiden?' },
+        ],
+      };
+      return [...(byLayer[this.meta.layer] || []), ...generic];
+    },
+
+    // ── Checkliste: aus dem MD geparst, Toggle schreibt ins File (git-persistiert) ──
+    parseChecklist() {
+      const re = /^[-*] \[([ x])\] (.+)$/gm;
+      const items = []; let m;
+      while ((m = re.exec(this.meta.markdown || ''))) items.push({ done: m[1] === 'x', text: m[2], raw: m[0] });
+      this.checklist.items = items;
+      this.checklist.done = items.filter(i => i.done).length;
+      this.checklist.open = items.length - this.checklist.done;
+    },
+    async toggleCheck(it) {
+      const newRaw = it.raw.includes('[ ]') ? it.raw.replace('[ ]', '[x]') : it.raw.replace('[x]', '[ ]');
+      await this.postEdit(it.raw, newRaw, true);
+    },
+
+    renderChat(c) {
+      return marked.parse(c.replace(/```edit[\s\S]*?```/g, '*↳ Änderungsvorschlag (siehe Kachel unten)*'));
+    },
+    parseEdits(text) {
+      const out = []; const re = /```edit\s*\n<{7} SEARCH\n([\s\S]*?)\n={7}\n([\s\S]*?)\n>{7} REPLACE\s*\n?```/g;
+      let m; while ((m = re.exec(text))) out.push({ search: m[1], replace: m[2], applied: false, miss: '' });
+      return out;
+    },
+    copyMsg(m) { navigator.clipboard.writeText(m.content); m.copied = true; setTimeout(() => m.copied = false, 1200); },
+
+    async warm() { await this.callReviewer([]); },
+    async sendText(text) {
+      text = (text || '').trim(); if (!text || this.thinking) return;
+      this.draft = '';
+      this.chat.push({ role: 'user', content: text, edits: [], copied: false });
+      await this.callReviewer(this.chat.map(m => ({ role: m.role, content: m.content })));
+    },
+    skeptiker() {
+      this.sendText('🎭 Skeptiker-Modus: Nimm die Gegenposition ein. Versuche aktiv zu belegen, warum dieser Plan ' +
+        'scheitern wird — verdeckte Annahmen, optimistische Erfolgskriterien, fehlende Reverse-Paths, ' +
+        'Abhängigkeiten die brechen. Keine Höflichkeit, nur Substanz. Danach: was müsste sich ändern, damit du approvest?');
+    },
+    async callReviewer(msgs) {
+      this.thinking = true; this.scroll();
+      try {
+        const r = await fetch('/api/review-chat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.planId, messages: msgs }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const a = await r.json();
+        this.chat.push({ role: 'assistant', content: a.content, edits: this.parseEdits(a.content), copied: false });
+      } catch (e) {
+        this.chat.push({ role: 'assistant', content: '⚠ Reviewer nicht erreichbar: ' + e.message, edits: [] });
+      } finally { this.thinking = false; this.scroll(); }
+    },
+
+    async postEdit(search, replace, silentMiss) {
+      const r = await fetch('/api/plan-edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: this.planId, search, replace }),
+      });
+      if (!r.ok && !silentMiss) throw new Error(await r.text());
+      await this.loadDoc();
+      this.flash = true; setTimeout(() => this.flash = false, 1700);
+      return r.ok;
+    },
+    async applyEdit(e) {
+      try { if (await this.postEdit(e.search, e.replace)) e.applied = true; }
+      catch (err) { e.miss = '✗ ' + err.message; }
+    },
+    async applyAll(m) { for (const e of m.edits) if (!e.applied) await this.applyEdit(e); },
+
+    async submitModal() {
+      this.busy = true;
+      try {
+        if (this.modal === 'reject') {
+          if (this.modalNote.trim())
+            await this.postEdit('', '## Reject — Mario — ' + new Date().toISOString().slice(0, 10) + '\n\n' + this.modalNote.trim());
+          await this.setStatus('needs-changes');
+        } else if (this.modal === 'constraint') {
+          if (this.modalNote.trim())
+            await this.postEdit('', '## Constraint (Approve-Bedingung) — Mario — ' + new Date().toISOString().slice(0, 10) + '\n\n' + this.modalNote.trim());
+          await this.setStatus('approved-with-notes');
+        } else {
+          if (this.modalNote.trim())
+            await this.postEdit('', '## Approve-Notiz — Mario — ' + new Date().toISOString().slice(0, 10) + '\n\n' + this.modalNote.trim());
+          await this.setStatus('approved');
+        }
+        this.modal = ''; this.modalNote = '';
+      } catch (e) { alert('miss: ' + e.message); }
+      finally { this.busy = false; }
+    },
+    async setStatus(status) {
+      const r = await fetch('/api/plan-approve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: this.planId, status }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      await this.loadDoc();
+    },
+
+    // ── Splitter: ziehen von links nach rechts ──
+    startDrag(ev) {
+      this.dragging = true;
+      const total = this.$refs.split.getBoundingClientRect();
+      const move = (e) => {
+        const pct = ((e.clientX - total.left) / total.width) * 100;
+        this.chatW = Math.min(70, Math.max(22, pct));
+      };
+      const up = () => {
+        this.dragging = false;
+        localStorage.setItem('wb-chatW', String(this.chatW));
+        window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+      };
+      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+    },
+
+    chipFor(s) {
+      if (!s) return 'bg-slate-100 text-slate-500';
+      if (s.startsWith('approved')) return 'bg-emerald-100 text-emerald-800';
+      if (s === 'review') return 'bg-amber-100 text-amber-800';
+      if (s === 'needs-changes') return 'bg-red-100 text-red-800';
+      if (s === 'done') return 'bg-slate-200 text-slate-500';
+      return 'bg-slate-100 text-slate-600';
+    },
+    ghUrl() {
+      const gh = this.ghRepos[this.meta.repo];
+      if (!gh || !this.meta.path) return '#';
+      return 'https://github.com/' + gh + '/blob/main/' + this.meta.path.slice(this.meta.repo.length + 1);
+    },
+    scroll() { this.$nextTick(() => { const el = this.$refs.chatlog; el.scrollTop = el.scrollHeight; }); },
+  };
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,775 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/spf13/cobra"
+)
+
+var (
+	dsn    string
+	pool   *pgxpool.Pool
+	stPool *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
+)
+
+// pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
+type pgxRows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Close()
+}
+
+func writeJSONArray(w http.ResponseWriter, rows pgxRows) {
+	w.Write([]byte("["))
+	first := true
+	for rows.Next() {
+		var j json.RawMessage
+		if err := rows.Scan(&j); err != nil {
+			continue
+		}
+		if !first {
+			w.Write([]byte(","))
+		}
+		w.Write(j)
+		first = false
+	}
+	w.Write([]byte("]"))
+}
+
+type planItemRow struct {
+	ID, Slug, Layer, Status, Title, Repo, Path string
+}
+
+func planItem(p *pgxpool.Pool, id string) (*planItemRow, error) {
+	if id == "" {
+		return nil, fmt.Errorf("id fehlt")
+	}
+	var it planItemRow
+	err := p.QueryRow(context.Background(),
+		`SELECT id, slug, COALESCE(layer,''), COALESCE(status,''), COALESCE(title,''), repo, path
+		 FROM portfolio.plan_item WHERE id=$1`, id).
+		Scan(&it.ID, &it.Slug, &it.Layer, &it.Status, &it.Title, &it.Repo, &it.Path)
+	if err != nil {
+		return nil, fmt.Errorf("plan_item %s nicht gefunden", id)
+	}
+	// Pfad-Schutz: nur Files unterhalb der registrierten Repo-Wurzel
+	if !strings.HasPrefix(it.Path, it.Repo+"/") {
+		return nil, fmt.Errorf("pfad außerhalb des repos")
+	}
+	return &it, nil
+}
+
+func gitCommit(repo, path, msg string) {
+	add := exec.Command("git", "-C", repo, "add", "--", path)
+	_ = add.Run()
+	c := exec.Command("git", "-C", repo, "commit", "-m", msg+"\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>", "--", path)
+	if out, err := c.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "git commit %s: %v: %s\n", path, err, out)
+	}
+}
+
+// callGlm — Z.ai anthropic-compat (gleicher Vertrag wie tools/_lib/glm-client.js in solartown)
+func callGlm(system string, messages []map[string]string) (string, error) {
+	key := envOr("ZAI_KEY", "")
+	if key == "" {
+		return "", fmt.Errorf("ZAI_KEY nicht gesetzt (systemd-Unit)")
+	}
+	payload := map[string]any{
+		"model":      envOr("REVIEWER_MODEL", "glm-5.1"),
+		"max_tokens": 4096,
+		"system":     system,
+		"messages":   messages,
+	}
+	b, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", envOr("REVIEWER_BASE_URL", "https://api.z.ai/api/anthropic")+"/v1/messages", bytes.NewReader(b))
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("content-type", "application/json")
+	cl := &http.Client{Timeout: 120 * time.Second}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("GLM %d: %.300s", resp.StatusCode, raw)
+	}
+	var out struct {
+		Content []struct{ Type, Text string } `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	for _, c := range out.Content {
+		if c.Type == "text" {
+			sb.WriteString(c.Text)
+		}
+	}
+	return sb.String(), nil
+}
+
+func solartownPool() (*pgxpool.Pool, error) {
+	if stPool != nil {
+		return stPool, nil
+	}
+	p, err := pgxpool.New(context.Background(),
+		envOr("SOLARTOWN_DSN", "postgres://remote:remote@127.0.0.1:5433/solartown_clean?sslmode=disable"))
+	if err != nil {
+		return nil, err
+	}
+	stPool = p
+	return p, nil
+}
+
+func main() {
+	root := &cobra.Command{
+		Use:   "master-kanban",
+		Short: "Master-Kanban CLI — Portfolio-Layer auf mario-brain Postgres",
+	}
+	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
+
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents())
+
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func connect() *pgxpool.Pool {
+	if pool != nil {
+		return pool
+	}
+	p, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "connect:", err)
+		os.Exit(1)
+	}
+	pool = p
+	return p
+}
+
+func cmdList() *cobra.Command {
+	var firma, stage string
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "Liste alle Initiativen aus initiative_summary",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := connect()
+			q := `SELECT id, firma, stage, title, primary_backend, bead_count, vk_count, pr_count, plan_count, last_activity FROM portfolio.initiative_summary`
+			conds := []string{}
+			vals := []any{}
+			if firma != "" {
+				vals = append(vals, firma)
+				conds = append(conds, fmt.Sprintf("firma = $%d", len(vals)))
+			}
+			if stage != "" {
+				vals = append(vals, stage)
+				conds = append(conds, fmt.Sprintf("stage = $%d", len(vals)))
+			}
+			if len(conds) > 0 {
+				q += " WHERE " + strings.Join(conds, " AND ")
+			}
+			q += " ORDER BY firma, stage, id"
+			rows, err := p.Query(context.Background(), q, vals...)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			fmt.Printf("%-32s %-12s %-9s %-50s  🐝  🔧  📦  📄  last\n", "id", "firma", "stage", "title")
+			for rows.Next() {
+				var id, fa, sg, title, pb string
+				var bc, vc, pc, plc int
+				var la *time.Time
+				if err := rows.Scan(&id, &fa, &sg, &title, &pb, &bc, &vc, &pc, &plc, &la); err != nil {
+					return err
+				}
+				laStr := "—"
+				if la != nil {
+					laStr = la.Format("01-02")
+				}
+				if len(title) > 50 {
+					title = title[:47] + "…"
+				}
+				fmt.Printf("%-32s %-12s %-9s %-50s  %2d  %2d  %2d  %2d  %s\n", id, fa, sg, title, bc, vc, pc, plc, laStr)
+			}
+			return rows.Err()
+		},
+	}
+	c.Flags().StringVar(&firma, "firma", "", "Filter firma")
+	c.Flags().StringVar(&stage, "stage", "", "Filter stage")
+	return c
+}
+
+func cmdAdd() *cobra.Command {
+	var firma, stage, title, primary string
+	c := &cobra.Command{
+		Use:   "add <id>",
+		Short: "Initiative anlegen",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := connect()
+			_, err := p.Exec(context.Background(),
+				`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend) VALUES ($1,$2,$3,$4,$5)`,
+				args[0], firma, stage, title, primary)
+			if err == nil {
+				logEvent(p, args[0], "created", "master", "", stage, fmt.Sprintf(`{"title":"%s"}`, escape(title)))
+				fmt.Println("✓ created", args[0])
+			}
+			return err
+		},
+	}
+	c.Flags().StringVar(&firma, "firma", "", "firma (required)")
+	c.Flags().StringVar(&stage, "stage", "idea", "initial stage")
+	c.Flags().StringVar(&title, "title", "", "title (required)")
+	c.Flags().StringVar(&primary, "primary-backend", "plan_file", "primary backend")
+	c.MarkFlagRequired("firma")
+	c.MarkFlagRequired("title")
+	return c
+}
+
+func cmdMove() *cobra.Command {
+	return &cobra.Command{
+		Use:   "move <id> <stage>",
+		Short: "Stage ändern (idea|now|soon|watching|done)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := connect()
+			tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2 WHERE id = $1`, args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				return fmt.Errorf("not found: %s", args[0])
+			}
+			fmt.Printf("✓ moved %s → %s (trigger logs event automatically)\n", args[0], args[1])
+			return nil
+		},
+	}
+}
+
+func cmdLink() *cobra.Command {
+	return &cobra.Command{
+		Use:   "link <id> <kind> <ref>",
+		Short: "Backend-ref linken (kind: bead|vk_workspace|github_pr|plan_file)",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := connect()
+			_, err := p.Exec(context.Background(),
+				`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+				args[0], args[1], args[2])
+			if err == nil {
+				logEvent(p, args[0], "linked", "master", "", "", fmt.Sprintf(`{"kind":"%s","ref":"%s"}`, args[1], escape(args[2])))
+				fmt.Printf("✓ linked %s → %s:%s\n", args[0], args[1], args[2])
+			}
+			return err
+		},
+	}
+}
+
+func cmdSync() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync",
+		Short: "Pull live counts (placeholder — adapter-layer übernimmt das ab Stage 2.5)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Println("master-kanban sync: counts werden vom adapter-layer (Stage 2.5) live in initiative_event geschrieben.")
+			fmt.Println("Diese command bleibt als Manual-Trigger / Backfill für initiale Loads.")
+			return nil
+		},
+	}
+}
+
+func cmdServe() *cobra.Command {
+	var port string
+	c := &cobra.Command{
+		Use:   "serve",
+		Short: "JSON-API für Cockpit-Page (Stage 3)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := connect()
+			http.HandleFunc("/api/initiatives", func(w http.ResponseWriter, r *http.Request) {
+				rows, err := p.Query(r.Context(), `SELECT row_to_json(s) FROM portfolio.initiative_summary s ORDER BY firma, stage, id`)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer rows.Close()
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Write([]byte("["))
+				first := true
+				for rows.Next() {
+					var j json.RawMessage
+					if err := rows.Scan(&j); err != nil {
+						continue
+					}
+					if !first {
+						w.Write([]byte(","))
+					}
+					w.Write(j)
+					first = false
+				}
+				w.Write([]byte("]"))
+			})
+			http.HandleFunc("/api/move", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				var body struct{ Id, Stage string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				_, err := p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2 WHERE id = $1`, body.Id, body.Stage)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+			// A6 — Review-Workbench: Dokument lesen
+			http.HandleFunc("/api/plan-content", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				it, err := planItem(p, r.URL.Query().Get("id"))
+				if err != nil {
+					http.Error(w, err.Error(), 404)
+					return
+				}
+				raw, err := os.ReadFile(it.Path)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{
+					"id": it.ID, "title": it.Title, "status": it.Status, "layer": it.Layer,
+					"repo": it.Repo, "path": it.Path, "markdown": string(raw),
+				})
+			})
+
+			// A6 — pre-warmed GLM-Reviewer-Chat (Z.ai anthropic-compat)
+			http.HandleFunc("/api/review-chat", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct {
+					Id       string              `json:"id"`
+					Messages []map[string]string `json:"messages"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				it, err := planItem(p, body.Id)
+				if err != nil {
+					http.Error(w, err.Error(), 404)
+					return
+				}
+				raw, _ := os.ReadFile(it.Path)
+				system := "Du bist der Plan-Reviewer der Solartown Production Lane (Quick-Schicht R1-R5: " +
+					"R1 Success-Criteria messbar, R2 Rules/Constraints referenziert, R3 Artefakte existieren, " +
+					"R4 Limitations+Decisions dokumentiert, R5 keine Zeitschätzungen). " +
+					"Layer dieses Plans: " + it.Layer + ". Sei präzise, deutsch, konstruktiv-kritisch. " +
+					"Wenn du konkrete Textänderungen am Dokument vorschlägst, gib sie als Blöcke EXAKT in diesem Format:\n" +
+					"```edit\n<<<<<<< SEARCH\n(exakter bestehender Text)\n=======\n(neuer Text)\n>>>>>>> REPLACE\n```\n" +
+					"SEARCH muss wörtlich im Dokument vorkommen. Mehrere Blöcke erlaubt.\n\n" +
+					"=== DOKUMENT (" + it.Path + ") ===\n" + string(raw)
+				msgs := body.Messages
+				if len(msgs) == 0 {
+					msgs = []map[string]string{{"role": "user", "content": "Führe den Preflight-Review durch: " +
+						"Gesamturteil (approve-empfehlung ja/nein), die 3 wichtigsten Schwächen, " +
+						"und konkrete Änderungsvorschläge als edit-Blöcke wo sinnvoll."}}
+				}
+				answer, err := callGlm(system, msgs)
+				if err != nil {
+					http.Error(w, err.Error(), 502)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]string{"role": "assistant", "content": answer})
+			})
+
+			// A6 — Edit-Block übernehmen (SEARCH/REPLACE) + git commit
+			http.HandleFunc("/api/plan-edit", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct{ Id, Search, Replace string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				it, err := planItem(p, body.Id)
+				if err != nil {
+					http.Error(w, err.Error(), 404)
+					return
+				}
+				raw, err := os.ReadFile(it.Path)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				var out string
+				if body.Search == "" { // Append-Modus (z.B. Constraint-Sektion)
+					out = strings.TrimRight(string(raw), "\n") + "\n\n" + body.Replace + "\n"
+				} else if !strings.Contains(string(raw), body.Search) {
+					http.Error(w, "SEARCH-Text nicht im Dokument gefunden", 409)
+					return
+				} else {
+					out = strings.Replace(string(raw), body.Search, body.Replace, 1)
+				}
+				if err := os.WriteFile(it.Path, []byte(out), 0644); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				gitCommit(it.Repo, it.Path, "review-workbench: edit "+it.Slug)
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
+			// A6 — Approve: Frontmatter-status flippen + git commit (Adapter zieht Board nach)
+			http.HandleFunc("/api/plan-approve", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct{ Id, Status string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				if body.Status == "" {
+					body.Status = "approved"
+				}
+				it, err := planItem(p, body.Id)
+				if err != nil {
+					http.Error(w, err.Error(), 404)
+					return
+				}
+				raw, err := os.ReadFile(it.Path)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				re := regexp.MustCompile(`(?m)^status:\s*.*$`)
+				if !re.Match(raw) {
+					http.Error(w, "kein status-Feld im Frontmatter", 409)
+					return
+				}
+				out := re.ReplaceAll(raw, []byte("status: "+body.Status))
+				if err := os.WriteFile(it.Path, out, 0644); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				gitCommit(it.Repo, it.Path, "review-workbench: "+it.Slug+" → "+body.Status)
+				fmt.Fprintln(w, `{"ok":true,"status":"`+body.Status+`"}`)
+			})
+
+			// A6/v3 — Git-Tab: Commits + letzter Diff des Plan-Files
+			http.HandleFunc("/api/plan-git", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				it, err := planItem(p, r.URL.Query().Get("id"))
+				if err != nil {
+					http.Error(w, err.Error(), 404)
+					return
+				}
+				logOut, _ := exec.Command("git", "-C", it.Repo, "log", "-10",
+					"--pretty=format:%h|%ad|%s", "--date=short", "--", it.Path).Output()
+				diffOut, _ := exec.Command("git", "-C", it.Repo, "log", "-1", "-p",
+					"--pretty=format:", "--", it.Path).Output()
+				type cm struct{ Hash, Date, Msg string }
+				var commits []cm
+				for _, line := range strings.Split(strings.TrimSpace(string(logOut)), "\n") {
+					parts := strings.SplitN(line, "|", 3)
+					if len(parts) == 3 {
+						commits = append(commits, cm{parts[0], parts[1], parts[2]})
+					}
+				}
+				d := string(diffOut)
+				if len(d) > 40000 {
+					d = d[:40000] + "\n… (gekürzt)"
+				}
+				json.NewEncoder(w).Encode(map[string]any{"commits": commits, "diff": d})
+			})
+
+			// A6/v3 — Scope-Files-Tab: Datei aus dem Repo des Plans lesen (read-only)
+			http.HandleFunc("/api/plan-file", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				it, err := planItem(p, r.URL.Query().Get("id"))
+				if err != nil {
+					http.Error(w, err.Error(), 404)
+					return
+				}
+				fp := r.URL.Query().Get("path")
+				if !strings.HasPrefix(fp, "/") {
+					fp = it.Repo + "/" + fp
+				}
+				clean := strings.ReplaceAll(fp, "/../", "/") // Pfad-Klettern unterbinden
+				if !strings.HasPrefix(clean, it.Repo+"/") {
+					http.Error(w, "pfad außerhalb des plan-repos", 403)
+					return
+				}
+				raw, err := os.ReadFile(clean)
+				if err != nil {
+					http.Error(w, err.Error(), 404)
+					return
+				}
+				if len(raw) > 300000 {
+					raw = raw[:300000]
+				}
+				json.NewEncoder(w).Encode(map[string]string{"path": clean, "content": string(raw)})
+			})
+
+			// A6 — Workbench-Seite selbst (hinter nginx location /review)
+			http.HandleFunc("/review", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", "no-store")
+				http.ServeFile(w, r, "/var/www/master/review.html")
+			})
+
+			// P4.1 — Plan-Baum einer Initiative (oder alle, für Pipeline-View)
+			http.HandleFunc("/api/plans", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				q := `SELECT row_to_json(t) FROM (
+				        SELECT id, initiative_id, parent_id, slug, layer, status, title, repo, path, updated_at
+				        FROM portfolio.plan_item`
+				var rows pgxRows
+				var err error
+				if init := r.URL.Query().Get("initiative"); init != "" {
+					q += ` WHERE initiative_id = $1 ORDER BY parent_id NULLS FIRST, id) t`
+					rows, err = p.Query(r.Context(), q, init)
+				} else {
+					q += ` ORDER BY initiative_id, parent_id NULLS FIRST, id) t`
+					rows, err = p.Query(r.Context(), q)
+				}
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer rows.Close()
+				writeJSONArray(w, rows)
+			})
+
+			// P4.3 — Bead-Rollup pro Plan-Slug (Konvention: label plan:<slug>)
+			http.HandleFunc("/api/rollup", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				sp, err := solartownPool()
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				rows, err := sp.Query(r.Context(), `SELECT row_to_json(t) FROM (
+					SELECT replace(l.label,'plan:','') AS slug,
+					       count(*) AS total,
+					       count(*) FILTER (WHERE i.status='closed') AS closed
+					FROM beads.labels l JOIN beads.issues i ON i.id=l.issue_id
+					WHERE l.label LIKE 'plan:%' AND l.deleted_at IS NULL AND i.deleted_at IS NULL
+					GROUP BY l.label) t`)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer rows.Close()
+				writeJSONArray(w, rows)
+			})
+
+			// P2.3 — Backlog: offene Beads ohne lane:*-Label (Solartown-Ledger :5433)
+			http.HandleFunc("/api/backlog", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				sp, err := solartownPool()
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				limit := 50
+				if l := r.URL.Query().Get("limit"); l != "" {
+					fmt.Sscanf(l, "%d", &limit)
+				}
+				rows, err := sp.Query(r.Context(), `SELECT row_to_json(t) FROM (
+					SELECT i.id, i.rig, i.title, i.issue_type, i.priority, i.created_at
+					FROM beads.issues i
+					WHERE i.status='open' AND i.deleted_at IS NULL
+					  AND COALESCE(i.ephemeral,false)=false
+					  AND NOT EXISTS (SELECT 1 FROM beads.labels l
+					                  WHERE l.issue_id=i.id AND l.label LIKE 'lane:%' AND l.deleted_at IS NULL)
+					ORDER BY i.created_at DESC LIMIT $1) t`, limit)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer rows.Close()
+				writeJSONArray(w, rows)
+			})
+
+			// P2.3 — Triage: lane:hacker | lane:plan | lane:human als Label setzen
+			http.HandleFunc("/api/triage", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct{ Id, Lane string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				if body.Lane != "hacker" && body.Lane != "plan" && body.Lane != "human" {
+					http.Error(w, "lane must be hacker|plan|human", 400)
+					return
+				}
+				sp, err := solartownPool()
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				var rig string
+				if err := sp.QueryRow(r.Context(),
+					`SELECT rig FROM beads.issues WHERE id=$1 AND deleted_at IS NULL`, body.Id).Scan(&rig); err != nil {
+					http.Error(w, "bead not found: "+body.Id, 404)
+					return
+				}
+				// Re-Triage: alte lane:*-Labels soft-deleten, neues setzen
+				if _, err := sp.Exec(r.Context(),
+					`UPDATE beads.labels SET deleted_at=now()
+					 WHERE issue_id=$1 AND label LIKE 'lane:%' AND deleted_at IS NULL AND label <> 'lane:'||$2`,
+					body.Id, body.Lane); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				if _, err := sp.Exec(r.Context(),
+					`INSERT INTO beads.labels (issue_id, rig, label) VALUES ($1,$2,'lane:'||$3)
+					 ON CONFLICT (issue_id, label) DO UPDATE SET deleted_at=NULL`,
+					body.Id, rig, body.Lane); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
+			http.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Api-Key")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				key := r.Header.Get("X-Api-Key")
+				if key == "" || key != envOr("PORTFOLIO_API_KEY", "dev-secret") {
+					http.Error(w, "unauthorized", 401)
+					return
+				}
+				var ev struct {
+					InitiativeId   string          `json:"initiative_id"`
+					Kind           string          `json:"kind"`
+					SourceBackend  string          `json:"source_backend"`
+					Payload        json.RawMessage `json:"payload"`
+					Actor          string          `json:"actor"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				_, err := p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor) VALUES ($1,$2,$3,$4,$5)`,
+					ev.InitiativeId, ev.Kind, ev.SourceBackend, ev.Payload, ev.Actor)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+			fmt.Println("master-kanban serve auf :" + port)
+			fmt.Println("  GET  /api/initiatives  — initiative_summary VIEW")
+			fmt.Println("  POST /api/move         — {id, stage}")
+			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
+			return http.ListenAndServe(":"+port, nil)
+		},
+	}
+	c.Flags().StringVar(&port, "port", "7770", "HTTP port")
+	return c
+}
+
+func cmdEvents() *cobra.Command {
+	var initiative string
+	var limit int
+	c := &cobra.Command{
+		Use:   "events",
+		Short: "Letzte Events anzeigen",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := connect()
+			q := `SELECT initiative_id, kind, source_backend, COALESCE(actor,''), at FROM portfolio.initiative_event`
+			vals := []any{}
+			if initiative != "" {
+				vals = append(vals, initiative)
+				q += " WHERE initiative_id = $1"
+			}
+			vals = append(vals, limit)
+			q += fmt.Sprintf(" ORDER BY at DESC LIMIT $%d", len(vals))
+			rows, err := p.Query(context.Background(), q, vals...)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			fmt.Printf("%-32s %-18s %-10s %-15s %s\n", "initiative", "kind", "source", "actor", "at")
+			for rows.Next() {
+				var iid, kind, src, actor string
+				var at time.Time
+				if err := rows.Scan(&iid, &kind, &src, &actor, &at); err != nil {
+					return err
+				}
+				fmt.Printf("%-32s %-18s %-10s %-15s %s\n", iid, kind, src, actor, at.Format("2006-01-02 15:04:05"))
+			}
+			return rows.Err()
+		},
+	}
+	c.Flags().StringVar(&initiative, "initiative", "", "Filter initiative_id")
+	c.Flags().IntVar(&limit, "limit", 30, "Max rows")
+	return c
+}
+
+func logEvent(p *pgxpool.Pool, id, kind, src, from, to, payload string) {
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, from_stage, to_stage, payload, actor) VALUES ($1,$2,$3, NULLIF($4,''), NULLIF($5,''), NULLIF($6,'')::jsonb, $7)`,
+		id, kind, src, from, to, payload, "cli")
+}
+
+func escape(s string) string { return strings.ReplaceAll(s, `"`, `\"`) }
