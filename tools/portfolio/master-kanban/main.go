@@ -333,6 +333,40 @@ func cmdServe() *cobra.Command {
 				}
 				w.Write([]byte("]"))
 			})
+			// P5 — Karten-Detail (Side-Peek): Initiative + Links + Event-Historie als ein JSON
+			http.HandleFunc("/api/initiative", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				id := r.URL.Query().Get("id")
+				if id == "" {
+					http.Error(w, "id fehlt", 400)
+					return
+				}
+				var exists bool
+				if err := p.QueryRow(r.Context(),
+					`SELECT EXISTS(SELECT 1 FROM portfolio.initiative_summary WHERE id=$1)`, id).Scan(&exists); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				if !exists {
+					http.Error(w, "initiative nicht gefunden: "+id, 404)
+					return
+				}
+				var j json.RawMessage
+				err := p.QueryRow(r.Context(), `SELECT json_build_object(
+					'initiative', (SELECT row_to_json(s) FROM portfolio.initiative_summary s WHERE s.id=$1),
+					'links', COALESCE((SELECT json_agg(row_to_json(l) ORDER BY l.kind, l.added_at)
+					                   FROM portfolio.initiative_link l WHERE l.initiative_id=$1), '[]'::json),
+					'events', COALESCE((SELECT json_agg(row_to_json(e)) FROM (
+					                     SELECT kind, source_backend, from_stage, to_stage, payload, actor, at
+					                     FROM portfolio.initiative_event WHERE initiative_id=$1
+					                     ORDER BY at DESC LIMIT 40) e), '[]'::json))`, id).Scan(&j)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				w.Write(j)
+			})
 			http.HandleFunc("/api/move", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
@@ -801,6 +835,7 @@ func cmdServe() *cobra.Command {
 			})
 			fmt.Println("master-kanban serve auf :" + port)
 			fmt.Println("  GET  /api/initiatives  — initiative_summary VIEW")
+			fmt.Println("  GET  /api/initiative   — Karten-Detail (?id=…)")
 			fmt.Println("  POST /api/move         — {id, stage}")
 			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
 			fmt.Println("  POST /api/github-webhook — GitHub pull_request (HMAC)")

@@ -20,11 +20,12 @@
   .activity-spark { display:inline-block;width:36px;height:8px;background:linear-gradient(90deg,#e5e7eb 30%,#94a3b8 70%,#475569 100%);border-radius:2px;vertical-align:middle; }
   .activity-fresh { background: linear-gradient(90deg,#dcfce7 0%,#22c55e 100%); }
   .activity-stale { background: #f3f4f6; }
+  [x-cloak] { display: none !important; }
 </style>
 </head>
 <body class="bg-slate-100 text-slate-900">
 
-<div x-data="liveKanban()" x-init="init()" class="min-h-screen">
+<div x-data="liveKanban()" x-init="init()" @keydown.escape.window="closeDetail()" class="min-h-screen">
 
   <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
     <h1 class="text-lg font-semibold tracking-tight">master-kanban <span class="text-xs text-emerald-600 ml-1" x-text="apiOk ? '● live' : '○ offline'"></span></h1>
@@ -89,7 +90,7 @@
                     <span class="text-slate-400 font-normal" x-text="cardsIn(f.id, stage).length"></span>
                   </div>
                   <template x-for="c in cardsIn(f.id, stage)" :key="c.id">
-                    <article :data-id="c.id"
+                    <article :data-id="c.id" @click="openDetail(c.id)"
                       class="card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm">
                       <div class="font-medium leading-snug" x-text="c.title"></div>
                       <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
@@ -204,6 +205,129 @@
       SoT: git + solartown_clean — dieses Board ist reine Projektion
     </footer>
   </main>
+
+  <!-- ════ KARTEN-DETAIL: Side-Peek im Notion-Stil (P5) ════ -->
+  <div x-show="detailOpen" x-cloak x-transition.opacity.duration.150ms
+    class="fixed inset-0 bg-slate-900/20 z-30" @click="closeDetail()"></div>
+
+  <aside x-show="detailOpen" x-cloak
+    x-transition:enter="transition ease-out duration-200"
+    x-transition:enter-start="translate-x-full" x-transition:enter-end="translate-x-0"
+    x-transition:leave="transition ease-in duration-150"
+    x-transition:leave-start="translate-x-0" x-transition:leave-end="translate-x-full"
+    :class="detailExpanded ? 'w-[min(1100px,94vw)]' : 'w-[clamp(400px,40vw,560px)]'"
+    class="fixed right-0 top-0 h-full bg-white shadow-2xl z-40 flex flex-col transition-[width] duration-200">
+
+    <!-- Kopfleiste: aus-/einklappen · Link kopieren · schließen -->
+    <div class="flex items-center gap-1 px-3 py-2 border-b border-slate-200 shrink-0">
+      <button @click="detailExpanded = !detailExpanded"
+        class="p-1.5 rounded hover:bg-slate-100 text-slate-500 font-mono text-sm w-8"
+        :title="detailExpanded ? 'einklappen' : 'ausklappen'" x-text="detailExpanded ? '»' : '«'"></button>
+      <button @click="copyDetailLink()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500 text-sm"
+        :title="copied ? 'kopiert' : 'Link kopieren'" x-text="copied ? '✓' : '🔗'"></button>
+      <span class="text-xs text-slate-400 ml-2 font-mono truncate" x-text="detail ? detail.initiative.id : ''"></span>
+      <button @click="closeDetail()" class="ml-auto p-1.5 rounded hover:bg-slate-100 text-slate-500" title="schließen (Esc)">✕</button>
+    </div>
+
+    <div class="overflow-y-auto flex-1 px-6 py-5">
+      <div x-show="!detail" class="text-sm text-slate-400">lade…</div>
+      <template x-if="detail">
+        <div class="space-y-6" :class="detailExpanded ? 'max-w-3xl mx-auto' : ''">
+
+          <!-- Titel + Stage -->
+          <div>
+            <div class="flex items-start gap-2">
+              <span class="text-2xl leading-tight" x-text="(firmas.find(f => f.id === detail.initiative.firma) || {icon:'▣'}).icon"></span>
+              <h2 class="text-2xl font-semibold leading-tight" x-text="detail.initiative.title"></h2>
+            </div>
+            <div class="mt-2 flex items-center gap-2 text-xs">
+              <span class="px-2 py-0.5 rounded-full font-medium" :class="stageChipCls(detail.initiative.stage)"
+                x-text="stageLabel[detail.initiative.stage] || detail.initiative.stage"></span>
+              <span class="text-slate-400" x-text="(firmas.find(f => f.id === detail.initiative.firma) || {label: detail.initiative.firma}).label"></span>
+            </div>
+          </div>
+
+          <!-- Eigenschaften (Notion-Property-Block) -->
+          <dl class="grid grid-cols-[130px_1fr] gap-y-1.5 text-sm">
+            <dt class="text-slate-400">Backend</dt>
+            <dd x-text="detail.initiative.primary_backend || '—'"></dd>
+            <dt class="text-slate-400">Angelegt</dt>
+            <dd x-text="fmtDate(detail.initiative.created_at)"></dd>
+            <dt class="text-slate-400">Aktualisiert</dt>
+            <dd x-text="fmtDate(detail.initiative.updated_at)"></dd>
+            <dt class="text-slate-400">Letzte Aktivität</dt>
+            <dd x-text="fmtRel(detail.initiative.last_activity)"></dd>
+            <dt class="text-slate-400">Umfang</dt>
+            <dd class="flex gap-3">
+              <span x-show="detail.initiative.bead_count">🐝 <span x-text="detail.initiative.bead_count"></span></span>
+              <span x-show="detail.initiative.vk_count">🔧 <span x-text="detail.initiative.vk_count"></span></span>
+              <span x-show="detail.initiative.pr_count">📦 <span x-text="detail.initiative.pr_count"></span></span>
+              <span x-show="detail.initiative.plan_count">📄 <span x-text="detail.initiative.plan_count"></span></span>
+              <span x-show="!detail.initiative.bead_count && !detail.initiative.vk_count && !detail.initiative.pr_count && !detail.initiative.plan_count" class="text-slate-400">—</span>
+            </dd>
+          </dl>
+
+          <!-- Pläne (aus plan_item, verlinkt in die Review-Workbench) -->
+          <section x-show="detail.initiative.plan_count > 0">
+            <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">Pläne</h3>
+            <div class="space-y-1">
+              <template x-for="it in treeOf(detail.initiative.id)" :key="'d-' + it.id">
+                <div class="flex items-center gap-1.5 text-sm" :style="'padding-left:' + (it.depth*16) + 'px'">
+                  <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
+                  <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" title="Review-Workbench öffnen" x-text="it.title"></a>
+                  <span class="px-1 rounded text-[10px] shrink-0" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
+                  <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500 shrink-0"
+                    :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                </div>
+              </template>
+              <div x-show="!treeOf(detail.initiative.id).length" class="text-sm text-slate-400">lade…</div>
+            </div>
+          </section>
+
+          <!-- Verknüpfungen (Beads, VK-Workspaces, PRs) -->
+          <section x-show="detailLinks().length">
+            <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">Verknüpfungen</h3>
+            <div class="space-y-1">
+              <template x-for="(l, li) in detailLinks()" :key="'l-' + li">
+                <div class="flex items-center gap-2 text-sm">
+                  <span x-text="{bead:'🐝', vk_workspace:'🔧', github_pr:'📦'}[l.kind] || '🔗'"></span>
+                  <template x-if="l.kind === 'github_pr'">
+                    <a :href="prUrl(l.ref)" target="_blank" rel="noopener" class="hover:underline text-sky-700 truncate" x-text="l.ref + ' ↗'"></a>
+                  </template>
+                  <template x-if="l.kind !== 'github_pr'">
+                    <span class="font-mono text-xs text-slate-600 truncate" x-text="l.ref"></span>
+                  </template>
+                  <span class="text-[10px] text-slate-400 ml-auto shrink-0" x-text="fmtDate(l.added_at)"></span>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <!-- Historie (initiative_event, neueste zuerst) -->
+          <section>
+            <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">
+              Historie <span class="font-normal text-slate-400" x-text="'(' + detail.events.length + (detail.events.length === 40 ? '+' : '') + ')'"></span>
+            </h3>
+            <ol class="space-y-2.5">
+              <template x-for="(e, ei) in detail.events" :key="'e-' + ei">
+                <li class="flex gap-2 text-sm">
+                  <span class="shrink-0 w-5 text-center" x-text="eventIcon(e.kind)"></span>
+                  <div class="flex-1 min-w-0">
+                    <div class="leading-snug break-words" x-text="eventText(e)"></div>
+                    <div class="text-[11px] text-slate-400">
+                      <span x-text="e.source_backend"></span><span x-show="e.actor"> · <span x-text="e.actor"></span></span> · <span x-text="fmtDateTime(e.at)"></span>
+                    </div>
+                  </div>
+                </li>
+              </template>
+            </ol>
+            <div x-show="!detail.events.length" class="text-sm text-slate-400">Noch keine Events.</div>
+          </section>
+
+        </div>
+      </template>
+    </div>
+  </aside>
 </div>
 
 <script>
@@ -251,18 +375,94 @@ function liveKanban() {
     backlogRig: '',
     lastFetched: '',
 
+    detail: null,
+    detailOpen: false,
+    detailExpanded: false,
+    copied: false,
+    dragging: false,
+
     rollup: {},
     async init() {
       await this.refresh();
       this.loadRollup();
       setInterval(() => this.refresh(true), 30000);
-      // Deep-Link: #<initiative-id> öffnet Karte + Baum
+      // Deep-Link: #<initiative-id> öffnet Karte + Side-Peek
       const h = location.hash.slice(1);
       if (h) this.$nextTick(async () => {
-        await this.toggleTree(h);
         const el = document.querySelector('[data-id="' + h + '"]');
         if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-sky-400'); }
+        await this.openDetail(h);
       });
+    },
+
+    // ── Karten-Detail: Side-Peek (P5) ──
+    async openDetail(id) {
+      if (this.dragging) return; // Klick direkt nach Drag-Drop nicht als Öffnen werten
+      this.detailOpen = true;
+      this.copied = false;
+      if (!this.detail || this.detail.initiative.id !== id) this.detail = null;
+      history.replaceState(null, '', location.pathname + '#' + id);
+      try {
+        const r = await fetch(this.apiBase + '/api/initiative?id=' + encodeURIComponent(id));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail = await r.json();
+        if (this.detail.initiative.plan_count > 0 && !this.plansCache[id]) {
+          const pr = await fetch(this.apiBase + '/api/plans?initiative=' + encodeURIComponent(id));
+          this.plansCache[id] = pr.ok ? await pr.json() : [];
+        }
+      } catch (e) {
+        this.detailOpen = false;
+        this.lastFetched = 'detail miss: ' + e.message;
+      }
+    },
+    closeDetail() {
+      if (!this.detailOpen) return;
+      this.detailOpen = false;
+      this.detailExpanded = false;
+      history.replaceState(null, '', location.pathname);
+    },
+    copyDetailLink() {
+      if (!this.detail) return;
+      navigator.clipboard.writeText(location.origin + location.pathname + '#' + this.detail.initiative.id);
+      this.copied = true;
+      setTimeout(() => this.copied = false, 1500);
+    },
+    detailLinks() { return ((this.detail && this.detail.links) || []).filter(l => l.kind !== 'plan_file'); },
+    prUrl(ref) { const m = ref.match(/^(.+)#(\d+)$/); return m ? 'https://github.com/' + m[1] + '/pull/' + m[2] : '#'; },
+    stageChipCls(s) {
+      return {
+        idea: 'bg-slate-100 text-slate-600', now: 'bg-red-100 text-red-700',
+        soon: 'bg-sky-100 text-sky-700', watching: 'bg-amber-100 text-amber-800',
+        done: 'bg-emerald-100 text-emerald-800',
+      }[s] || 'bg-slate-100 text-slate-600';
+    },
+    eventIcon(k) {
+      return { created: '✨', moved: '➜', edited: '✏️', linked: '🔗', unlinked: '✂️',
+               activity: '⚡', stage_proposed: '💡', completed: '✅' }[k] || '•';
+    },
+    eventText(e) {
+      const p = e.payload || {};
+      const ref = p.title || p.ref || p.slug || '';
+      switch (e.kind) {
+        case 'created': return 'Angelegt' + (ref ? ': ' + ref : '');
+        case 'moved': return 'Verschoben ' + (e.from_stage || '?') + ' → ' + (e.to_stage || '?');
+        case 'linked': return 'Verknüpft: ' + (p.kind ? p.kind + ' ' : '') + (p.ref || ref);
+        case 'unlinked': return 'Verknüpfung entfernt: ' + (p.ref || ref);
+        case 'activity': return 'Aktivität' + (ref ? ': ' + ref : '');
+        case 'completed': return 'Abgeschlossen' + (ref ? ': ' + ref : '');
+        case 'stage_proposed': return 'Stage-Vorschlag: ' + (e.to_stage || p.stage || '?');
+        case 'edited': return 'Bearbeitet' + (ref ? ': ' + ref : '');
+        default: return e.kind + (ref ? ': ' + ref : '');
+      }
+    },
+    fmtDate(ts) { return ts ? new Date(ts).toLocaleDateString('de-DE', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '—'; },
+    fmtDateTime(ts) { return ts ? new Date(ts).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : '—'; },
+    fmtRel(ts) {
+      if (!ts) return '—';
+      const m = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
+      if (m < 60) return 'vor ' + m + ' min';
+      if (m < 1440) return 'vor ' + Math.floor(m / 60) + ' h';
+      return 'vor ' + Math.floor(m / 1440) + ' d';
     },
     async loadRollup() {
       const r = await fetch(this.apiBase + '/api/rollup');
@@ -380,7 +580,9 @@ function liveKanban() {
         group: 'kanban-' + el.dataset.firma,
         animation: 150,
         ghostClass: 'opacity-30',
+        onStart() { self.dragging = true; },
         async onEnd(evt) {
+          setTimeout(() => self.dragging = false, 0); // Click-Event nach Drop verpufft
           const id = evt.item.dataset.id;
           const newStage = evt.to.dataset.stage;
           try {

@@ -1,7 +1,7 @@
 ---
 title: Deck-Operationalisierung — Triage, Pull-System & Kapazitätsmanagement
 slug: deck-operationalisierung
-status: review
+status: approved
 layer: prd
 parent_plan: null
 scope: Das Master-Kanban (Deck) wird vom Lese-Fenster zum Steuerpult — Triage-Knöpfe, automatische Stage-Übergänge, WIP-Limits mit Pull-Regel, Kapazitätsanzeige je Lane, Lane-Badges (Hacker/Solartown) und ein Vorschlags-Agent, der den Backlog nach umsetzbar × wichtig bewertet.
