@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 )
@@ -1239,6 +1240,9 @@ func cmdServe() *cobra.Command {
 						}
 					}
 				}
+				if ev.Kind == "completed" {
+					go checkAndMoveToWatching(context.Background(), p, ev.InitiativeId)
+				}
 
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
@@ -1317,6 +1321,9 @@ func cmdServe() *cobra.Command {
 						`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor) VALUES ($1,$2,'github',$3,'github-webhook')`,
 						id, kind, payload); err == nil {
 						matched++
+						if kind == "completed" {
+							go checkAndMoveToWatching(context.Background(), p, id)
+						}
 					}
 				}
 				fmt.Fprintf(w, `{"ok":true,"matched":%d}`+"\n", matched)
@@ -1329,12 +1336,40 @@ func cmdServe() *cobra.Command {
 			})
 			// P2 — Dispatch aus der Karte (st-bopm)
 			http.HandleFunc("/api/dispatch", handleDispatch(p))
+
+			// Expose WIP limits to cockpit UI (P2.3)
+			http.HandleFunc("/api/wip-limits", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				limits := map[string]map[string]int{}
+				firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
+				for _, f := range firmas {
+					nowLim, soonLim := getWIPLimits(f)
+					limits[f] = map[string]int{
+						"now":  nowLim,
+						"soon": soonLim,
+					}
+				}
+				json.NewEncoder(w).Encode(limits)
+			})
+
+			// Start background listener for stage changes (P2.3)
+			startStageChangeListener(p)
+
+			// Bootup Catchup (Dawn-Sync for Pull-Regel)
+			firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
+			for _, f := range firmas {
+				go checkAndPull(context.Background(), p, f)
+			}
+
 			fmt.Println("master-kanban serve auf :" + port)
 			fmt.Println("  GET  /api/initiatives  — initiative_summary VIEW")
 			fmt.Println("  GET  /api/initiative   — Karten-Detail (?id=…)")
 			fmt.Println("  POST /api/move         — {id, stage}")
 			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
 			fmt.Println("  POST /api/github-webhook — GitHub pull_request (HMAC)")
+			fmt.Println("  GET  /api/wip-limits   — Configurable WIP limits")
 			return http.ListenAndServe(":"+port, nil)
 		},
 	}
@@ -1705,4 +1740,281 @@ TBD
 		}
 		json.NewEncoder(w).Encode(respData)
 	}
+}
+
+
+type StageChangeNotification struct {
+	ID    string `json:"id"`
+	Firma string `json:"firma"`
+	From  string `json:"from"`
+	To    string `json:"to"`
+}
+
+func getWIPLimits(firma string) (int, int) {
+	nowLimit := 3
+	soonLimit := 5
+	envNow := os.Getenv("PORTFOLIO_WIP_NOW_" + strings.ToUpper(firma))
+	if envNow != "" {
+		fmt.Sscanf(envNow, "%d", &nowLimit)
+	}
+	envSoon := os.Getenv("PORTFOLIO_WIP_SOON_" + strings.ToUpper(firma))
+	if envSoon != "" {
+		fmt.Sscanf(envSoon, "%d", &soonLimit)
+	}
+	return nowLimit, soonLimit
+}
+
+func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID string) {
+	rows, err := p.Query(ctx, `SELECT ref FROM portfolio.initiative_link WHERE initiative_id=$1 AND kind='bead'`, initiativeID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying links: %v\n", err)
+		return
+	}
+	defer rows.Close()
+	var beads []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err == nil {
+			beads = append(beads, ref)
+		}
+	}
+	if len(beads) == 0 {
+		return
+	}
+
+	sp, err := solartownPool()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to solartown pool: %v\n", err)
+		return
+	}
+	var openCount int
+	err = sp.QueryRow(ctx, `SELECT count(*) FROM beads.issues WHERE id=ANY($1) AND status<>'closed' AND deleted_at IS NULL`, beads).Scan(&openCount)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error counting open beads: %v\n", err)
+		return
+	}
+
+	if openCount == 0 {
+		_, err := p.Exec(ctx, `UPDATE portfolio.initiative SET stage='watching' WHERE id=$1 AND stage='now'`, initiativeID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error updating stage to watching: %v\n", err)
+		} else {
+			fmt.Printf("✓ Auto-Stage: %s moved to watching (all beads closed)\n", initiativeID)
+		}
+	}
+}
+
+func getRigIdleCapacity(ctx context.Context, rig string) (int, error) {
+	sp, err := solartownPool()
+	if err != nil {
+		return 0, err
+	}
+	mode := os.Getenv("GT_MODE")
+	if mode == "" {
+		mode = "production"
+	}
+	query := `
+WITH all_polecats AS (
+  SELECT i.id,
+         SUBSTRING(i.id FROM '-polecat-(.+)$') AS name
+    FROM beads.issues i
+    JOIN beads.labels l ON l.issue_id=i.id AND l.rig=i.rig
+                        AND l.label='gt:agent'
+LEFT JOIN beads.labels lm ON lm.issue_id=i.id AND lm.rig=i.rig
+                        AND lm.label LIKE 'mode:%'
+                        AND lm.deleted_at IS NULL
+   WHERE i.rig=$1
+     AND i.id LIKE $2
+     AND (
+       lm.label = $3
+       OR (lm.label IS NULL AND $4 = 'production')
+     )
+),
+busy_assignees AS (
+  SELECT DISTINCT assignee FROM beads.issues
+   WHERE rig=$5
+     AND status IN ('in_progress','hooked')
+     AND title NOT LIKE 'Merge:%'
+     AND assignee LIKE $6
+)
+SELECT COUNT(*) FROM all_polecats
+ WHERE name IS NOT NULL
+   AND name NOT LIKE '%reviewer%'
+   AND ($7 || '/polecats/' || name) NOT IN (SELECT assignee FROM busy_assignees)
+   AND ($8 || '/' || name) NOT IN (SELECT assignee FROM busy_assignees)
+`
+	var count int
+	err = sp.QueryRow(ctx, query,
+		rig, "%-"+rig+"-polecat-%", "mode:"+mode, mode, rig, rig+"/%", rig, rig,
+	).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func hasCapacityForBeads(ctx context.Context, beads []string) (bool, error) {
+	if len(beads) == 0 {
+		return true, nil
+	}
+	sp, err := solartownPool()
+	if err != nil {
+		return false, err
+	}
+
+	for _, beadID := range beads {
+		var rig string
+		err := sp.QueryRow(ctx, `SELECT rig FROM beads.issues WHERE id=$1 AND deleted_at IS NULL`, beadID).Scan(&rig)
+		if err != nil {
+			continue
+		}
+
+		var hasHackerLabel bool
+		err = sp.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM beads.labels WHERE issue_id=$1 AND label='lane:hacker' AND deleted_at IS NULL)`, beadID).Scan(&hasHackerLabel)
+		if err != nil {
+			hasHackerLabel = false
+		}
+
+		if hasHackerLabel {
+			var activeVKCount int
+			err = sp.QueryRow(ctx, `SELECT count(*) FROM beads.issues WHERE rig=$1 AND status IN ('in_progress','hooked') AND assignee LIKE 'vk/%' AND deleted_at IS NULL`, rig).Scan(&activeVKCount)
+			if err != nil {
+				return false, err
+			}
+			if activeVKCount >= 5 {
+				fmt.Printf("Pull-Regel: Rig %s has no free vk-slots (%d active >= 5 limit). No pull.\n", rig, activeVKCount)
+				return false, nil
+			}
+		} else {
+			idlePolecats, err := getRigIdleCapacity(ctx, rig)
+			if err != nil {
+				return false, err
+			}
+			if idlePolecats <= 0 {
+				fmt.Printf("Pull-Regel: Rig %s has no idle polecats (%d available). No pull.\n", rig, idlePolecats)
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+func checkAndPull(ctx context.Context, p *pgxpool.Pool, firma string) {
+	nowLimit, _ := getWIPLimits(firma)
+
+	var nowCount int
+	err := p.QueryRow(ctx, `SELECT count(*) FROM portfolio.initiative WHERE firma=$1 AND stage='now' AND archived_at IS NULL`, firma).Scan(&nowCount)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error counting now stage: %v\n", err)
+		return
+	}
+
+	if nowCount >= nowLimit {
+		fmt.Printf("Pull-Regel: Firma %s has now stage count %d >= limit %d. No pull.\n", firma, nowCount, nowLimit)
+		return
+	}
+
+	var soonID string
+	err = p.QueryRow(ctx, `SELECT id FROM portfolio.initiative WHERE firma=$1 AND stage='soon' AND archived_at IS NULL ORDER BY created_at ASC, id ASC LIMIT 1`, firma).Scan(&soonID)
+	if err != nil {
+		return
+	}
+
+	rows, err := p.Query(ctx, `SELECT ref FROM portfolio.initiative_link WHERE initiative_id=$1 AND kind='bead'`, soonID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying links for soon card %s: %v\n", soonID, err)
+		return
+	}
+	defer rows.Close()
+	var beads []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err == nil {
+			beads = append(beads, ref)
+		}
+	}
+
+	hasCap, err := hasCapacityForBeads(ctx, beads)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking capacity for beads: %v\n", err)
+		return
+	}
+	if !hasCap {
+		return
+	}
+
+	_, err = p.Exec(ctx, `UPDATE portfolio.initiative SET stage='now' WHERE id=$1`, soonID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error pulling card %s to now: %v\n", soonID, err)
+		return
+	}
+	fmt.Printf("✓ Pull-Regel: Card %s pulled from soon to now!\n", soonID)
+
+	if len(beads) > 0 {
+		sp, err := solartownPool()
+		if err != nil {
+			return
+		}
+		openRows, err := sp.Query(ctx, `SELECT id, rig FROM beads.issues WHERE id=ANY($1) AND status='open' AND deleted_at IS NULL`, beads)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error querying open beads to schedule: %v\n", err)
+			return
+		}
+		defer openRows.Close()
+		for openRows.Next() {
+			var bid, brig string
+			if err := openRows.Scan(&bid, &brig); err == nil {
+				fmt.Printf("Scheduling bead %s on rig %s...\n", bid, brig)
+				cmd := exec.Command("gt", "sling", bid, brig)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					fmt.Fprintf(os.Stderr, "  ✗ gt sling %s %s: %v\nOutput: %s\n", bid, brig, err, out)
+				} else {
+					fmt.Printf("  ✓ Scheduled %s on %s via gt sling\n", bid, brig)
+				}
+			}
+		}
+	}
+}
+
+func startStageChangeListener(p *pgxpool.Pool) {
+	go func() {
+		for {
+			conn, err := pgx.Connect(context.Background(), dsn)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Listener connect error:", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			
+			_, err = conn.Exec(context.Background(), "LISTEN portfolio_stage_change")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Listener LISTEN error:", err)
+				conn.Close(context.Background())
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			
+			fmt.Println("Listening for portfolio_stage_change notifications...")
+			for {
+				notification, err := conn.WaitForNotification(context.Background())
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "Listener WaitForNotification error:", err)
+					conn.Close(context.Background())
+					break
+				}
+				
+				fmt.Printf("Received portfolio_stage_change notification: %s\n", notification.Payload)
+				var payload StageChangeNotification
+				if err := json.Unmarshal([]byte(notification.Payload), &payload); err != nil {
+					fmt.Fprintf(os.Stderr, "Error parsing notification payload: %v\n", err)
+					continue
+				}
+				
+				if payload.To == "watching" {
+					fmt.Printf("Stage transition detected: Card %s moved to watching. Running Pull logic for %s...\n", payload.ID, payload.Firma)
+					go checkAndPull(context.Background(), p, payload.Firma)
+				}
+			}
+		}
+	}()
 }
