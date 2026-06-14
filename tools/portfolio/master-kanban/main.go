@@ -298,8 +298,8 @@ func cmdMove() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
-			                                              tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = 			                      `, args[0], args[1])
-			                                              if err != nil {
+			tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = 			                      `, args[0], args[1])
+			if err != nil {
 				return err
 			}
 			if tag.RowsAffected() == 0 {
@@ -622,8 +622,8 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
-				                                                              _, err := p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = 				                              `, body.Id, body.Stage)
-				                                                              if err != nil {
+				_, err := p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = 				                              `, body.Id, body.Stage)
+				if err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
@@ -897,15 +897,15 @@ func cmdServe() *cobra.Command {
 				}
 
 				type BacklogItem struct {
-					ID                 string    `json:"id"`
-					Rig                string    `json:"rig"`
-					Title              string    `json:"title"`
-					IssueType          string    `json:"issue_type"`
-					Priority           int       `json:"priority"`
-					CreatedAt          time.Time `json:"created_at"`
-					PlanCount          int       `json:"plan_count"`
-					HasLanePlanSignal  bool      `json:"has_lane_plan_signal"`
-					Firma              string    `json:"firma"`
+					ID                string    `json:"id"`
+					Rig               string    `json:"rig"`
+					Title             string    `json:"title"`
+					IssueType         string    `json:"issue_type"`
+					Priority          int       `json:"priority"`
+					CreatedAt         time.Time `json:"created_at"`
+					PlanCount         int       `json:"plan_count"`
+					HasLanePlanSignal bool      `json:"has_lane_plan_signal"`
+					Firma             string    `json:"firma"`
 				}
 
 				var items []BacklogItem
@@ -1092,7 +1092,7 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 500)
 					return
 				}
-				
+
 				firmaRig := map[string]string{
 					"stayawesome": "stayawesomeOS",
 					"solartown":   "testrig",
@@ -1101,7 +1101,7 @@ func cmdServe() *cobra.Command {
 					"angeloos":    "clean",
 					"mariobrain":  "mariobrain",
 				}
-				
+
 				type capData struct {
 					Polecats int `json:"polecats"`
 					VKSlots  int `json:"vkslots"`
@@ -1127,8 +1127,10 @@ func cmdServe() *cobra.Command {
 
 				for fID, rig := range firmaRig {
 					rows, err := sp.Query(r.Context(), q, rig, "%-"+rig+"-polecat-%", "mode:production", "production", rig+"/%")
-					if err != nil { continue }
-					
+					if err != nil {
+						continue
+					}
+
 					idle := 0
 					for rows.Next() {
 						var name string
@@ -1139,15 +1141,15 @@ func cmdServe() *cobra.Command {
 						}
 					}
 					rows.Close()
-					
+
 					var vkCount int
 					sp.QueryRow(r.Context(), "SELECT count(*) FROM beads.issues WHERE rig=$1 AND status='hooked' AND assignee LIKE 'vk/%'", rig).Scan(&vkCount)
-					
+
 					slots := 5 - vkCount
-					
+
 					res[fID] = capData{Polecats: idle, VKSlots: slots}
 				}
-				
+
 				json.NewEncoder(w).Encode(res)
 			})
 
@@ -1168,41 +1170,42 @@ func cmdServe() *cobra.Command {
 					return
 				}
 				var ev struct {
-					InitiativeId   string          `json:"initiative_id"`
-					Kind           string          `json:"kind"`
-					SourceBackend  string          `json:"source_backend"`
-					Payload        json.RawMessage `json:"payload"`
-					Actor          string          `json:"actor"`
+					InitiativeId  string          `json:"initiative_id"`
+					Kind          string          `json:"kind"`
+					SourceBackend string          `json:"source_backend"`
+					Payload       json.RawMessage `json:"payload"`
+					Actor         string          `json:"actor"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
 					http.Error(w, err.Error(), 400)
 					return
 				}
-				                                _, err := p.Exec(r.Context(),
-				                                        `INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor) VALUES ($1,$2,$3,$4,$5)`,
-				                                        ev.InitiativeId, ev.Kind, ev.SourceBackend, ev.Payload, ev.Actor)
-				                                if err != nil {
-				                                        http.Error(w, err.Error(), 500)
-				                                        return
-				                                }
-				
-				                                if ev.Kind == "stage_proposed" {
-				                                        var pLoad struct {
-				                                                Stage string `json:"stage"`
-				                                        }
-				                                        if err := json.Unmarshal(ev.Payload, &pLoad); err == nil && pLoad.Stage != "" {
-				                                                var currentStage string
-				                                                var locked bool
-				                                                if err := p.QueryRow(r.Context(), `SELECT stage, COALESCE(stage_locked_by_human, false) FROM portfolio.initiative WHERE id=$1`, ev.InitiativeId).Scan(&currentStage, &locked); err == nil {
-				                                                        stageRank := map[string]int{"idea": 0, "soon": 1, "now": 2, "watching": 3, "done": 4}
-				                                                        if !locked && stageRank[pLoad.Stage] > stageRank[currentStage] {
-				                                                                _, _ = p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage=$2 WHERE id=$1`, ev.InitiativeId, pLoad.Stage)
-				                                                        }
-				                                                }
-				                                        }
-				                                }
-				
-				                                fmt.Fprintln(w, `{"ok":true}`)			})
+				_, err := p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor) VALUES ($1,$2,$3,$4,$5)`,
+					ev.InitiativeId, ev.Kind, ev.SourceBackend, ev.Payload, ev.Actor)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				if ev.Kind == "stage_proposed" {
+					var pLoad struct {
+						Stage string `json:"stage"`
+					}
+					if err := json.Unmarshal(ev.Payload, &pLoad); err == nil && pLoad.Stage != "" {
+						var currentStage string
+						var locked bool
+						if err := p.QueryRow(r.Context(), `SELECT stage, COALESCE(stage_locked_by_human, false) FROM portfolio.initiative WHERE id=$1`, ev.InitiativeId).Scan(&currentStage, &locked); err == nil {
+							stageRank := map[string]int{"idea": 0, "soon": 1, "now": 2, "watching": 3, "done": 4}
+							if !locked && stageRank[pLoad.Stage] > stageRank[currentStage] {
+								_, _ = p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage=$2 WHERE id=$1`, ev.InitiativeId, pLoad.Stage)
+							}
+						}
+					}
+				}
+
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
 			// GitHub-Webhook (Org angelosystems): HMAC-verifiziert, mappt
 			// pull_request-Events auf initiative_link kind=github_pr mit
 			// ref-Konvention owner/repo#N. Edge-triggered statt Polling.
