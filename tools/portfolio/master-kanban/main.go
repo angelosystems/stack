@@ -1393,6 +1393,125 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(res)
 			})
 
+			// POST /api/dispatch
+			http.HandleFunc("/api/dispatch", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+
+				var body struct {
+					Id   string `json:"id"`
+					Lane string `json:"lane"`
+					Note string `json:"note"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				if body.Id == "" {
+					http.Error(w, "id is required", 400)
+					return
+				}
+
+				if body.Lane != "hack" {
+					http.Error(w, "lane must be hack", 400)
+					return
+				}
+
+				// 1. Fetch initiative title and company (firma) from portfolio database
+				var title, firma string
+				err := p.QueryRow(r.Context(),
+					`SELECT title, firma FROM portfolio.initiative WHERE id = $1`, body.Id).
+					Scan(&title, &firma)
+				if err != nil {
+					http.Error(w, "initiative not found: "+err.Error(), 404)
+					return
+				}
+
+				// 2. Determine repo from plan_item or fallback to company default
+				var repo string
+				_ = p.QueryRow(r.Context(),
+					`SELECT repo FROM portfolio.plan_item WHERE initiative_id = $1 LIMIT 1`, body.Id).
+					Scan(&repo)
+
+				if repo == "" {
+					firmaRepo := map[string]string{
+						"stayawesome": "/root/stayawesomeOS",
+						"solartown":   "/root/solartown",
+						"quantbot":    "/opt/quantbot",
+						"mariobrain":  "/root/mario-brain",
+						"stack":       "/opt/stack",
+					}
+					repo = firmaRepo[firma]
+				}
+				if repo == "" {
+					repo = "/root/solartown" // fallback
+				}
+
+				// 3. Execute vk-delegate to spawn workspace
+				exe := findVkDelegate()
+				
+				// Build prompt: if note is provided use it, otherwise use title
+				prompt := body.Note
+				if prompt == "" {
+					prompt = title
+				}
+
+				cmd := exec.Command(exe,
+					"--repo", repo,
+					"--name", title,
+					"--prompt", prompt,
+				)
+
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout = &stdout
+				cmd.Stderr = &stderr
+
+				if err := cmd.Run(); err != nil {
+					errMsg := fmt.Sprintf("vk-delegate failed: %v, stderr: %s", err, stderr.String())
+					http.Error(w, errMsg, 500)
+					return
+				}
+
+				// 4. Parse workspace_id from stdout
+				re := regexp.MustCompile(`workspace_id:\s+([a-f0-9\-]+)`)
+				matches := re.FindStringSubmatch(stdout.String())
+				if len(matches) < 2 {
+					http.Error(w, "failed to parse workspace_id from vk-delegate output: "+stdout.String(), 500)
+					return
+				}
+				wsID := matches[1]
+
+				// 5. Write dispatched event to initiative_event
+				payloadBytes, _ := json.Marshal(map[string]string{
+					"lane": body.Lane,
+					"ref":  wsID,
+				})
+				_, err = p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1, 'dispatched', 'vk', $2::jsonb, 'master-kanban')`,
+					body.Id, string(payloadBytes))
+				if err != nil {
+					http.Error(w, "failed to write initiative_event: "+err.Error(), 500)
+					return
+				}
+
+				// 6. Return successful response with workspace_id
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{
+					"ok":           true,
+					"workspace_id": wsID,
+				})
+			})
+
 			http.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
@@ -2155,4 +2274,29 @@ func cmdCapture() *cobra.Command {
 	}
 	c.Flags().StringVarP(&firma, "firma", "f", "", "Firma (stayawesome|solartown|quantbot|mariobrain|angeloos|stack)")
 	return c
+}
+
+var vkDelegatePath string
+
+func findVkDelegate() string {
+	if vkDelegatePath != "" {
+		return vkDelegatePath
+	}
+	paths := []string{
+		"/root/solartown/tools/vk-delegate/vk-delegate",
+		"./tools/vk-delegate/vk-delegate",
+		"vk-delegate",
+	}
+	for _, p := range paths {
+		if strings.HasPrefix(p, "/") {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		} else {
+			if lp, err := exec.LookPath(p); err == nil {
+				return lp
+			}
+		}
+	}
+	return "/root/solartown/tools/vk-delegate/vk-delegate"
 }

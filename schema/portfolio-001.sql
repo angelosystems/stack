@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS portfolio.initiative_link (
 CREATE TABLE IF NOT EXISTS portfolio.initiative_event (
   id              bigserial PRIMARY KEY,
   initiative_id   text NOT NULL REFERENCES portfolio.initiative(id) ON DELETE CASCADE,
-  kind            text NOT NULL CHECK (kind IN ('created','moved','edited','linked','unlinked','activity','stage_proposed','completed')),
+  kind            text NOT NULL CHECK (kind IN ('created','moved','edited','linked','unlinked','activity','stage_proposed','completed','commented','archived','dispatched')),
   source_backend  text NOT NULL CHECK (source_backend IN ('vk','solartown','github','plan_file','master')),
   from_stage      text,
   to_stage        text,
