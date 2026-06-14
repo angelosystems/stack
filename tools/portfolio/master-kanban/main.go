@@ -894,20 +894,139 @@ func cmdServe() *cobra.Command {
 				if l := r.URL.Query().Get("limit"); l != "" {
 					fmt.Sscanf(l, "%d", &limit)
 				}
-				rows, err := sp.Query(r.Context(), `SELECT row_to_json(t) FROM (
-					SELECT i.id, i.rig, i.title, i.issue_type, i.priority, i.created_at
+
+				type BacklogItem struct {
+					ID                 string    `json:"id"`
+					Rig                string    `json:"rig"`
+					Title              string    `json:"title"`
+					IssueType          string    `json:"issue_type"`
+					Priority           int       `json:"priority"`
+					CreatedAt          time.Time `json:"created_at"`
+					PlanCount          int       `json:"plan_count"`
+					HasLanePlanSignal  bool      `json:"has_lane_plan_signal"`
+					Firma              string    `json:"firma"`
+				}
+
+				var items []BacklogItem
+				rows, err := sp.Query(r.Context(), `
+					SELECT i.id, i.rig, i.title, i.issue_type, COALESCE(i.priority, 0), i.created_at
 					FROM beads.issues i
 					WHERE i.status='open' AND i.deleted_at IS NULL
 					  AND COALESCE(i.ephemeral,false)=false
 					  AND NOT EXISTS (SELECT 1 FROM beads.labels l
 					                  WHERE l.issue_id=i.id AND l.label LIKE 'lane:%' AND l.deleted_at IS NULL)
-					ORDER BY i.created_at DESC LIMIT $1) t`, limit)
+					ORDER BY i.created_at DESC LIMIT $1`, limit)
 				if err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
 				defer rows.Close()
-				writeJSONArray(w, rows)
+
+				for rows.Next() {
+					var item BacklogItem
+					if err := rows.Scan(&item.ID, &item.Rig, &item.Title, &item.IssueType, &item.Priority, &item.CreatedAt); err != nil {
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					items = append(items, item)
+				}
+
+				if len(items) > 0 {
+					ids := make([]string, len(items))
+					for i, item := range items {
+						ids[i] = item.ID
+					}
+
+					hasSignalMap := make(map[string]bool)
+					signalRows, err := sp.Query(r.Context(), `
+						SELECT DISTINCT issue_id FROM beads.labels
+						WHERE label = 'lane:plan' AND issue_id = ANY($1)`, ids)
+					if err == nil {
+						defer signalRows.Close()
+						for signalRows.Next() {
+							var issueID string
+							if err := signalRows.Scan(&issueID); err == nil {
+								hasSignalMap[issueID] = true
+							}
+						}
+					}
+
+					type initInfo struct {
+						Firma     string
+						PlanCount int
+					}
+					initMap := make(map[string]initInfo)
+					if pool != nil {
+						portfolioRows, err := pool.Query(r.Context(), `
+							SELECT l.ref AS bead_id, i.firma,
+							       COALESCE((SELECT count(*) FROM portfolio.initiative_link pl WHERE pl.initiative_id = i.id AND pl.kind = 'plan_file'), 0) AS plan_count
+							FROM portfolio.initiative_link l
+							JOIN portfolio.initiative i ON i.id = l.initiative_id
+							WHERE l.kind = 'bead' AND l.ref = ANY($1)`, ids)
+						if err == nil {
+							defer portfolioRows.Close()
+							for portfolioRows.Next() {
+								var beadID, firma string
+								var planCount int
+								if err := portfolioRows.Scan(&beadID, &firma, &planCount); err == nil {
+									initMap[beadID] = initInfo{
+										Firma:     firma,
+										PlanCount: planCount,
+									}
+								}
+							}
+						}
+					}
+
+					for i := range items {
+						item := &items[i]
+						item.HasLanePlanSignal = hasSignalMap[item.ID]
+						if info, ok := initMap[item.ID]; ok {
+							item.Firma = info.Firma
+							item.PlanCount = info.PlanCount
+						} else {
+							prefix := ""
+							if parts := strings.Split(item.ID, "-"); len(parts) > 0 {
+								prefix = parts[0]
+							}
+							firma := ""
+							switch prefix {
+							case "sa":
+								firma = "stayawesome"
+							case "st":
+								firma = "solartown"
+							case "qb":
+								firma = "quantbot"
+							case "mb":
+								firma = "mariobrain"
+							case "ag", "sk":
+								firma = "stack"
+							default:
+								switch item.Rig {
+								case "stayawesomeOS":
+									firma = "stayawesome"
+								case "testrig":
+									firma = "solartown"
+								case "quantumshift":
+									firma = "quantbot"
+								case "mariobrain":
+									firma = "mariobrain"
+								case "stack":
+									firma = "stack"
+								case "clean":
+									firma = "angeloos"
+								}
+							}
+							item.Firma = firma
+							item.PlanCount = 0
+						}
+					}
+				}
+
+				if items == nil {
+					items = []BacklogItem{}
+				}
+				json.NewEncoder(w).Encode(items)
 			})
 
 			// P2.3 — Triage: lane:hacker | lane:plan | lane:human als Label setzen
@@ -927,8 +1046,11 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
-				if body.Lane != "hacker" && body.Lane != "plan" && body.Lane != "human" {
-					http.Error(w, "lane must be hacker|plan|human", 400)
+				if body.Lane == "hack" {
+					body.Lane = "hacker"
+				}
+				if body.Lane != "hacker" && body.Lane != "plan" && body.Lane != "plan+deep-tech" && body.Lane != "plan+deep-business" && body.Lane != "human" {
+					http.Error(w, "lane must be hacker|plan|plan+deep-tech|plan+deep-business|human", 400)
 					return
 				}
 				sp, err := solartownPool()

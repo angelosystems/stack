@@ -25,7 +25,7 @@
 </head>
 <body class="bg-slate-100 text-slate-900">
 
-<div x-data="liveKanban()" x-init="init()" @keydown.escape.window="closeDetail()" class="min-h-screen">
+<div x-data="liveKanban()" x-init="init()" @keydown.escape.window="closeDetail(); closeDispatch()" class="min-h-screen">
 
   <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
     <h1 class="text-lg font-semibold tracking-tight">master-kanban <span class="text-xs text-emerald-600 ml-1" x-text="apiOk ? '● live' : '○ offline'"></span></h1>
@@ -201,8 +201,7 @@
               <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 shrink-0" x-text="b.rig"></span>
               <span class="flex-1 truncate" x-text="b.title"></span>
               <span class="text-[10px] text-slate-400 shrink-0" x-text="ageOf(b.created_at)"></span>
-              <button @click="triage(b, 'hacker')" class="shrink-0 text-xs px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-900">→ Hacker</button>
-              <button @click="triage(b, 'plan')" class="shrink-0 text-xs px-2 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900">→ Plan</button>
+              <button @click="openDispatch(b)" class="shrink-0 text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>
             </li>
           </template>
         </ul>
@@ -376,6 +375,59 @@
       </template>
     </div>
   </aside>
+
+  <!-- ════ DISPATCH/TRIAGE MODAL (SC4) ════ -->
+  <div x-show="dispatchOpen" x-cloak class="fixed inset-0 bg-slate-900/40 z-50 flex items-center justify-center p-4" @click.self="closeDispatch()">
+    <div class="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden flex flex-col"
+         x-show="dispatchOpen"
+         x-transition:enter="transition ease-out duration-150"
+         x-transition:enter-start="opacity-0 scale-95"
+         x-transition:enter-end="opacity-100 scale-100"
+         x-transition:leave="transition ease-in duration-100"
+         x-transition:leave-start="opacity-100 scale-100"
+         x-transition:leave-end="opacity-0 scale-95"
+         @click.stop>
+      <header class="px-5 py-3 border-b border-slate-200 flex justify-between items-center">
+        <h3 class="font-semibold text-slate-800">Bead Triage / Dispatch</h3>
+        <button @click="closeDispatch()" class="text-slate-400 hover:text-slate-600">✕</button>
+      </header>
+      <main class="px-5 py-4 space-y-4 text-sm text-slate-600">
+        <div>
+          <span class="text-xs font-mono text-slate-400" x-text="dispatchBead ? dispatchBead.id : ''"></span>
+          <h4 class="font-medium text-slate-900 text-base" x-text="dispatchBead ? dispatchBead.title : ''"></h4>
+        </div>
+        
+        <div class="bg-slate-50 rounded p-3 text-xs space-y-1">
+          <div><span class="font-medium">Rig:</span> <span x-text="dispatchBead ? dispatchBead.rig : '—'"></span></div>
+          <div><span class="font-medium">Firma:</span> <span x-text="dispatchBead ? (firmas.find(f => f.id === dispatchBead.firma) || {label: dispatchBead.firma}).label : '—'"></span></div>
+          <div><span class="font-medium">Pläne:</span> <span x-text="dispatchBead ? dispatchBead.plan_count : 0"></span></div>
+          <div><span class="font-medium">lane:plan Signal:</span> <span x-text="dispatchBead ? (dispatchBead.has_lane_plan_signal ? 'Ja' : 'Nein') : '—'"></span></div>
+        </div>
+
+        <div class="space-y-1.5">
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Lane Vorschlag</label>
+          <div class="flex items-center gap-2">
+            <span class="text-xs bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded font-semibold" 
+                  x-text="getProposedLane(dispatchBead) === 'hack' ? 'Hacker-Lane (hack)' : 'Plan-Pipeline (' + getProposedLane(dispatchBead) + ')'"></span>
+          </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Ausgewählte Lane</label>
+          <select x-model="dispatchLane" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white">
+            <option value="hack">hack</option>
+            <option value="plan">plan</option>
+            <option value="plan+deep-tech">plan+deep-tech</option>
+            <option value="plan+deep-business">plan+deep-business</option>
+          </select>
+        </div>
+      </main>
+      <footer class="px-5 py-3 border-t border-slate-200 bg-slate-50 flex justify-end gap-2">
+        <button @click="closeDispatch()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-100 bg-white">Abbrechen</button>
+        <button @click="submitDispatch()" class="text-xs px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-semibold">Triage bestätigen</button>
+      </footer>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -422,6 +474,10 @@ function liveKanban() {
     backlog: [],
     backlogRig: '',
     lastFetched: '',
+
+    dispatchOpen: false,
+    dispatchBead: null,
+    dispatchLane: 'hack',
 
     detail: null,
     detailOpen: false,
@@ -730,6 +786,42 @@ function liveKanban() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.backlog = this.backlog.filter(x => x.id !== b.id);
       } catch (e) { alert('triage miss: ' + e.message); }
+    },
+    openDispatch(b) {
+      this.dispatchBead = b;
+      this.dispatchLane = this.getProposedLane(b);
+      this.dispatchOpen = true;
+    },
+    closeDispatch() {
+      this.dispatchOpen = false;
+      this.dispatchBead = null;
+    },
+    getProposedLane(b) {
+      if (!b) return 'hack';
+      const isQuantbot = b.firma === 'quantbot' || (b.firma && b.firma.toLowerCase().includes('quantbot'));
+      const isCrossRig = b.firma === 'cross-rig' || b.rig === 'cross-rig' || (b.firma && b.firma.toLowerCase().includes('cross-rig')) || (b.rig && b.rig.toLowerCase().includes('cross-rig'));
+      
+      if (b.plan_count === 0 && !b.has_lane_plan_signal) {
+        return 'hack';
+      } else if (b.plan_count > 0 || isQuantbot || isCrossRig) {
+        return (isQuantbot || isCrossRig) ? 'plan+deep-tech' : 'plan';
+      }
+      return 'plan';
+    },
+    async submitDispatch() {
+      if (!this.dispatchBead) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/triage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.dispatchBead.id, lane: this.dispatchLane }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.backlog = this.backlog.filter(x => x.id !== this.dispatchBead.id);
+        this.closeDispatch();
+      } catch (e) {
+        alert('triage miss: ' + e.message);
+      }
     },
 
     // ── Board (unverändert) ──
