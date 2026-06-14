@@ -779,7 +779,7 @@ function liveKanban() {
     },
     async triage(b, lane) {
       try {
-        const r = await fetch(this.apiBase + '/api/triage', {
+        const r = await fetch(this.apiBase + '/api/dispatch', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: b.id, lane }),
         });
@@ -811,7 +811,7 @@ function liveKanban() {
     async submitDispatch() {
       if (!this.dispatchBead) return;
       try {
-        const r = await fetch(this.apiBase + '/api/triage', {
+        const r = await fetch(this.apiBase + '/api/dispatch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: this.dispatchBead.id, lane: this.dispatchLane }),
