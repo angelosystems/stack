@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -1281,6 +1282,8 @@ func cmdServe() *cobra.Command {
 				}
 				fmt.Fprintf(w, `{"ok":true,"matched":%d}`+"\n", matched)
 			})
+			// P2 — Dispatch aus der Karte (st-bopm)
+			http.HandleFunc("/api/dispatch", handleDispatch(p))
 			fmt.Println("master-kanban serve auf :" + port)
 			fmt.Println("  GET  /api/initiatives  — initiative_summary VIEW")
 			fmt.Println("  GET  /api/initiative   — Karten-Detail (?id=…)")
@@ -1477,4 +1480,173 @@ func cmdResolveRepo() *cobra.Command {
 		},
 	}
 	return c
+}
+
+func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == "OPTIONS" {
+			return
+		}
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
+
+		var body struct {
+			Id   string `json:"id"`
+			Lane string `json:"lane"`
+			Note string `json:"note"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		body.Id = strings.TrimSpace(body.Id)
+		body.Lane = strings.TrimSpace(body.Lane)
+		if body.Id == "" || (body.Lane != "plan" && body.Lane != "plan-deep") {
+			http.Error(w, "id und gültige lane (plan oder plan-deep) erforderlich", 400)
+			return
+		}
+
+		// Fetch initiative metadata
+		var info struct {
+			ID             string
+			Firma          string
+			Title          string
+			Description    string
+			PrimaryBackend string
+		}
+		err := p.QueryRow(r.Context(),
+			`SELECT id, firma, title, COALESCE(description, ''), COALESCE(primary_backend, '')
+			 FROM portfolio.initiative WHERE id = $1`, body.Id).
+			Scan(&info.ID, &info.Firma, &info.Title, &info.Description, &info.PrimaryBackend)
+		if err != nil {
+			http.Error(w, "initiative nicht gefunden: "+body.Id, 404)
+			return
+		}
+
+		// Resolve target repository
+		repo, err := resolveTargetRepo(p, body.Id)
+		if err != nil {
+			http.Error(w, "fehler beim ermitteln des ziel-repos: "+err.Error(), 500)
+			return
+		}
+
+		// Get prefix and slug
+		prefix, ok := firmaPrefix[info.Firma]
+		var slug string
+		if ok && strings.HasPrefix(info.ID, prefix+"-") {
+			slug = strings.TrimPrefix(info.ID, prefix+"-")
+		} else {
+			slug = info.ID
+		}
+
+		// Map /opt/stack to current worktree
+		mappedRepo := repo
+		if repo == "/opt/stack" {
+			mappedRepo = "/root/solartown/stack/polecats/obsidian/stack"
+		}
+
+		// Create PRD-Scaffold directory
+		dirPath := filepath.Join(mappedRepo, "docs", "plans")
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			http.Error(w, "mkdir failed: "+err.Error(), 500)
+			return
+		}
+
+		fileName := slug + "-prd.md"
+		filePath := filepath.Join(dirPath, fileName)
+		canonicalRef := filepath.Join(repo, "docs", "plans", fileName)
+
+		// Determine review.deep
+		reviewDeep := "none"
+		if body.Lane == "plan-deep" {
+			reviewDeep = "spec-panel"
+		}
+
+		var panelBlock string
+		if reviewDeep == "spec-panel" {
+			panelBlock = "  panel-mode: critique\n  panel-focus: [requirements, architecture]\n"
+		}
+
+		scaffold := fmt.Sprintf(`---
+title: %s
+slug: %s
+status: draft
+layer: prd
+parent_plan: null
+scope: %s
+created: %s
+review:
+  quick: auto
+  deep: %s
+%sreferences:
+  - docs/plans/master-kanban.md
+---
+
+# PRD: %s
+
+## Why
+
+%s
+
+## Goal
+
+- Feature 1
+- Feature 2
+
+## Anforderungen
+
+### R1 - Core Flow
+TBD
+
+## Arbeitspakete
+
+### Phase 1 - Prototype
+TBD
+`, info.Title, slug, info.Description, time.Now().Format("2006-01-02"), reviewDeep, panelBlock, info.Title, info.Description)
+
+		// Write scaffold if it does not exist (idempotent)
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			if err := os.WriteFile(filePath, []byte(scaffold), 0644); err != nil {
+				http.Error(w, "schreiben des prd-scaffolds fehlgeschlagen: "+err.Error(), 500)
+				return
+			}
+		}
+
+		// Link the plan file in portfolio.initiative_link
+		_, err = p.Exec(r.Context(),
+			`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+			 VALUES ($1, 'plan_file', $2)
+			 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`, info.ID, canonicalRef)
+		if err != nil {
+			http.Error(w, "verlinken der plan-datei fehlgeschlagen: "+err.Error(), 500)
+			return
+		}
+
+		// Log event (kind=dispatched, source_backend=plan_file)
+		payloadBytes, _ := json.Marshal(map[string]any{
+			"lane": body.Lane,
+			"note": body.Note,
+			"ref":  canonicalRef,
+		})
+		_, err = p.Exec(r.Context(),
+			`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+			 VALUES ($1, 'dispatched', 'plan_file', $2, $3)`,
+			info.ID, payloadBytes, actorFrom(r))
+		if err != nil {
+			http.Error(w, "schreiben des events fehlgeschlagen: "+err.Error(), 500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"ref":  canonicalRef,
+			"path": filePath,
+		})
+	}
 }

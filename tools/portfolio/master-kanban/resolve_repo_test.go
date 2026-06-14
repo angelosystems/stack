@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -103,5 +108,119 @@ func TestResolveTargetRepo(t *testing.T) {
 	expectedRepo = "/root/solartown"
 	if repo != expectedRepo {
 		t.Errorf("expected %s, got %s", expectedRepo, repo)
+	}
+}
+
+func TestDispatch(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	// Clean up any leftovers first
+	testID := "sk-test-dispatch"
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+
+	// Insert test initiative
+	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
+		VALUES ($1, 'stack', 'idea', 'Test Dispatching Card', 'Testing the dispatch endpoint scaffold generation', 'plan_file')`, testID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+
+	// Setup payload
+	bodyMap := map[string]string{
+		"id":   testID,
+		"lane": "plan-deep",
+		"note": "A note about deep tech plan",
+	}
+	bodyBytes, _ := json.Marshal(bodyMap)
+
+	// Create request
+	req := httptest.NewRequest(http.MethodPost, "/api/dispatch", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Call handleDispatch handler
+	handler := handleDispatch(p)
+	handler(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Ok   bool   `json:"ok"`
+		Ref  string `json:"ref"`
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if !result.Ok {
+		t.Errorf("expected Ok to be true")
+	}
+
+	// Clean up generated file
+	if result.Path != "" {
+		defer os.Remove(result.Path)
+	}
+
+	// Verify file was written
+	if _, err := os.Stat(result.Path); os.IsNotExist(err) {
+		t.Errorf("scaffold file was not created: %s", result.Path)
+	}
+
+	// Verify content of the scaffold file
+	contentBytes, err := os.ReadFile(result.Path)
+	if err != nil {
+		t.Fatalf("failed to read created file: %v", err)
+	}
+	content := string(contentBytes)
+
+	if !strings.Contains(content, "title: Test Dispatching Card") {
+		t.Errorf("file frontmatter missing title")
+	}
+	if !strings.Contains(content, "slug: test-dispatch") {
+		t.Errorf("file frontmatter missing slug or incorrect")
+	}
+	if !strings.Contains(content, "deep: spec-panel") {
+		t.Errorf("file frontmatter missing deep: spec-panel for lane=plan-deep")
+	}
+	if !strings.Contains(content, "panel-mode: critique") {
+		t.Errorf("file frontmatter missing panel-mode for lane=plan-deep")
+	}
+
+	// Verify link was inserted into DB
+	var exists bool
+	err = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative_link WHERE initiative_id = $1 AND kind = 'plan_file')`, testID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("failed to check initiative_link: %v", err)
+	}
+	if !exists {
+		t.Errorf("initiative_link for %s was not created", testID)
+	}
+
+	// Verify event was logged in DB
+	err = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'dispatched')`, testID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("failed to check initiative_event: %v", err)
+	}
+	if !exists {
+		t.Errorf("initiative_event for %s was not created", testID)
 	}
 }
