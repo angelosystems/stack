@@ -25,7 +25,7 @@
 </head>
 <body class="bg-slate-100 text-slate-900">
 
-<div x-data="liveKanban()" x-init="init()" @keydown.escape.window="closeDetail(); closeDispatch()" class="min-h-screen">
+<div x-data="liveKanban()" x-init="init()" @keydown.escape.window="closeDetail(); closeDispatch(); dispatchDrawerOpen = false" class="min-h-screen">
 
   <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
     <h1 class="text-lg font-semibold tracking-tight">master-kanban <span class="text-xs text-emerald-600 ml-1" x-text="apiOk ? '● live' : '○ offline'"></span></h1>
@@ -235,8 +235,39 @@
       <button @click="copyDetailLink()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500 text-sm"
         :title="copied ? 'kopiert' : 'Link kopieren'" x-text="copied ? '✓' : '🔗'"></button>
       <span class="text-xs text-slate-400 ml-2 font-mono truncate" x-text="detail ? detail.initiative.id : ''"></span>
-      <button @click="archiveDetail()" class="ml-auto p-1.5 rounded hover:bg-slate-100 text-slate-500 text-sm" title="archivieren">🗄</button>
+      <button @click="toggleDispatchDrawer()" class="ml-auto px-2 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 text-xs font-semibold border border-sky-200 flex items-center gap-1" title="Dispatch auslösen">⚡ Dispatch</button>
+      <button @click="archiveDetail()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500 text-sm" title="archivieren">🗄</button>
       <button @click="closeDetail()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500" title="schließen (Esc)">✕</button>
+    </div>
+
+    <!-- Inline-Panel for Dispatch (SC4) -->
+    <div x-show="dispatchDrawerOpen" x-cloak class="bg-sky-50 border-b border-slate-200 px-6 py-4 space-y-3 shrink-0">
+      <div class="flex items-center justify-between">
+        <h4 class="font-semibold text-slate-800 text-sm flex items-center gap-1">⚡ Dispatch Initiative</h4>
+        <button @click="dispatchDrawerOpen = false" class="text-slate-400 hover:text-slate-600">✕</button>
+      </div>
+      <div class="grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <label class="block text-slate-500 mb-1 font-semibold uppercase tracking-wider">Vorgeschlagene Lane</label>
+          <div class="bg-white border border-slate-200 rounded px-2.5 py-1.5 font-semibold text-sky-800" x-text="getProposedLaneForDetail() === 'hack' ? 'Hacker-Lane (hack)' : 'Plan-Pipeline (plan)'"></div>
+        </div>
+        <div>
+          <label class="block text-slate-500 mb-1 font-semibold uppercase tracking-wider">Ausgewählte Lane</label>
+          <select x-model="dispatchDrawerLane" class="w-full border border-slate-200 rounded px-2 py-1.5 bg-white text-slate-800 font-semibold focus:ring-2 focus:ring-sky-300">
+            <option value="hack">Hacker-Lane (hack)</option>
+            <option value="plan">Plan-Pipeline (plan)</option>
+            <option value="plan-deep">Plan-Pipeline Deep (plan-deep)</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500 mb-1 font-semibold uppercase tracking-wider">Freitext-Notiz</label>
+        <textarea x-model="dispatchDrawerNote" placeholder="Optionale Notiz eingeben..." class="w-full border border-slate-200 rounded px-2 py-1 text-xs text-slate-800 h-16 resize-none focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"></textarea>
+      </div>
+      <div class="flex justify-end gap-2">
+        <button @click="dispatchDrawerOpen = false" class="text-xs px-2.5 py-1.5 rounded border border-slate-300 hover:bg-slate-100 bg-white">Abbrechen</button>
+        <button @click="submitDispatchDrawer()" class="text-xs px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-semibold">Auslösen</button>
+      </div>
     </div>
 
     <div class="overflow-y-auto flex-1 px-6 py-5">
@@ -479,6 +510,10 @@ function liveKanban() {
     dispatchBead: null,
     dispatchLane: 'hack',
 
+    dispatchDrawerOpen: false,
+    dispatchDrawerLane: 'hack',
+    dispatchDrawerNote: '',
+
     detail: null,
     detailOpen: false,
     detailExpanded: false,
@@ -512,6 +547,9 @@ function liveKanban() {
     // ── Karten-Detail: Side-Peek (P5) ──
     async openDetail(id) {
       if (this.dragging) return; // Klick direkt nach Drag-Drop nicht als Öffnen werten
+      this.dispatchDrawerOpen = false;
+      this.dispatchDrawerLane = 'hack';
+      this.dispatchDrawerNote = '';
       this.detailOpen = true;
       this.copied = false;
       if (!this.detail || this.detail.initiative.id !== id) { this.detail = null; this.commentText = ''; }
@@ -522,6 +560,7 @@ function liveKanban() {
         this.detail = await r.json();
         this.descDraft = this.detail.initiative.description || '';
         this.editingTitle = false;
+        this.dispatchDrawerLane = this.getProposedLaneForDetail();
         if (this.detail.initiative.plan_count > 0 && !this.plansCache[id]) {
           const pr = await fetch(this.apiBase + '/api/plans?initiative=' + encodeURIComponent(id));
           this.plansCache[id] = pr.ok ? await pr.json() : [];
@@ -535,6 +574,7 @@ function liveKanban() {
       if (!this.detailOpen) return;
       this.detailOpen = false;
       this.detailExpanded = false;
+      this.dispatchDrawerOpen = false;
       history.replaceState(null, '', location.pathname);
     },
     copyDetailLink() {
@@ -606,6 +646,47 @@ function liveKanban() {
         this.cards = this.cards.filter(x => x.id !== id);
         this.closeDetail();
       } catch (e) { alert('archiv miss: ' + e.message); }
+    },
+    // ── Dispatch Initiative (SC4) ──
+    toggleDispatchDrawer() {
+      if (!this.detail) return;
+      this.dispatchDrawerOpen = !this.dispatchDrawerOpen;
+      if (this.dispatchDrawerOpen) {
+        this.dispatchDrawerLane = this.getProposedLaneForDetail();
+        this.dispatchDrawerNote = '';
+      }
+    },
+    getProposedLaneForDetail() {
+      if (!this.detail || !this.detail.initiative) return 'hack';
+      const init = this.detail.initiative;
+      const isQuantbot = init.firma === 'quantbot' || (init.firma && init.firma.toLowerCase().includes('quantbot'));
+      if (init.plan_count > 0 || isQuantbot) {
+        return 'plan';
+      }
+      return 'hack';
+    },
+    async submitDispatchDrawer() {
+      if (!this.detail || !this.detail.initiative) return;
+      const id = this.detail.initiative.id;
+      const lane = this.dispatchDrawerLane;
+      const note = this.dispatchDrawerNote;
+      try {
+        const r = await fetch(this.apiBase + '/api/dispatch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, lane, note }),
+        });
+        if (!r.ok) {
+          const text = await r.text();
+          throw new Error(text || ('HTTP ' + r.status));
+        }
+        await this.refresh();
+        await this.openDetail(id);
+        this.dispatchDrawerOpen = false;
+        alert('Initiative erfolgreich ausgelöst!');
+      } catch (e) {
+        alert('Dispatch fehlgeschlagen: ' + e.message);
+      }
     },
     // ── Karte anlegen (P5) ──
     startAdd(firma, stage) {
