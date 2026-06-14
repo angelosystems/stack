@@ -46,138 +46,6 @@ func quantbotPool() (*pgxpool.Pool, error) {
 	return p, nil
 }
 
-type HostCapacityGo struct {
-	CPU             float64 `json:"cpu"`
-	RAM             float64 `json:"ram"`
-	Disk            float64 `json:"disk"`
-	Swap            float64 `json:"swap"`
-	PSICPU          float64 `json:"psi_cpu"`
-	PSIMemory       float64 `json:"psi_memory"`
-	PSIIO           float64 `json:"psi_io"`
-	Headroom        float64 `json:"headroom"`
-	GovernorVerdict string  `json:"governor_verdict"`
-	CommittedRatio  float64 `json:"committed_ratio"`
-	SwapTrend       string  `json:"swap_trend"`
-	AgeSeconds      int     `json:"age_seconds"`
-	Liveness        string  `json:"liveness"`
-}
-
-func getHostCapacityGo(ctx context.Context) (*HostCapacityGo, error) {
-	qbp, err := quantbotPool()
-	if err != nil {
-		return nil, fmt.Errorf("quantbot database connection failed: %w", err)
-	}
-
-	rows, err := qbp.Query(ctx, `
-		SELECT DISTINCT ON (name) name, published_at, payload->>'value' AS value 
-		FROM public.kpi_events 
-		WHERE owner='infra' AND name IN ('cpu_nuernberg', 'ram_nuernberg', 'disk_nuernberg') 
-		ORDER BY name, published_at DESC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query kpi_events: %w", err)
-	}
-	defer rows.Close()
-
-	var cpu, ram, disk float64
-	var maxPublishedAt time.Time
-
-	for rows.Next() {
-		var name string
-		var pubAt time.Time
-		var valStr string
-		if err := rows.Scan(&name, &pubAt, &valStr); err != nil {
-			return nil, fmt.Errorf("failed to scan kpi_event row: %w", err)
-		}
-		var val float64
-		fmt.Sscanf(valStr, "%f", &val)
-
-		if pubAt.After(maxPublishedAt) {
-			maxPublishedAt = pubAt
-		}
-
-		switch name {
-		case "cpu_nuernberg":
-			cpu = val
-		case "ram_nuernberg":
-			ram = val
-		case "disk_nuernberg":
-			disk = val
-		}
-	}
-
-	// Falls keine Metriken gefunden wurden, Fallback auf plausible Standardwerte
-	if maxPublishedAt.IsZero() {
-		cpu = 42.5
-		ram = 71.2
-		disk = 82.1
-		maxPublishedAt = time.Now()
-	}
-
-	// Berechnungen für abgeleitete Werte
-	headroom := 100.0 - ram
-
-	// Governor Verdict
-	governorVerdict := "healthy"
-	if ram >= 90.0 || cpu >= 95.0 {
-		governorVerdict = "freeze"
-	}
-
-	// Swap
-	swap := (ram - 55.0) * 1.8
-	if swap < 5.0 {
-		swap = 5.0
-	} else if swap > 85.0 {
-		swap = 85.0
-	}
-
-	// PSI
-	psiCpu := cpu * 0.12
-	psiMem := (ram - 45.0) * 0.35
-	if psiMem < 0 {
-		psiMem = 0
-	}
-	psiIo := (disk - 50.0) * 0.08
-	if psiIo < 0 {
-		psiIo = 0
-	}
-
-	// Freeze Marge (committed_ratio, swap_trend)
-	committedRatio := ram * 1.05 / 100.0
-	swapTrend := "stable"
-	if ram > 75.0 {
-		swapTrend = "rising"
-	} else if ram < 60.0 {
-		swapTrend = "falling"
-	}
-
-	// Liveness & Age
-	ageSec := int(time.Now().Sub(maxPublishedAt).Seconds())
-	if ageSec < 0 {
-		ageSec = 0
-	}
-	liveness := "alive"
-	if ageSec >= 60 {
-		liveness = "dead"
-	}
-
-	return &HostCapacityGo{
-		CPU:             cpu,
-		RAM:             ram,
-		Disk:            disk,
-		Swap:            swap,
-		PSICPU:          psiCpu,
-		PSIMemory:       psiMem,
-		PSIIO:           psiIo,
-		Headroom:        headroom,
-		GovernorVerdict: governorVerdict,
-		CommittedRatio:  committedRatio,
-		SwapTrend:       swapTrend,
-		AgeSeconds:      ageSec,
-		Liveness:        liveness,
-	}, nil
-}
-
 // pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
 type pgxRows interface {
 	Next() bool
@@ -2623,6 +2491,82 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if body.Lane == "hack" {
+			// Determine repo from plan_item or fallback to company default
+			var repo string
+			_ = p.QueryRow(r.Context(),
+				`SELECT repo FROM portfolio.plan_item WHERE initiative_id = $1 LIMIT 1`, body.Id).
+				Scan(&repo)
+
+			if repo == "" {
+				firmaRepo := map[string]string{
+					"stayawesome": "/root/stayawesomeOS",
+					"solartown":   "/root/solartown",
+					"quantbot":    "/opt/quantbot",
+					"mariobrain":  "/root/mario-brain",
+					"stack":       "/opt/stack",
+				}
+				repo = firmaRepo[info.Firma]
+			}
+			if repo == "" {
+				repo = "/root/solartown" // fallback
+			}
+
+			// Execute vk-delegate to spawn workspace
+			exe := findVkDelegate()
+
+			prompt := body.Note
+			if prompt == "" {
+				prompt = info.Title
+			}
+
+			cmd := exec.Command(exe,
+				"--repo", repo,
+				"--name", info.Title,
+				"--prompt", prompt,
+			)
+
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				errMsg := fmt.Sprintf("vk-delegate failed: %v, stderr: %s", err, stderr.String())
+				http.Error(w, errMsg, 500)
+				return
+			}
+
+			// Parse workspace_id from stdout
+			re := regexp.MustCompile(`workspace_id:\s+([a-f0-9\-]+)`)
+			matches := re.FindStringSubmatch(stdout.String())
+			if len(matches) < 2 {
+				http.Error(w, "failed to parse workspace_id from vk-delegate output: "+stdout.String(), 500)
+				return
+			}
+			wsID := matches[1]
+
+			// Write dispatched event to initiative_event
+			payloadBytes, _ := json.Marshal(map[string]string{
+				"lane": body.Lane,
+				"ref":  wsID,
+			})
+			_, err = p.Exec(r.Context(),
+				`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				 VALUES ($1, 'dispatched', 'vk', $2::jsonb, 'master-kanban')`,
+				body.Id, string(payloadBytes))
+			if err != nil {
+				http.Error(w, "failed to write initiative_event: "+err.Error(), 500)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"workspace_id": wsID,
+			})
+			return
+		}
+
 		var canonicalRef, filePath string
 		if body.Lane == "plan" || body.Lane == "plan-deep" {
 			// Check capacity governor for 429 stress admission criterion
@@ -3978,4 +3922,29 @@ func checkDoneProbe(p *pgxpool.Pool, vkDB string, wsID string, taskHex string, b
 	}
 
 	return false
+}
+
+var vkDelegatePath string
+
+func findVkDelegate() string {
+	if vkDelegatePath != "" {
+		return vkDelegatePath
+	}
+	paths := []string{
+		"/root/solartown/tools/vk-delegate/vk-delegate",
+		"./tools/vk-delegate/vk-delegate",
+		"vk-delegate",
+	}
+	for _, p := range paths {
+		if strings.HasPrefix(p, "/") {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		} else {
+			if lp, err := exec.LookPath(p); err == nil {
+				return lp
+			}
+		}
+	}
+	return "/root/solartown/tools/vk-delegate/vk-delegate"
 }
