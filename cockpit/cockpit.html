@@ -95,35 +95,56 @@
                     <span class="text-slate-400 font-normal" x-text="cardsIn(f.id, stage).length"></span>
                   </div>
                   <template x-for="c in cardsIn(f.id, stage)" :key="c.id">
-                    <article :data-id="c.id" @click="openDetail(c.id)"
-                      class="card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm">
-                      <div class="font-medium leading-snug" x-text="c.title"></div>
-                      <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
-                        <span class="text-[10px] text-slate-400" x-text="c.id"></span>
-                        <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
-                        <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
-                        <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
-                        <button x-show="c.plan_count > 0" @click.stop="toggleTree(c.id)"
-                          class="text-[11px] px-1 rounded border border-slate-300 hover:bg-white"
-                          :title="c.plan_count + ' plan-files — Baum auf/zu'">
-                          📄<span class="ml-0.5" x-text="c.plan_count"></span>
-                          <span x-text="expanded[c.id] ? '▾' : '▸'"></span>
-                        </button>
-                        <span class="activity-spark" :class="freshClass(c.last_activity)" :title="'last activity: ' + (c.last_activity || '—')"></span>
-                      </div>
-                      <!-- Plan-Hierarchie: Vision ▸ Phasen ▸ PRDs (P4.1/P4.2) -->
-                      <div x-show="expanded[c.id]" class="mt-2 pt-2 border-t border-slate-200 space-y-0.5" @click.stop>
-                        <template x-for="it in treeOf(c.id)" :key="it.id">
-                          <div class="flex items-center gap-1.5 text-xs" :style="'padding-left:' + (it.depth*14) + 'px'">
-                            <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
-                            <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" :title="'Review-Workbench öffnen'" x-text="it.title"></a>
-                            <span class="px-1 rounded text-[10px]" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
-                            <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500"
-                              :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                    <article :data-id="c.id" @click="if (!isProposal(c)) openDetail(c.id)"
+                      :class="isProposal(c) ? 'no-drag mb-2 bg-amber-50 border border-amber-200 rounded-md p-3 text-sm shadow-sm' : 'card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm'">
+
+                      <template x-if="isProposal(c)">
+                        <div>
+                          <div class="flex items-center justify-between mb-1">
+                            <span class="inline-block px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 uppercase tracking-wide">✨ Vorschlag</span>
+                            <span class="text-[10px] text-slate-400 font-mono" x-text="getProposalData(c).bead_id"></span>
                           </div>
-                        </template>
-                        <div x-show="!treeOf(c.id).length" class="text-[11px] text-slate-400">lade…</div>
-                      </div>
+                          <div class="font-medium leading-snug text-slate-900" x-text="c.title"></div>
+                          <div class="text-xs text-slate-600 italic leading-normal my-1.5" x-text="getProposalData(c).reasoning"></div>
+                          <div class="flex items-center gap-1.5 mt-2">
+                            <button @click.stop="acceptProposal(c)" class="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition-colors">Annehmen</button>
+                            <button @click.stop="rejectProposal(c)" class="px-2 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-sm transition-colors">Verwerfen</button>
+                          </div>
+                        </div>
+                      </template>
+
+                      <template x-if="!isProposal(c)">
+                        <div>
+                          <div class="font-medium leading-snug" x-text="c.title"></div>
+                          <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+                            <span class="text-[10px] text-slate-400" x-text="c.id"></span>
+                            <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
+                            <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
+                            <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
+                            <button x-show="c.plan_count > 0" @click.stop="toggleTree(c.id)"
+                              class="text-[11px] px-1 rounded border border-slate-300 hover:bg-white"
+                              :title="c.plan_count + ' plan-files — Baum auf/zu'">
+                              📄<span class="ml-0.5" x-text="c.plan_count"></span>
+                              <span x-text="expanded[c.id] ? '▾' : '▸'"></span>
+                            </button>
+                            <span class="activity-spark" :class="freshClass(c.last_activity)" :title="'last activity: ' + (c.last_activity || '—')"></span>
+                          </div>
+                          <!-- Plan-Hierarchie: Vision ▸ Phasen ▸ PRDs (P4.1/P4.2) -->
+                          <div x-show="expanded[c.id]" class="mt-2 pt-2 border-t border-slate-200 space-y-0.5" @click.stop>
+                            <template x-for="it in treeOf(c.id)" :key="it.id">
+                              <div class="flex items-center gap-1.5 text-xs" :style="'padding-left:' + (it.depth*14) + 'px'">
+                                <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
+                                <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" :title="'Review-Workbench öffnen'" x-text="it.title"></a>
+                                <span class="px-1 rounded text-[10px]" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
+                                <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500"
+                                  :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                              </div>
+                            </template>
+                            <div x-show="!treeOf(c.id).length" class="text-[11px] text-slate-400">lade…</div>
+                          </div>
+                        </div>
+                      </template>
+
                     </article>
                   </template>
                   <!-- Karte anlegen (P5): + Neu → Inline-Input, Enter erstellt -->
@@ -1284,6 +1305,49 @@ function liveKanban() {
         },
       });
     },
+    isProposal(c) {
+      if (!c.status_dot) return false;
+      try {
+        const data = JSON.parse(c.status_dot);
+        return !!data.proposed;
+      } catch (e) {
+        return false;
+      }
+    },
+    getProposalData(c) {
+      if (!c.status_dot) return {};
+      try {
+        return JSON.parse(c.status_dot);
+      } catch (e) {
+        return {};
+      }
+    },
+    async acceptProposal(c) {
+      try {
+        const r = await fetch(this.apiBase + '/api/proposal/accept', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: c.id }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        await this.refresh();
+      } catch (e) {
+        alert('Accept proposal failed: ' + e.message);
+      }
+    },
+    async rejectProposal(c) {
+      try {
+        const r = await fetch(this.apiBase + '/api/proposal/reject', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: c.id }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        await this.refresh();
+      } catch (e) {
+        alert('Reject proposal failed: ' + e.message);
+      }
+    },
     get counts() { const o = {}; this.firmas.forEach(f => o[f.id] = this.cards.filter(c => c.firma === f.id).length); return o; },
     freshClass(la) {
       if (!la) return 'activity-stale';
@@ -1297,6 +1361,7 @@ function liveKanban() {
         animation: 150,
         ghostClass: 'opacity-30',
         draggable: 'article[data-id]',
+        filter: '.no-drag',
         onStart() { self.dragging = true; },
         async onEnd(evt) {
           setTimeout(() => self.dragging = false, 0); // Click-Event nach Drop verpufft
