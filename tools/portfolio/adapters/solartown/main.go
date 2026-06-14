@@ -52,6 +52,7 @@ type beadStatus struct {
 
 func main() {
 	flag.Parse()
+	initRegistry()
 	if !*once && !*watch && !*listen {
 		*once = true
 	}
@@ -148,7 +149,7 @@ func runOnce(p *pgxpool.Pool) error {
 		return nil
 	}
 
-	        fmt.Printf("scanning %d bead-links via bd CLI in %s\n", len(pairs), bdRig)
+	        fmt.Printf("scanning %d bead-links via bd CLI and Rig-Registry\n", len(pairs))
 	        pushed := 0
 	        byInitiative := make(map[string][]*beadStatus)
 	
@@ -201,13 +202,20 @@ func runOnce(p *pgxpool.Pool) error {
 	        return nil}
 
 func readBead(id string) (*beadStatus, error) {
+	rigDir := bdRig
+	if reg != nil {
+		if r, ok := reg.Resolve(id); ok {
+			rigDir = r.Dir
+		}
+	}
+
 	cmd := exec.Command("bd", "show", id, "--json")
-	cmd.Dir = bdRig
+	cmd.Dir = rigDir
 	out, err := cmd.Output()
 	if err != nil {
 		// Try without --json (not all bd versions support it)
 		cmd2 := exec.Command("bd", "show", id)
-		cmd2.Dir = bdRig
+		cmd2.Dir = rigDir
 		out2, err2 := cmd2.Output()
 		if err2 != nil {
 			return nil, err
