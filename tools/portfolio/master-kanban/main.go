@@ -1421,8 +1421,8 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
-				if body.Lane != "hack" {
-					http.Error(w, "lane must be hack", 400)
+				if body.Lane != "hack" && !strings.HasPrefix(body.Lane, "plan") {
+					http.Error(w, "lane must be hack or plan-based", 400)
 					return
 				}
 
@@ -1436,80 +1436,182 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
-				// 2. Determine repo from plan_item or fallback to company default
-				var repo string
-				_ = p.QueryRow(r.Context(),
-					`SELECT repo FROM portfolio.plan_item WHERE initiative_id = $1 LIMIT 1`, body.Id).
-					Scan(&repo)
-
-				if repo == "" {
-					firmaRepo := map[string]string{
-						"stayawesome": "/root/stayawesomeOS",
-						"solartown":   "/root/solartown",
-						"quantbot":    "/opt/quantbot",
-						"mariobrain":  "/root/mario-brain",
-						"stack":       "/opt/stack",
-					}
-					repo = firmaRepo[firma]
-				}
-				if repo == "" {
-					repo = "/root/solartown" // fallback
-				}
-
-				// 3. Execute vk-delegate to spawn workspace
-				exe := findVkDelegate()
-				
-				// Build prompt: if note is provided use it, otherwise use title
-				prompt := body.Note
-				if prompt == "" {
-					prompt = title
-				}
-
-				cmd := exec.Command(exe,
-					"--repo", repo,
-					"--name", title,
-					"--prompt", prompt,
-				)
-
-				var stdout, stderr bytes.Buffer
-				cmd.Stdout = &stdout
-				cmd.Stderr = &stderr
-
-				if err := cmd.Run(); err != nil {
-					errMsg := fmt.Sprintf("vk-delegate failed: %v, stderr: %s", err, stderr.String())
-					http.Error(w, errMsg, 500)
-					return
-				}
-
-				// 4. Parse workspace_id from stdout
-				re := regexp.MustCompile(`workspace_id:\s+([a-f0-9\-]+)`)
-				matches := re.FindStringSubmatch(stdout.String())
-				if len(matches) < 2 {
-					http.Error(w, "failed to parse workspace_id from vk-delegate output: "+stdout.String(), 500)
-					return
-				}
-				wsID := matches[1]
-
-				// 5. Write dispatched event to initiative_event
-				payloadBytes, _ := json.Marshal(map[string]string{
-					"lane": body.Lane,
-					"ref":  wsID,
-				})
-				_, err = p.Exec(r.Context(),
-					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
-					 VALUES ($1, 'dispatched', 'vk', $2::jsonb, 'master-kanban')`,
-					body.Id, string(payloadBytes))
+				// 2. Determine repo
+				repo, err := resolveTargetRepo(p, body.Id)
 				if err != nil {
-					http.Error(w, "failed to write initiative_event: "+err.Error(), 500)
+					http.Error(w, "failed to resolve target repo: "+err.Error(), 500)
 					return
 				}
 
-				// 6. Return successful response with workspace_id
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{
-					"ok":           true,
-					"workspace_id": wsID,
-				})
+				if body.Lane == "hack" {
+					// Execute vk-delegate to spawn workspace
+					exe := findVkDelegate()
+
+					// Build prompt: if note is provided use it, otherwise use title
+					prompt := body.Note
+					if prompt == "" {
+						prompt = title
+					}
+
+					cmd := exec.Command(exe,
+						"--repo", repo,
+						"--name", title,
+						"--prompt", prompt,
+					)
+
+					var stdout, stderr bytes.Buffer
+					cmd.Stdout = &stdout
+					cmd.Stderr = &stderr
+
+					if err := cmd.Run(); err != nil {
+						errMsg := fmt.Sprintf("vk-delegate failed: %v, stderr: %s", err, stderr.String())
+						http.Error(w, errMsg, 500)
+						return
+					}
+
+					// Parse workspace_id from stdout
+					re := regexp.MustCompile(`workspace_id:\s+([a-f0-9\-]+)`)
+					matches := re.FindStringSubmatch(stdout.String())
+					if len(matches) < 2 {
+						http.Error(w, "failed to parse workspace_id from vk-delegate output: "+stdout.String(), 500)
+						return
+					}
+					wsID := matches[1]
+
+					// Write dispatched event to initiative_event
+					payloadBytes, _ := json.Marshal(map[string]string{
+						"lane": body.Lane,
+						"ref":  wsID,
+					})
+					_, err = p.Exec(r.Context(),
+						`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						 VALUES ($1, 'dispatched', 'vk', $2::jsonb, 'master-kanban')`,
+						body.Id, string(payloadBytes))
+					if err != nil {
+						http.Error(w, "failed to write initiative_event: "+err.Error(), 500)
+						return
+					}
+
+					// Return successful response with workspace_id
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{
+						"ok":           true,
+						"workspace_id": wsID,
+					})
+					return
+				} else {
+					// body.Lane is plan-based (starts with "plan")
+					slug := slugify(title)
+					prdPath := filepath.Join(repo, "docs/plans", slug+"-prd.md")
+
+					// Check if we have an existing plan_file link for this initiative
+					var existingLink string
+					_ = p.QueryRow(r.Context(),
+						`SELECT ref FROM portfolio.initiative_link WHERE initiative_id = $1 AND kind = 'plan_file' LIMIT 1`,
+						body.Id).Scan(&existingLink)
+
+					if existingLink != "" {
+						prdPath = existingLink
+					}
+
+					// Idempotent check: check if file already exists on disk
+					var fileExists bool
+					if _, err := os.Stat(prdPath); err == nil {
+						fileExists = true
+					}
+
+					if !fileExists {
+						// Create directories if they don't exist
+						dir := filepath.Dir(prdPath)
+						if err := os.MkdirAll(dir, 0755); err != nil {
+							http.Error(w, "failed to create docs/plans directory: "+err.Error(), 500)
+							return
+						}
+
+						// Determine review.deep depending on marker
+						reviewDeep := "none"
+						if strings.Contains(body.Lane, "tech") {
+							reviewDeep = "tech"
+						} else if strings.Contains(body.Lane, "business") {
+							reviewDeep = "business"
+						} else if strings.Contains(body.Lane, "deep") {
+							reviewDeep = "tech" // fallback
+						}
+
+						// Format the created date (formatted according to locale / standard YYYY-MM-DD)
+						createdDate := time.Now().Format("2006-01-02")
+
+						scope := body.Note
+						if scope == "" {
+							scope = title
+						}
+
+						// Construct scaffold content
+						scaffold := fmt.Sprintf(`---
+title: %s
+slug: %s
+status: draft
+layer: prd
+parent_plan: null
+scope: %s
+created: %s
+review:
+  quick: auto
+  deep: %s
+references: []
+---
+
+## Goal
+
+(Hier das Hauptziel beschreiben)
+
+## Anforderungen
+
+### R1 - ...
+
+## Risiken
+`, title, slug, scope, createdDate, reviewDeep)
+
+						if err := os.WriteFile(prdPath, []byte(scaffold), 0644); err != nil {
+							http.Error(w, "failed to write PRD-scaffold: "+err.Error(), 500)
+							return
+						}
+					}
+
+					// Link the plan file in database
+					_, err = p.Exec(r.Context(),
+						`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+						 VALUES ($1, 'plan_file', $2)
+						 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
+						body.Id, prdPath)
+					if err != nil {
+						http.Error(w, "failed to link plan file: "+err.Error(), 500)
+						return
+					}
+
+					// Write dispatched event
+					payloadBytes, _ := json.Marshal(map[string]string{
+						"lane": body.Lane,
+						"ref":  prdPath,
+					})
+					_, err = p.Exec(r.Context(),
+						`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						 VALUES ($1, 'dispatched', 'plan_file', $2::jsonb, 'master-kanban')`,
+						body.Id, string(payloadBytes))
+					if err != nil {
+						http.Error(w, "failed to write dispatched event: "+err.Error(), 500)
+						return
+					}
+
+					// Return successful response
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{
+						"ok":     true,
+						"path":   prdPath,
+						"reused": fileExists,
+					})
+					return
+				}
 			})
 
 			http.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
