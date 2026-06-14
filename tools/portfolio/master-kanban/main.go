@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -144,7 +145,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -1216,3 +1217,142 @@ func logEvent(p *pgxpool.Pool, id, kind, src, from, to, payload string) {
 }
 
 func escape(s string) string { return strings.ReplaceAll(s, `"`, `\"`) }
+
+// rigTownMap maps a company (firma) to its standard local git repository root path.
+var rigTownMap = map[string]string{
+	"stayawesome": "/root/stayawesomeOS",
+	"quantbot":    "/opt/quantbot",
+	"solartown":   "/root/solartown",
+	"mariobrain":  "/root/mario-brain",
+	"angeloos":    "/opt/stack",
+	"stack":       "/opt/stack",
+}
+
+// getReposMap returns:
+// 1. A map of company name to repository path (merging PLANFILE_REPOS environment variables and rigTownMap defaults).
+// 2. A slice of all unique known repository paths sorted by length descending (longest first) to allow accurate prefix matching.
+func getReposMap() (map[string]string, []string) {
+	repos := make(map[string]string)
+	// Seed with default rigTownMap
+	for k, v := range rigTownMap {
+		repos[k] = v
+	}
+
+	// Override or supplement with PLANFILE_REPOS if present
+	spec := os.Getenv("PLANFILE_REPOS")
+	if spec != "" {
+		for _, part := range strings.Split(spec, ",") {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) == 2 {
+				repoPath := strings.TrimSpace(kv[0])
+				firma := strings.TrimSpace(kv[1])
+				if repoPath != "" && firma != "" {
+					repos[firma] = repoPath
+				}
+			}
+		}
+	}
+
+	// Extract unique paths and sort by length descending to match longest prefix first
+	pathMap := make(map[string]bool)
+	var paths []string
+	for _, p := range repos {
+		if !pathMap[p] {
+			pathMap[p] = true
+			paths = append(paths, p)
+		}
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		return len(paths[i]) > len(paths[j])
+	})
+
+	return repos, paths
+}
+
+// resolveTargetRepo derives the target repository path for an initiative based on its primary backend,
+// its links (specifically kind=plan_file paths), and falls back to company-to-repo maps (rig-town-map).
+//
+// R-B Klärung: Der Fallback über die firma→repo-Map (rig-town-map) ist vollkommen ausreichend,
+// da reine Ideen-Karten noch keine zugeordneten Plan-Dateien auf der Platte haben.
+// Sobald die Karte konkretisiert wird (z.B. durch Anlegen eines PRDs), wird ein plan_file-Link
+// erzeugt, welcher dann primär für die exakte Repo-Ableitung herangezogen wird.
+func resolveTargetRepo(p *pgxpool.Pool, id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("id darf nicht leer sein")
+	}
+
+	// 1. Fetch initiative info
+	var info struct {
+		ID             string
+		Firma          string
+		PrimaryBackend string
+	}
+	err := p.QueryRow(context.Background(),
+		`SELECT id, firma, COALESCE(primary_backend, '') FROM portfolio.initiative WHERE id = $1`, id).
+		Scan(&info.ID, &info.Firma, &info.PrimaryBackend)
+	if err != nil {
+		return "", fmt.Errorf("initiative %s nicht gefunden: %w", id, err)
+	}
+
+	// 2. Fetch linked plan files
+	rows, err := p.Query(context.Background(),
+		`SELECT ref FROM portfolio.initiative_link WHERE initiative_id = $1 AND kind = 'plan_file' ORDER BY added_at DESC`, id)
+	if err != nil {
+		return "", fmt.Errorf("fehler beim laden der plan_file links für %s: %w", id, err)
+	}
+	defer rows.Close()
+
+	var planPaths []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err == nil && ref != "" {
+			planPaths = append(planPaths, ref)
+		}
+	}
+
+	reposMap, knownPaths := getReposMap()
+
+	// 3. Resolve repository from plan paths if any exist
+	var matchedRepo string
+	for _, planPath := range planPaths {
+		for _, rPath := range knownPaths {
+			if strings.HasPrefix(planPath, rPath+"/") || planPath == rPath {
+				matchedRepo = rPath
+				break
+			}
+		}
+		if matchedRepo != "" {
+			break
+		}
+	}
+
+	// 4. Fallback to company-to-repo mapping (rig-town-map)
+	if matchedRepo == "" {
+		var ok bool
+		matchedRepo, ok = reposMap[info.Firma]
+		if !ok {
+			return "", fmt.Errorf("kein Repository für Firma %s in rig-town-map konfiguriert", info.Firma)
+		}
+	}
+
+	return matchedRepo, nil
+}
+
+// cmdResolveRepo provides a command-line interface to resolve the target repository.
+func cmdResolveRepo() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "resolve-repo <initiative-id>",
+		Short: "Leitet das Ziel-Repository für eine Initiative ab",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := connect()
+			repo, err := resolveTargetRepo(p, args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Ziel-Repo für %s: %s\n", args[0], repo)
+			return nil
+		},
+	}
+	return c
+}
