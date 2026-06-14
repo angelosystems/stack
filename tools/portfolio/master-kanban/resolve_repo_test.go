@@ -224,3 +224,93 @@ func TestDispatch(t *testing.T) {
 		t.Errorf("initiative_event for %s was not created", testID)
 	}
 }
+
+func TestDispatchHack(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	testID := "sk-test-dispatch-hack"
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+
+	// Insert test initiative
+	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
+		VALUES ($1, 'stack', 'idea', 'Test Dispatching Card Hack', 'Testing the dispatch endpoint for direct hacking lane', 'plan_file')`, testID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+
+	// Setup payload
+	bodyMap := map[string]string{
+		"id":   testID,
+		"lane": "hack",
+		"note": "A note about direct hack",
+	}
+	bodyBytes, _ := json.Marshal(bodyMap)
+
+	// Create request
+	req := httptest.NewRequest(http.MethodPost, "/api/dispatch", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Call handleDispatch handler
+	handler := handleDispatch(p)
+	handler(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Ok   bool   `json:"ok"`
+		Ref  string `json:"ref"`
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if !result.Ok {
+		t.Errorf("expected Ok to be true")
+	}
+
+	if result.Path != "" {
+		t.Errorf("expected no file path to be returned for hack lane, got %s", result.Path)
+	}
+	if result.Ref != "" {
+		t.Errorf("expected no canonical ref to be returned for hack lane, got %s", result.Ref)
+	}
+
+	// Verify NO link was inserted into DB
+	var exists bool
+	err = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative_link WHERE initiative_id = $1 AND kind = 'plan_file')`, testID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("failed to check initiative_link: %v", err)
+	}
+	if exists {
+		t.Errorf("initiative_link for %s should not have been created", testID)
+	}
+
+	// Verify event was logged in DB
+	err = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'dispatched')`, testID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("failed to check initiative_event: %v", err)
+	}
+	if !exists {
+		t.Errorf("initiative_event for %s was not created", testID)
+	}
+}
