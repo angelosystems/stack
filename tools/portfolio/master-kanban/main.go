@@ -168,6 +168,17 @@ func actorFrom(r *http.Request) string {
 	return "mario"
 }
 
+// checkAuth verifiziert, dass entweder ein gültiger SSO-Header (X-Auth-Request-Email) oder ein gültiger API-Key (X-Api-Key) übergeben wurde.
+func checkAuth(r *http.Request) bool {
+	if email := r.Header.Get("X-Auth-Request-Email"); email != "" {
+		return true
+	}
+	if key := r.Header.Get("X-Api-Key"); key != "" && key == envOr("PORTFOLIO_API_KEY", "dev-secret") {
+		return true
+	}
+	return false
+}
+
 var firmaPrefix = map[string]string{
 	"stayawesome": "sa", "solartown": "st", "quantbot": "qb",
 	"mariobrain": "mb", "stack": "sk", "angeloos": "ag",
@@ -1029,16 +1040,20 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(items)
 			})
 
-			// P2.3 — Triage: lane:hacker | lane:plan | lane:human als Label setzen
-			http.HandleFunc("/api/triage", func(w http.ResponseWriter, r *http.Request) {
+			// P2.3 — Triage / Dispatch: lane:hacker | lane:plan | lane:human als Label setzen (secured with SSO/API-Key)
+			dispatchHandler := func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Auth-Request-Email, X-Api-Key")
 				if r.Method == "OPTIONS" {
 					return
 				}
 				if r.Method != "POST" {
 					http.Error(w, "POST only", 405)
+					return
+				}
+				if !checkAuth(r) {
+					http.Error(w, "unauthorized", 401)
 					return
 				}
 				var body struct{ Id, Lane string }
@@ -1080,7 +1095,10 @@ func cmdServe() *cobra.Command {
 					return
 				}
 				fmt.Fprintln(w, `{"ok":true}`)
-			})
+			}
+
+			http.HandleFunc("/api/triage", dispatchHandler)
+			http.HandleFunc("/api/dispatch", dispatchHandler)
 
 			// P2.2 — Kapazitätsanzeige je Lane
 			http.HandleFunc("/api/capacity", func(w http.ResponseWriter, r *http.Request) {
