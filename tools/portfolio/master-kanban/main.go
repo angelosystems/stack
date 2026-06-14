@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 )
@@ -1329,12 +1330,167 @@ func cmdServe() *cobra.Command {
 			})
 			// P2 — Dispatch aus der Karte (st-bopm)
 			http.HandleFunc("/api/dispatch", handleDispatch(p))
+
+
+			// POST /api/proposal/accept
+			http.HandleFunc("/api/proposal/accept", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct{ Id string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				tx, err := p.Begin(r.Context())
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer tx.Rollback(r.Context())
+
+				var title, firma, statusDot string
+				err = tx.QueryRow(r.Context(), `SELECT title, firma, COALESCE(status_dot, '') FROM portfolio.initiative WHERE id = $1`, body.Id).Scan(&title, &firma, &statusDot)
+				if err != nil {
+					http.Error(w, "Proposal not found: "+err.Error(), 404)
+					return
+				}
+
+				var pData struct {
+					Proposed  bool   `json:"proposed"`
+					BeadID    string `json:"bead_id"`
+					Reasoning string `json:"reasoning"`
+				}
+				if err := json.Unmarshal([]byte(statusDot), &pData); err != nil || !pData.Proposed || pData.BeadID == "" {
+					http.Error(w, "Invalid proposal status_dot data", 400)
+					return
+				}
+
+				// 1. Delete proposal
+				_, err = tx.Exec(r.Context(), `DELETE FROM portfolio.initiative WHERE id = $1`, body.Id)
+				if err != nil {
+					http.Error(w, "Failed to delete proposal: "+err.Error(), 500)
+					return
+				}
+
+				// 2. Insert real initiative card (using bead ID as card ID)
+				cardID := pData.BeadID
+				_, err = tx.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative (id, firma, stage, title, status_dot, primary_backend) 
+					 VALUES ($1, $2, 'idea', $3, NULL, 'solartown')`,
+					cardID, firma, title)
+				if err != nil {
+					http.Error(w, "Failed to insert initiative: "+err.Error(), 500)
+					return
+				}
+
+				// 3. Insert initiative link
+				_, err = tx.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) 
+					 VALUES ($1, 'bead', $2)`,
+					cardID, cardID)
+				if err != nil {
+					http.Error(w, "Failed to insert initiative link: "+err.Error(), 500)
+					return
+				}
+
+				// Commit transaction so portfolio state is stored
+				if err := tx.Commit(r.Context()); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				// 4. Set lane:plan on the bead using solartownPool() and similar logic as /api/triage
+				sp, err := solartownPool()
+				if err != nil {
+					http.Error(w, "Failed to connect to solartown: "+err.Error(), 500)
+					return
+				}
+
+				var rig string
+				if err := sp.QueryRow(r.Context(),
+					`SELECT rig FROM beads.issues WHERE id=$1 AND deleted_at IS NULL`, cardID).Scan(&rig); err != nil {
+					http.Error(w, "Bead not found: "+cardID, 404)
+					return
+				}
+
+				// Soft delete old lane:*-labels and insert lane:plan
+				_, err = sp.Exec(r.Context(),
+					`UPDATE beads.labels SET deleted_at=now()
+					 WHERE issue_id=$1 AND label LIKE 'lane:%' AND deleted_at IS NULL AND label <> 'lane:plan'`,
+					cardID)
+				if err != nil {
+					http.Error(w, "Failed to clear old lane label: "+err.Error(), 500)
+					return
+				}
+
+				_, err = sp.Exec(r.Context(),
+					`INSERT INTO beads.labels (issue_id, rig, label) VALUES ($1,$2,'lane:plan')
+					 ON CONFLICT (issue_id, label) DO UPDATE SET deleted_at=NULL`,
+					cardID, rig)
+				if err != nil {
+					http.Error(w, "Failed to set lane:plan label: "+err.Error(), 500)
+					return
+				}
+
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
+			// POST /api/proposal/reject
+			http.HandleFunc("/api/proposal/reject", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct{ Id string }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				// Verwerfen löscht spurlos
+				_, err := p.Exec(r.Context(), `DELETE FROM portfolio.initiative WHERE id = $1`, body.Id)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
+			// Start background Postgres notifications listener for soon drops
+			startProposalAgentListener(p)
+
+			// Catch-up on startup for all companies
+			go func() {
+				// Wait a moment for server to start up and connect cleanly
+				time.Sleep(2 * time.Second)
+				for _, f := range []string{"stayawesome", "solartown", "quantbot", "mariobrain", "angeloos", "stack"} {
+					checkFirmaProposals(p, f)
+				}
+			}()
+
+
 			fmt.Println("master-kanban serve auf :" + port)
 			fmt.Println("  GET  /api/initiatives  — initiative_summary VIEW")
 			fmt.Println("  GET  /api/initiative   — Karten-Detail (?id=…)")
 			fmt.Println("  POST /api/move         — {id, stage}")
 			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
 			fmt.Println("  POST /api/github-webhook — GitHub pull_request (HMAC)")
+			fmt.Println("  POST /api/proposal/accept — Accept proposed card")
+			fmt.Println("  POST /api/proposal/reject — Reject/delete proposed card")
 			return http.ListenAndServe(":"+port, nil)
 		},
 	}
@@ -1705,4 +1861,269 @@ TBD
 		}
 		json.NewEncoder(w).Encode(respData)
 	}
+}
+
+func startProposalAgentListener(p *pgxpool.Pool) {
+	go func() {
+		for {
+			// Connect to portfolio database
+			conn, err := pgx.Connect(context.Background(), dsn)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "proposal agent pg listen connect error:", err)
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			if _, err := conn.Exec(context.Background(), "LISTEN portfolio_stage_change"); err != nil {
+				fmt.Fprintln(os.Stderr, "proposal agent listen error:", err)
+				_ = conn.Close(context.Background())
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			fmt.Println("listening on portfolio_stage_change for Vorschlags-Agent")
+			for {
+				n, err := conn.WaitForNotification(context.Background())
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "proposal agent notification wait error:", err)
+					_ = conn.Close(context.Background())
+					break // reconnect
+				}
+
+				// Handle notification payload asynchronously
+				go handleStageChangeNotification(p, n.Payload)
+			}
+		}
+	}()
+}
+
+func handleStageChangeNotification(p *pgxpool.Pool, payload string) {
+	var ev struct {
+		ID    string `json:"id"`
+		Firma string `json:"firma"`
+		From  string `json:"from"`
+		To    string `json:"to"`
+	}
+	if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+		fmt.Fprintln(os.Stderr, "proposal agent failed to parse notify payload:", err)
+		return
+	}
+	// We only trigger proposals if the firma is valid and either From or To is "soon"
+	if ev.Firma != "" && (ev.From == "soon" || ev.To == "soon") {
+		checkFirmaProposals(p, ev.Firma)
+	}
+}
+
+func checkFirmaProposals(p *pgxpool.Pool, firma string) {
+	// 1. Check if Detox is completed (st-ib5e status = 'closed')
+	sp, err := solartownPool()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "proposal-agent: solartown pool error:", err)
+		return
+	}
+	var status string
+	var closedAt *time.Time
+	err = sp.QueryRow(context.Background(),
+		"SELECT status, closed_at FROM beads.issues WHERE id='st-ib5e' AND deleted_at IS NULL").
+		Scan(&status, &closedAt)
+	if err != nil {
+		// If st-ib5e not found or other db error, we keep agent disabled
+		return
+	}
+	if status != "closed" || closedAt == nil {
+		// without Detox-Abschluss, bleibt der Agent aus.
+		return
+	}
+
+	// 2. Check cards count in stage 'soon' for this firma
+	var soonCount int
+	err = p.QueryRow(context.Background(),
+		"SELECT count(*) FROM portfolio.initiative WHERE stage='soon' AND firma=$1 AND archived_at IS NULL",
+		firma).Scan(&soonCount)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "proposal-agent: soon count error:", err)
+		return
+	}
+
+	if soonCount >= 3 {
+		// Only trigger when soon falls below 3!
+		return
+	}
+
+	// 3. Check if we already have proposal cards for this company to avoid double generation
+	var propCount int
+	err = p.QueryRow(context.Background(),
+		"SELECT count(*) FROM portfolio.initiative WHERE stage='idea' AND firma=$1 AND status_dot LIKE '%\"proposed\":true%' AND archived_at IS NULL",
+		firma).Scan(&propCount)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "proposal-agent: prop count error:", err)
+		return
+	}
+	if propCount > 0 {
+		// Proposals already exist for this company, do not generate again
+		return
+	}
+
+	// 4. Find open, lane-less beads for this company, younger than detox date or explicitly kept
+	prefix := firmaPrefix[firma]
+	if prefix == "" {
+		return
+	}
+
+	rows, err := sp.Query(context.Background(), `
+		SELECT i.id, i.title, COALESCE(i.description, '')
+		FROM beads.issues i
+		WHERE i.status='open' AND i.deleted_at IS NULL
+		  AND COALESCE(i.ephemeral,false)=false
+		  AND i.id LIKE $1 || '-%'
+		  AND NOT EXISTS (
+			  SELECT 1 FROM beads.labels l
+			  WHERE l.issue_id=i.id AND l.label LIKE 'lane:%' AND l.deleted_at IS NULL
+		  )
+		  AND (
+			  i.created_at > $2
+			  OR EXISTS (
+				  SELECT 1 FROM beads.labels l
+				  WHERE l.issue_id=i.id AND l.label IN ('keep', 'detox:keep', 'behalten') AND l.deleted_at IS NULL
+			  )
+		  )
+		ORDER BY i.created_at ASC LIMIT 50
+	`, prefix, *closedAt)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "proposal-agent: fetch beads error:", err)
+		return
+	}
+	defer rows.Close()
+
+	type Bead struct {
+		ID, Title, Desc string
+	}
+	var beads []Bead
+	for rows.Next() {
+		var b Bead
+		if err := rows.Scan(&b.ID, &b.Title, &b.Desc); err == nil {
+			beads = append(beads, b)
+		}
+	}
+
+	if len(beads) == 0 {
+		return
+	}
+
+	// 5. Query active initiatives of this firma to provide as goals context
+	initRows, err := p.Query(context.Background(), `
+		SELECT id, title FROM portfolio.initiative
+		WHERE firma=$1 AND stage IN ('now', 'soon', 'watching') AND archived_at IS NULL
+	`, firma)
+	var activeInits []string
+	if err == nil {
+		defer initRows.Close()
+		for initRows.Next() {
+			var iid, ititle string
+			if initRows.Scan(&iid, &ititle) == nil {
+				activeInits = append(activeInits, fmt.Sprintf("- %s: %s", iid, ititle))
+			}
+		}
+	}
+	activeInitiativesStr := strings.Join(activeInits, "\n")
+	if len(activeInits) == 0 {
+		activeInitiativesStr = "(Keine aktiven Initiativen vorhanden)"
+	}
+
+	// 6. Format beads list for GLM prompt
+	var beadsList []string
+	for _, b := range beads {
+		beadsList = append(beadsList, fmt.Sprintf("ID: %s\nTitel: %s\nBeschreibung: %s\n---", b.ID, b.Title, b.Desc))
+	}
+	beadsListStr := strings.Join(beadsList, "\n")
+
+	// 7. Call GLM agent to evaluate and select TOP-3
+	systemPrompt := fmt.Sprintf(`Du bist der Master-Kanban Vorschlags-Agent (Vorschlags-Agent) für die Firma "%s".
+Deine Aufgabe ist es, offene, lane-lose Backlog-Beads (Tickets) dieser Firma zu bewerten und die besten 3 als Vorschlags-Karten zu empfehlen.
+
+Hier sind die aktiven Initiativen dieser Firma, die als aktuelle Firmenziele dienen:
+%s
+
+Bewerte die bereitgestellten Backlog-Beads auf zwei Achsen:
+1. 'umsetzbar' (Ist das Repo eindeutig? Sind Akzeptanzkriterien erkennbar? Ist das Ticket Lane-tauglich?)
+2. 'wichtig' (Zahlt das Ticket auf eine der oben genannten aktiven Initiativen oder ein dokumentiertes Firmenziel ein?)
+
+Wähle die Top-3-Beads aus, die auf beiden Achsen am besten abschneiden. Wenn weniger als 3 Beads geeignet sind, wähle entsprechend weniger (kann auch 0 sein).
+Für jedes ausgewählte Bead generierst du:
+- Einen kurzen, prägnanten Titel für die vorgeschlagene Karte (max. 50 Zeichen).
+- Eine überzeugende Begründung (in Deutsch, max. 3 Sätze), warum dieses Ticket wichtig und umsetzbar ist und auf welche Initiative es einzahlt.
+
+Gib deine Antwort EXACTLY als ein valides JSON-Array von Objekten im folgenden Format zurück. Schreibe KEINEN anderen Text, keine Markdown-Erklärung, keine Einleitung und kein Fazit. Nur das nackte JSON-Array:
+[
+  {
+    "bead_id": "bead-id",
+    "title": "Vorgeschlagener Titel",
+    "reasoning": "Begründung auf Deutsch..."
+  }
+]`, firma, activeInitiativesStr)
+
+	messages := []map[string]string{
+		{"role": "user", "content": beadsListStr},
+	}
+
+	fmt.Printf("calling GLM proposal agent for %s with %d beads...\n", firma, len(beads))
+	resp, err := callGlm(systemPrompt, messages)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "proposal-agent: call GLM error:", err)
+		return
+	}
+
+	// 8. Clean and parse GLM response
+	cleanResp := strings.TrimSpace(resp)
+	if strings.HasPrefix(cleanResp, "```") {
+		if idx := strings.Index(cleanResp, "\n"); idx != -1 {
+			cleanResp = cleanResp[idx+1:]
+		}
+		if idx := strings.LastIndex(cleanResp, "```"); idx != -1 {
+			cleanResp = cleanResp[:idx]
+		}
+		cleanResp = strings.TrimSpace(cleanResp)
+	}
+
+	type ProposalItem struct {
+		BeadID    string `json:"bead_id"`
+		Title     string `json:"title"`
+		Reasoning string `json:"reasoning"`
+	}
+	var proposals []ProposalItem
+	if err := json.Unmarshal([]byte(cleanResp), &proposals); err != nil {
+		fmt.Fprintf(os.Stderr, "proposal-agent: parse GLM JSON error: %v, raw response: %s\n", err, resp)
+		return
+	}
+
+	// 9. Store proposals in portfolio.initiative
+	stored := 0
+	for _, prop := range proposals {
+		if prop.BeadID == "" || prop.Title == "" || prop.Reasoning == "" {
+			continue
+		}
+		// Double check that the bead ID is valid and matches the firma prefix
+		if !strings.HasPrefix(prop.BeadID, prefix+"-") {
+			continue
+		}
+
+		statusDotBytes, _ := json.Marshal(map[string]any{
+			"proposed":  true,
+			"bead_id":   prop.BeadID,
+			"reasoning": prop.Reasoning,
+		})
+
+		_, err = p.Exec(context.Background(), `
+			INSERT INTO portfolio.initiative (id, firma, stage, title, status_dot, primary_backend)
+			VALUES ($1, $2, 'idea', $3, $4, 'proposal')
+			ON CONFLICT (id) DO UPDATE SET
+			  title = EXCLUDED.title,
+			  status_dot = EXCLUDED.status_dot,
+			  updated_at = now()
+		`, "proposal-"+prop.BeadID, firma, prop.Title, string(statusDotBytes))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "proposal-agent: failed to insert proposal initiative %s: %v\n", prop.BeadID, err)
+		} else {
+			stored++
+		}
+	}
+	fmt.Printf("proposal-agent: successfully generated and stored %d proposals for %s\n", stored, firma)
 }
