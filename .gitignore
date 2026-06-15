@@ -22,6 +22,8 @@ tools/*
 !tools/*.sh
 !tools/portfolio/
 !tools/portfolio/**
+!tools/master-kanban/
+!tools/master-kanban/**
 
 docs/*
 !docs/README.md
