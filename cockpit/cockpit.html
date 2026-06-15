@@ -358,7 +358,7 @@
                     <a :href="prUrl(l.ref)" target="_blank" rel="noopener" class="hover:underline text-sky-700 truncate" x-text="l.ref + ' ↗'"></a>
                   </template>
                   <template x-if="l.kind === 'vk_workspace'">
-                    <a :href="'http://localhost:54682/workspaces/' + l.ref" target="_blank" rel="noopener" class="hover:underline text-indigo-700 font-mono text-xs truncate" x-text="'vk-workspace/' + l.ref.slice(0,8) + ' ↗'"></a>
+                    <a :href="'http://' + location.hostname + ':54682/workspaces/' + l.ref" target="_blank" rel="noopener" class="hover:underline text-indigo-700 font-mono text-xs truncate" x-text="'vk-workspace/' + l.ref.slice(0,8) + ' ↗'"></a>
                   </template>
                   <template x-if="l.kind !== 'github_pr' && l.kind !== 'vk_workspace'">
                     <span class="font-mono text-xs text-slate-600 truncate" x-text="l.ref"></span>
@@ -404,7 +404,7 @@
                             <div>
                               <!-- Link to vk-Workspace -->
                               <template x-if="getVkLink(e)">
-                                <a :href="'http://localhost:54682/workspaces/' + getVkLink(e)" target="_blank" class="inline-flex items-center gap-1 hover:underline text-indigo-600 font-mono">
+                                <a :href="'http://' + location.hostname + ':54682/workspaces/' + getVkLink(e)" target="_blank" class="inline-flex items-center gap-1 hover:underline text-indigo-600 font-mono">
                                   <span>🔧 vk-Workspace öffnen</span> <span class="text-[10px]" x-text="'(' + getVkLink(e).slice(0, 8) + '…)'"></span> ↗
                                 </a>
                               </template>
@@ -737,9 +737,9 @@ function liveKanban() {
         await this.refresh();
         await this.openDetail(id);
         this.dispatchDrawerOpen = false;
-        alert('Initiative erfolgreich ausgelöst!');
+        this.showToast('Initiative erfolgreich ausgelöst!');
       } catch (e) {
-        alert('Dispatch fehlgeschlagen: ' + e.message);
+        this.showToast('Dispatch fehlgeschlagen: ' + e.message, 'error');
       }
     },
     // ── Karte anlegen (P5) ──
