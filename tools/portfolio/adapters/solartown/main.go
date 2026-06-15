@@ -302,40 +302,31 @@ func die(ctx string, err error) {
 	os.Exit(1)
 }
 
+type beadRow struct {
+	ID     string   `json:"id"`
+	SpecID string   `json:"spec_id"`
+	Labels []string `json:"labels"`
+}
+
 func scanRigBeads(p *pgxpool.Pool, slugToInitiative map[string]string, rig Rig) (total, newly, linked, orphaned int) {
-	beadsConn, err := pgx.Connect(context.Background(), rig.DSN)
+	cmd := exec.Command("bd", "list", "--json")
+	cmd.Dir = rig.Dir
+	out, err := cmd.Output()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): connect error: %v\n", rig.Dir, rig.Prefix, err)
+		fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): bd list error: %v\n", rig.Dir, rig.Prefix, err)
 		return 0, 0, 0, 0
 	}
-	defer beadsConn.Close(context.Background())
 
-	beadsRows, err := beadsConn.Query(context.Background(), `
-		SELECT i.id, COALESCE(i.spec_id, ''), COALESCE(array_to_string(array_agg(l.label), ','), '') as labels
-		FROM beads.issues i
-		LEFT JOIN beads.labels l ON i.id = l.issue_id AND l.deleted_at IS NULL
-		WHERE i.deleted_at IS NULL
-		GROUP BY i.id, i.spec_id`)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): query error: %v\n", rig.Dir, rig.Prefix, err)
+	var beads []beadRow
+	if err := json.Unmarshal(out, &beads); err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): json error: %v\n", rig.Dir, rig.Prefix, err)
 		return 0, 0, 0, 0
 	}
-	defer beadsRows.Close()
 
-	for beadsRows.Next() {
-		var id, specID, labelsStr string
-		if err := beadsRows.Scan(&id, &specID, &labelsStr); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ scan error rig %s: %v\n", rig.Prefix, err)
-			continue
-		}
+	for _, b := range beads {
 		total++
 
-		var labels []string
-		if labelsStr != "" {
-			labels = strings.Split(labelsStr, ",")
-		}
-
-		beadSlug := getJoinKey(specID, labels)
+		beadSlug := getJoinKey(b.SpecID, b.Labels)
 		if beadSlug == "" {
 			continue
 		}
@@ -346,20 +337,20 @@ func scanRigBeads(p *pgxpool.Pool, slugToInitiative map[string]string, rig Rig) 
 				`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
 				 VALUES ($1, 'bead', $2)
 				 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
-				initiativeID, id)
+				initiativeID, b.ID)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ✗ failed to link bead %s to %s: %v\n", id, initiativeID, err)
+				fmt.Fprintf(os.Stderr, "  ✗ failed to link bead %s to %s: %v\n", b.ID, initiativeID, err)
 			} else {
 				if tag.RowsAffected() > 0 {
 					newly++
-					fmt.Printf("  ✓ [%s] auto-linked bead %s to initiative %s (slug: %s)\n", rig.Prefix, id, initiativeID, beadSlug)
+					fmt.Printf("  ✓ [%s] auto-linked bead %s to initiative %s (slug: %s)\n", rig.Prefix, b.ID, initiativeID, beadSlug)
 				} else {
 					linked++
 				}
 			}
 		} else {
 			orphaned++
-			fmt.Printf("[ORPHAN] [%s] Bead %s has join-key %q but matches no initiative\n", rig.Prefix, id, beadSlug)
+			fmt.Printf("[ORPHAN] [%s] Bead %s has join-key %q but matches no initiative\n", rig.Prefix, b.ID, beadSlug)
 		}
 	}
 	return
@@ -408,7 +399,7 @@ func runLink(p *pgxpool.Pool) error {
 		if !ok {
 			continue
 		}
-		fmt.Printf("  scanning rig %s (prefix %s, dsn: %s)\n", rig.Dir, rig.Prefix, maskDSN(rig.DSN))
+		fmt.Printf("  scanning rig %s (prefix %s)\n", rig.Dir, rig.Prefix)
 		t, n, al, o := scanRigBeads(p, slugToInitiative, rig)
 		totalBeads += t
 		newlyLinked += n
