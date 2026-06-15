@@ -25,7 +25,7 @@
 </head>
 <body class="bg-slate-100 text-slate-900">
 
-<div x-data="liveKanban()" x-init="init()" @keydown.escape.window="closeDetail(); closeDispatch(); dispatchDrawerOpen = false" class="min-h-screen">
+<div x-data="liveKanban()" x-init="loadFirmaOrder(); init()" @keydown.escape.window="closeDetail(); closeDispatch(); dispatchDrawerOpen = false" class="min-h-screen">
 
   <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
     <h1 class="text-lg font-semibold tracking-tight">master-kanban <span class="text-xs text-emerald-600 ml-1" x-text="apiOk ? '● live' : '○ offline'"></span></h1>
@@ -43,7 +43,7 @@
     </nav>
 
     <div class="flex gap-2 flex-1" x-show="view==='board'">
-      <template x-for="f in firmas" :key="f.id">
+      <template x-for="f in orderedFirmas" :key="f.id">
         <button @click="toggleFirma(f.id)"
           :class="filter[f.id] ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-300'"
           class="px-3 py-1 rounded-full text-sm font-medium hover:opacity-80">
@@ -65,15 +65,17 @@
 
     <!-- ════ BOARD-VIEW (Portfolio, wie gehabt + Plan-Baum pro Karte) ════ -->
     <template x-if="view==='board'">
-      <div class="space-y-6">
-        <template x-for="f in firmas" :key="f.id">
-          <section x-show="filter[f.id]" :class="'lane-stripe-' + f.id" class="bg-white rounded-lg shadow-sm">
+      <div class="space-y-6" x-init="$nextTick(() => initFirmaSort($el))">
+        <template x-for="f in orderedFirmas" :key="f.id">
+          <section x-show="filter[f.id]" :data-firma="f.id" :class="'lane-stripe-' + f.id" class="bg-white rounded-lg shadow-sm">
             <header class="px-5 py-3 flex items-center justify-between border-b border-slate-200">
               <div class="flex items-center gap-3">
+                <span class="firma-grip cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500 select-none" title="ziehen zum Umsortieren">⠿</span>
                 <span class="text-xl" x-text="f.icon"></span>
                 <h2 class="font-semibold uppercase tracking-wide text-sm" x-text="f.label"></h2>
+                <button @click="pinTop(f.id)" class="text-slate-300 hover:text-sky-600 text-sm leading-none" title="nach oben holen">⤴</button>
                 <span class="text-xs text-slate-400" x-text="(counts[f.id]||0) + ' total'"></span>
-                <span class="text-xs font-medium text-emerald-600 ml-4" x-show="capacity[f.id]" x-text="'🟢 ' + capacity[f.id].polecats + ' Polecats frei · ' + capacity[f.id].vkslots + ' vk-Slots'"></span>
+                <span class="text-xs font-medium text-emerald-600 ml-4" x-show="capacity[f.id]" x-text="capacity[f.id] ? ('🟢 ' + capacity[f.id].polecats + ' Polecats frei · ' + capacity[f.id].vkslots + ' vk-Slots') : ''"></span>
               </div>
               <div class="text-xs text-slate-500">
                 now: <span x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span>
@@ -307,15 +309,15 @@
             <span class="text-base leading-none">🚀</span>
             <span class="text-slate-600">deployed</span>
             <code class="text-xs bg-white px-1.5 py-0.5 rounded border border-slate-200 font-mono"
-              x-text="deployShort((latestDeploy().payload || {}).sha)"></code>
+              x-text="deployShort((latestDeploy()?.payload || {}).sha)"></code>
             <span class="text-slate-400">→</span>
-            <span class="font-medium" x-text="(latestDeploy().payload || {}).env || '—'"></span>
+            <span class="font-medium" x-text="(latestDeploy()?.payload || {}).env || '—'"></span>
             <span class="text-slate-300">·</span>
             <span class="px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide"
-              :class="deployStatusCls((latestDeploy().payload || {}).status)"
-              x-text="(latestDeploy().payload || {}).status || '—'"></span>
+              :class="deployStatusCls((latestDeploy()?.payload || {}).status)"
+              x-text="(latestDeploy()?.payload || {}).status || '—'"></span>
             <span class="text-slate-300">·</span>
-            <span class="text-xs text-slate-500" x-text="fmtRel(latestDeploy().at)"></span>
+            <span class="text-xs text-slate-500" x-text="fmtRel(latestDeploy()?.at)"></span>
           </section>
 
           <!-- Beschreibung (Notion-Seiteninhalt; speichert bei Blur / ⌘+Enter) -->
@@ -1035,6 +1037,33 @@ function liveKanban() {
     toggleFirma(id) { this.filter[id] = !this.filter[id]; },
     cardsIn(firma, stage) { return this.cards.filter(c => c.firma === firma && c.stage === stage); },
     nowCount(firma) { return this.cardsIn(firma, 'now').length; },
+    firmaOrder: [],
+    get orderedFirmas() {
+      const idx = id => { const i = this.firmaOrder.indexOf(id); return i === -1 ? 100 : i; };
+      return [...this.firmas].sort((a, b) => idx(a.id) - idx(b.id));
+    },
+    loadFirmaOrder() {
+      try { const s = JSON.parse(localStorage.getItem('mk-firma-order') || '[]'); if (Array.isArray(s) && s.length) this.firmaOrder = s; } catch (e) {}
+    },
+    saveFirmaOrder() { try { localStorage.setItem('mk-firma-order', JSON.stringify(this.firmaOrder)); } catch (e) {} },
+    pinTop(id) {
+      const rest = this.orderedFirmas.map(f => f.id).filter(x => x !== id);
+      this.firmaOrder = [id, ...rest];
+      this.saveFirmaOrder();
+    },
+    initFirmaSort(el) {
+      const self = this;
+      Sortable.create(el, {
+        handle: '.firma-grip',
+        animation: 150,
+        ghostClass: 'opacity-40',
+        draggable: 'section[data-firma]',
+        onEnd() {
+          self.firmaOrder = [...el.querySelectorAll('section[data-firma]')].map(n => n.dataset.firma);
+          self.saveFirmaOrder();
+        },
+      });
+    },
     get counts() { const o = {}; this.firmas.forEach(f => o[f.id] = this.cards.filter(c => c.firma === f.id).length); return o; },
     freshClass(la) {
       if (!la) return 'activity-stale';
