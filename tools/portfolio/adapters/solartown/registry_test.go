@@ -109,3 +109,48 @@ func TestLoadRegistry_Defaults(t *testing.T) {
 		t.Errorf("expected default 'qu' registered")
 	}
 }
+
+func TestGetUniqueDSNs(t *testing.T) {
+	// 1. With nil registry
+	dsns := getUniqueDSNs(nil, "postgres://fallback")
+	if len(dsns) != 1 || dsns[0] != "postgres://fallback" {
+		t.Errorf("expected fallback DSN, got: %v", dsns)
+	}
+
+	// 2. With duplicate DSNs in registry
+	config := "qu=/opt/quantbot=postgres://shared;st=/opt/solartown=postgres://shared;other=/opt/other=postgres://unique"
+	registry, err := LoadRegistry(config)
+	if err != nil {
+		t.Fatalf("failed to load registry: %v", err)
+	}
+
+	dsns = getUniqueDSNs(registry, "postgres://fallback")
+	if len(dsns) != 2 {
+		t.Errorf("expected 2 unique DSNs, got: %d (%v)", len(dsns), dsns)
+	}
+
+	hasShared := false
+	hasUnique := false
+	for _, d := range dsns {
+		if d == "postgres://shared" {
+			hasShared = true
+		}
+		if d == "postgres://unique" {
+			hasUnique = true
+		}
+	}
+	if !hasShared || !hasUnique {
+		t.Errorf("missing expected DSNs: %v", dsns)
+	}
+
+	// 3. With empty DSN
+	configEmpty := "qu=/opt/quantbot=;st=/opt/solartown="
+	registryEmpty, err := LoadRegistry(configEmpty)
+	if err != nil {
+		t.Fatalf("failed to load registry: %v", err)
+	}
+	dsns = getUniqueDSNs(registryEmpty, "postgres://fallback")
+	if len(dsns) != 1 || dsns[0] != "postgres://fallback" {
+		t.Errorf("expected fallback DSN when registry has only empty DSNs, got: %v", dsns)
+	}
+}

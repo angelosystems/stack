@@ -27,11 +27,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var runOnceMu sync.Mutex
 
 var (
 	dsn      = envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
@@ -89,12 +92,46 @@ func main() {
 	}
 }
 
-// listenLoop: edge-triggered Betrieb. Verbindet zur beads-Postgres, LISTEN
+// getUniqueDSNs extracts all unique, non-empty DSNs from the registry.
+// Falls back to fallbackDSN if no unique DSN is found.
+func getUniqueDSNs(registry *Registry, fallbackDSN string) []string {
+	uniqueDSNs := make(map[string]bool)
+	if registry != nil {
+		for _, rig := range registry.rigs {
+			if rig.DSN != "" {
+				uniqueDSNs[rig.DSN] = true
+			}
+		}
+	}
+	if len(uniqueDSNs) == 0 && fallbackDSN != "" {
+		uniqueDSNs[fallbackDSN] = true
+	}
+	var list []string
+	for dsnStr := range uniqueDSNs {
+		list = append(list, dsnStr)
+	}
+	return list
+}
+
+// listenLoop: edge-triggered Betrieb. Verbindet zu allen registrierten Bead-DBs, LISTEN
 // auf bead_created/bead_closed; jede Notification triggert einen Scan
-// (debounced). Beim (Re-)Connect ein Dawn-Sync als Catch-Up. Kein Intervall.
+// (debounced). Beim (Re-)Connect ein Dawn-Sync als Catch-Up je DB. Kein Intervall.
 func listenLoop(pool *pgxpool.Pool) {
+	uniqueDSNs := getUniqueDSNs(reg, beadsDSN)
+	var wg sync.WaitGroup
+	for _, targetDSN := range uniqueDSNs {
+		wg.Add(1)
+		go func(dsnStr string) {
+			defer wg.Done()
+			listenOnDSN(pool, dsnStr)
+		}(targetDSN)
+	}
+	wg.Wait()
+}
+
+func listenOnDSN(pool *pgxpool.Pool, targetDSN string) {
 	for {
-		conn, err := pgx.Connect(context.Background(), beadsDSN)
+		conn, err := pgx.Connect(context.Background(), targetDSN)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "beads connect:", err)
 			time.Sleep(5 * time.Second) // Reconnect-Backoff, kein Scan-Timer
@@ -105,7 +142,7 @@ func listenLoop(pool *pgxpool.Pool) {
 				fmt.Fprintln(os.Stderr, "listen:", err)
 			}
 		}
-		fmt.Println("listening on bead_created/bead_closed — Dawn-Sync")
+		fmt.Printf("listening on %s (bead_created/bead_closed) — Dawn-Sync\n", targetDSN)
 		if err := runOnce(pool); err != nil {
 			fmt.Fprintln(os.Stderr, "dawn-sync:", err)
 		}
@@ -139,6 +176,9 @@ func drainNotifications(conn *pgx.Conn) {
 }
 
 func runOnce(p *pgxpool.Pool) error {
+	runOnceMu.Lock()
+	defer runOnceMu.Unlock()
+
 	if err := runLink(p); err != nil {
 		fmt.Fprintln(os.Stderr, "auto-link error (skipping):", err)
 	}
