@@ -1095,11 +1095,28 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 500)
 					return
 				}
+
+				// If bead is linked to an initiative, log a 'dispatched' event in portfolio.initiative_event
+				var initiativeID string
+				err = p.QueryRow(r.Context(),
+					`SELECT initiative_id FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1`,
+					body.Id).Scan(&initiativeID)
+				if err == nil && initiativeID != "" {
+					payloadBytes, _ := json.Marshal(map[string]any{
+						"lane":    body.Lane,
+						"bead_id": body.Id,
+						"note":    "Bead " + body.Id + " triaged to lane: " + body.Lane,
+					})
+					_, _ = p.Exec(r.Context(),
+						`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						 VALUES ($1, 'dispatched', 'bead', $2, $3)`,
+						initiativeID, payloadBytes, actorFrom(r))
+				}
+
 				fmt.Fprintln(w, `{"ok":true}`)
 			}
 
 			http.HandleFunc("/api/triage", dispatchHandler)
-			http.HandleFunc("/api/dispatch", dispatchHandler)
 
 			// P2.2 — Kapazitätsanzeige je Lane
 			http.HandleFunc("/api/capacity", func(w http.ResponseWriter, r *http.Request) {
