@@ -33,6 +33,7 @@ type ServiceConfig struct {
 	Name         string `yaml:"name"`
 	DeployScript string `yaml:"deploy_script"`
 	HealthProbe  string `yaml:"health_probe"`
+	Env          string `yaml:"env"`
 }
 
 func loadManifest(path string) (*Manifest, error) {
@@ -201,7 +202,7 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 		fmt.Println(fmt.Sprintf("Hole Updates für Repo in %s...", repoCfg.Path))
 		fetchCmd := exec.Command("git", "-C", repoCfg.Path, "fetch", "origin")
 		if out, err := fetchCmd.CombinedOutput(); err != nil {
-			logDeployEvent(p, initiativeID, "failed", "github", repoName, sha,
+			logDeployEvent(p, initiativeID, "failed", "staging", "github", repoName, sha,
 				fmt.Sprintf(`{"error":"git fetch failed: %s"}`, strings.ReplaceAll(string(out), `"`, `"`)))
 			http.Error(w, fmt.Sprintf("git fetch failed: %v: %s", err, out), 500)
 			return
@@ -211,7 +212,7 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 		diffCmd := exec.Command("git", "-C", repoCfg.Path, "show", "--name-only", "--oneline", sha)
 		diffOut, err := diffCmd.CombinedOutput()
 		if err != nil {
-			logDeployEvent(p, initiativeID, "failed", "github", repoName, sha,
+			logDeployEvent(p, initiativeID, "failed", "staging", "github", repoName, sha,
 				fmt.Sprintf(`{"error":"git show failed: %s"}`, strings.ReplaceAll(string(diffOut), `"`, `"`)))
 			http.Error(w, fmt.Sprintf("git show failed: %v: %s", err, diffOut), 500)
 			return
@@ -249,7 +250,7 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 		fmt.Println(fmt.Sprintf("Checke SHA %s aus...", sha))
 		checkoutCmd := exec.Command("git", "-C", repoCfg.Path, "checkout", sha)
 		if out, err := checkoutCmd.CombinedOutput(); err != nil {
-			logDeployEvent(p, initiativeID, "failed", "github", repoName, sha,
+			logDeployEvent(p, initiativeID, "failed", "staging", "github", repoName, sha,
 				fmt.Sprintf(`{"error":"git checkout failed: %s"}`, strings.ReplaceAll(string(out), `"`, `"`)))
 			http.Error(w, fmt.Sprintf("git checkout failed: %v: %s", err, out), 500)
 			return
@@ -259,8 +260,20 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 		for _, svc := range repoCfg.Services {
 			fmt.Println(fmt.Sprintf("Deploye Service %s...", svc.Name))
 
+			// Determine env
+			env := svc.Env
+			if env == "" {
+				if strings.Contains(svc.Name, "staging") {
+					env = "staging"
+				} else if strings.Contains(svc.Name, "prod") {
+					env = "prod"
+				} else {
+					env = "staging"
+				}
+			}
+
 			// Backup current binary (if possible)
-			binPath := "/opt/stack/bin/master-kanban" // Hier hart verdrahtet für Phase 1
+			binPath := envOr("MASTER_KANBAN_BIN_PATH", "/opt/stack/bin/master-kanban")
 			backupPath := binPath + ".prev"
 			backedUp := false
 			if _, err := os.Stat(binPath); err == nil {
@@ -276,7 +289,7 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 			runCmd := exec.Command(scriptPath, sha)
 			if out, err := runCmd.CombinedOutput(); err != nil {
 				fmt.Println(fmt.Sprintf("Deploy-Script Fehler: %v Output: %s", err, out))
-				logDeployEvent(p, initiativeID, "failed", "github", repoName, sha,
+				logDeployEvent(p, initiativeID, "failed", env, "github", repoName, sha,
 					fmt.Sprintf(`{"service":"%s","error":"deploy script failed: %s"}`, svc.Name, strings.ReplaceAll(string(out), `"`, `"`)))
 				http.Error(w, fmt.Sprintf("deploy script failed: %v: %s", err, out), 500)
 				return
@@ -287,7 +300,7 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 			restartCmd := exec.Command("systemctl", "restart", svc.Name)
 			if out, err := restartCmd.CombinedOutput(); err != nil {
 				fmt.Println(fmt.Sprintf("Restart Fehler: %v Output: %s", err, out))
-				logDeployEvent(p, initiativeID, "failed", "github", repoName, sha,
+				logDeployEvent(p, initiativeID, "failed", env, "github", repoName, sha,
 					fmt.Sprintf(`{"service":"%s","error":"systemctl restart failed: %s"}`, svc.Name, strings.ReplaceAll(string(out), `"`, `"`)))
 				http.Error(w, fmt.Sprintf("systemctl restart failed: %v: %s", err, out), 500)
 				return
@@ -295,13 +308,18 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 
 			// Health Probe (mit Retries)
 			probeSuccess := false
+			retrySleep := 1 * time.Second
+			if os.Getenv("DEPLOY_REACTOR_TEST") != "" {
+				retrySleep = 1 * time.Millisecond
+			}
 			for i := 0; i < 15; i++ {
-				time.Sleep(1 * time.Second)
+				time.Sleep(retrySleep)
 				fmt.Println(fmt.Sprintf("Health Check %s (Versuch %d/15)...", svc.HealthProbe, i+1))
 				
 				func() {
 					resp, err := http.Get(svc.HealthProbe)
 					if err != nil {
+						fmt.Println(fmt.Sprintf("Health check connection failed: %v", err))
 						return
 					}
 					defer resp.Body.Close()
@@ -312,11 +330,39 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 						}
 						if err := json.NewDecoder(resp.Body).Decode(&body); err == nil {
 							if strings.HasPrefix(sha, body.Version) || strings.HasPrefix(body.Version, sha) || body.Version == sha {
-								probeSuccess = true
+								// Base version check passed. Now perform Feature-Smoke!
+								smokeURL := strings.Replace(svc.HealthProbe, "/api/version", "/api/initiatives", 1)
+								if smokeURL != svc.HealthProbe {
+									fmt.Println(fmt.Sprintf("Running Feature-Smoke Check on %s...", smokeURL))
+									smokeResp, err := http.Get(smokeURL)
+									if err == nil {
+										defer smokeResp.Body.Close()
+										if smokeResp.StatusCode == 200 {
+											var initiatives []any
+											if err := json.NewDecoder(smokeResp.Body).Decode(&initiatives); err == nil {
+												probeSuccess = true
+												fmt.Println("Feature-Smoke Check passed successfully!")
+											} else {
+												fmt.Println("Feature-Smoke Check failed: invalid JSON response")
+											}
+										} else {
+											fmt.Println(fmt.Sprintf("Feature-Smoke Check failed: status %d", smokeResp.StatusCode))
+										}
+									} else {
+										fmt.Println(fmt.Sprintf("Feature-Smoke Check failed to connect: %v", err))
+									}
+								} else {
+									// No Feature-Smoke URL pattern matched, default to success of basic probe
+									probeSuccess = true
+								}
 							} else {
 								fmt.Println(fmt.Sprintf("Version mismatch: erwartet %s, erhalten %s", sha, body.Version))
 							}
+						} else {
+							fmt.Println(fmt.Sprintf("Failed to decode version json: %v", err))
 						}
+					} else {
+						fmt.Println(fmt.Sprintf("Health check status mismatch: expected 200, got %d", resp.StatusCode))
 					}
 				}()
 
@@ -333,9 +379,9 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 					restartSvcCmd := exec.Command("systemctl", "restart", svc.Name)
 					_ = restartSvcCmd.Run()
 				}
-				logDeployEvent(p, initiativeID, "rolled-back", "github", repoName, sha,
-					fmt.Sprintf(`{"service":"%s","error":"health probe failed","rolled_back":true}`, svc.Name))
-				http.Error(w, "health probe failed, rolled back", 500)
+				logDeployEvent(p, initiativeID, "rolled-back", env, "github", repoName, sha,
+					fmt.Sprintf(`{"service":"%s","error":"health probe/feature smoke failed","rolled_back":true}`, svc.Name))
+				http.Error(w, "health probe/feature smoke failed, rolled back", 500)
 				return
 			}
 
@@ -345,6 +391,8 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 					"repo":        repoName,
 					"sha":         sha,
 					"status":      "healthy",
+					"health":      "healthy",
+					"env":         env,
 					"service":     svc.Name,
 					"probe_url":   svc.HealthProbe,
 					"deployed_at": time.Now().Format(time.RFC3339),
@@ -359,7 +407,7 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 	}
 }
 
-func logDeployEvent(p *pgxpool.Pool, initiativeID, status, sourceBackend, repo, sha, errorPayload string) {
+func logDeployEvent(p *pgxpool.Pool, initiativeID, status, env, sourceBackend, repo, sha, errorPayload string) {
 	if p == nil {
 		return
 	}
@@ -373,6 +421,8 @@ func logDeployEvent(p *pgxpool.Pool, initiativeID, status, sourceBackend, repo, 
 	payloadMap["repo"] = repo
 	payloadMap["sha"] = sha
 	payloadMap["status"] = status
+	payloadMap["health"] = status
+	payloadMap["env"] = env
 	payloadMap["timestamp"] = time.Now().Format(time.RFC3339)
 
 	payloadBytes, _ := json.Marshal(payloadMap)
