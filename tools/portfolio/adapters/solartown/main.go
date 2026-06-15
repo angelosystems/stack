@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ var (
 	once      = flag.Bool("once", false, "single scan + exit")
 	watch     = flag.Bool("watch", false, "loop forever, scan every interval")
 	listen    = flag.Bool("listen", false, "edge-triggered via beads-NOTIFY")
+	link      = flag.Bool("link", false, "auto-link mode scanning all rigs")
 	interval  = flag.Duration("interval", 60*time.Second, "watch interval")
 )
 
@@ -53,7 +55,7 @@ type beadStatus struct {
 func main() {
 	flag.Parse()
 	initRegistry()
-	if !*once && !*watch && !*listen {
+	if !*once && !*watch && !*listen && !*link {
 		*once = true
 	}
 
@@ -62,6 +64,13 @@ func main() {
 		die("connect", err)
 	}
 	defer pool.Close()
+
+	if *link {
+		if err := runLink(pool); err != nil {
+			die("link error", err)
+		}
+		return
+	}
 
 	if *listen {
 		listenLoop(pool)
@@ -129,6 +138,10 @@ func drainNotifications(conn *pgx.Conn) {
 }
 
 func runOnce(p *pgxpool.Pool) error {
+	if err := runLink(p); err != nil {
+		fmt.Fprintln(os.Stderr, "auto-link error (skipping):", err)
+	}
+
 	rows, err := p.Query(context.Background(),
 		`SELECT initiative_id, ref FROM portfolio.initiative_link WHERE kind='bead'`)
 	if err != nil {
@@ -286,4 +299,126 @@ func envOr(k, d string) string {
 func die(ctx string, err error) {
 	fmt.Fprintln(os.Stderr, ctx+":", err)
 	os.Exit(1)
+}
+
+func runLink(p *pgxpool.Pool) error {
+	beadsConn, err := pgx.Connect(context.Background(), beadsDSN)
+	if err != nil {
+		return fmt.Errorf("connect to beads db %q: %w", beadsDSN, err)
+	}
+	defer beadsConn.Close(context.Background())
+
+	rows, err := p.Query(context.Background(),
+		`SELECT initiative_id, ref FROM portfolio.initiative_link WHERE kind='plan_file' ORDER BY added_at ASC`)
+	if err != nil {
+		return fmt.Errorf("query plan_file links: %w", err)
+	}
+	defer rows.Close()
+
+	slugToInitiative := make(map[string]string)
+	for rows.Next() {
+		var initiativeID, ref string
+		if err := rows.Scan(&initiativeID, &ref); err != nil {
+			return fmt.Errorf("scan plan_file link: %w", err)
+		}
+		slug := strings.TrimSuffix(strings.TrimSuffix(filepath.Base(ref), ".md"), "-prd")
+		slug = strings.ToLower(slug)
+		if slug == "" {
+			continue
+		}
+		if existing, ok := slugToInitiative[slug]; ok {
+			if existing != initiativeID {
+				fmt.Printf("[CONFLICT] Multiple initiatives match slug %q: %q and %q. First one %q wins.\n", slug, existing, initiativeID, existing)
+			}
+		} else {
+			slugToInitiative[slug] = initiativeID
+		}
+	}
+
+	beadsRows, err := beadsConn.Query(context.Background(), `
+		SELECT i.id, COALESCE(i.spec_id, ''), COALESCE(array_to_string(array_agg(l.label), ','), '') as labels
+		FROM beads.issues i
+		LEFT JOIN beads.labels l ON i.id = l.issue_id AND l.deleted_at IS NULL
+		WHERE i.deleted_at IS NULL
+		GROUP BY i.id, i.spec_id`)
+	if err != nil {
+		return fmt.Errorf("query beads: %w", err)
+	}
+	defer beadsRows.Close()
+
+	totalBeads := 0
+	newlyLinked := 0
+	alreadyLinked := 0
+	orphaned := 0
+
+	for beadsRows.Next() {
+		var id, specID, labelsStr string
+		if err := beadsRows.Scan(&id, &specID, &labelsStr); err != nil {
+			return fmt.Errorf("scan bead: %w", err)
+		}
+		totalBeads++
+
+		var labels []string
+		if labelsStr != "" {
+			labels = strings.Split(labelsStr, ",")
+		}
+
+		beadSlug := getJoinKey(specID, labels)
+		if beadSlug == "" {
+			continue
+		}
+		beadSlug = strings.ToLower(beadSlug)
+
+		if initiativeID, ok := slugToInitiative[beadSlug]; ok {
+			tag, err := p.Exec(context.Background(),
+				`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+				 VALUES ($1, 'bead', $2)
+				 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
+				initiativeID, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to link bead %s to %s: %v\n", id, initiativeID, err)
+			} else {
+				if tag.RowsAffected() > 0 {
+					newlyLinked++
+					fmt.Printf("  ✓ auto-linked bead %s to initiative %s (slug: %s)\n", id, initiativeID, beadSlug)
+				} else {
+					alreadyLinked++
+				}
+			}
+		} else {
+			orphaned++
+			fmt.Printf("[ORPHAN] Bead %s has join-key %q but matches no initiative\n", id, beadSlug)
+		}
+	}
+
+	fmt.Printf("Auto-link scan completed: %d beads processed, %d newly linked, %d already linked, %d orphaned.\n",
+		totalBeads, newlyLinked, alreadyLinked, orphaned)
+
+	return nil
+}
+
+func getJoinKey(specID string, labels []string) string {
+	if specID != "" {
+		slug := slugFromSpecID(specID)
+		if slug != "" {
+			return slug
+		}
+	}
+	for _, lbl := range labels {
+		if strings.HasPrefix(lbl, "plan:") {
+			return strings.TrimPrefix(lbl, "plan:")
+		}
+	}
+	return ""
+}
+
+func slugFromSpecID(specID string) string {
+	if specID == "" {
+		return ""
+	}
+	base := filepath.Base(specID)
+	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".md")
+	base = strings.TrimSuffix(base, "-prd")
+	return base
 }
