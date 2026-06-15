@@ -44,3 +44,21 @@ func TestGetJoinKey(t *testing.T) {
 		}
 	}
 }
+
+func TestMaskDSN(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"postgres://remote:remote@127.0.0.1:5433/solartown_clean", "postgres://***@127.0.0.1:5433/solartown_clean"},
+		{"postgres://mario:secret@db:5432/mario_brain", "postgres://***@db:5432/mario_brain"},
+		{"no-credentials", "no-credentials"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		actual := maskDSN(tc.input)
+		if actual != tc.expected {
+			t.Errorf("maskDSN(%q) = %q; expected %q", tc.input, actual, tc.expected)
+		}
+	}
+}
