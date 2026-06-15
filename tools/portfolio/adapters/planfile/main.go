@@ -38,13 +38,14 @@ import (
 )
 
 var (
-	dsn    = envOr("PORTFOLIO_DSN", "postgres://mario@127.0.0.1:5434/mario_brain?sslmode=disable")
-	stDSN  = envOr("SOLARTOWN_DSN", "postgres://remote:remote@127.0.0.1:5433/solartown_clean?sslmode=disable")
-	apiURL = envOr("PORTFOLIO_API", "http://127.0.0.1:7780")
-	apiKey = envOr("PORTFOLIO_API_KEY", "dev-secret")
-	once   = flag.Bool("once", false, "Dawn-Sync + exit")
-	watch  = flag.Bool("watch", false, "Dawn-Sync + fsnotify, langlaufend")
-	stPool *pgxpool.Pool
+	dsn     = envOr("PORTFOLIO_DSN", "postgres://mario@127.0.0.1:5434/mario_brain?sslmode=disable")
+	stDSN   = envOr("SOLARTOWN_DSN", "postgres://remote:remote@127.0.0.1:5433/solartown_clean?sslmode=disable")
+	apiURL  = envOr("PORTFOLIO_API", "http://127.0.0.1:7780")
+	apiKey  = envOr("PORTFOLIO_API_KEY", "dev-secret")
+	once    = flag.Bool("once", false, "Dawn-Sync + exit")
+	watch   = flag.Bool("watch", false, "Dawn-Sync + fsnotify, langlaufend")
+	stPool  *pgxpool.Pool
+	Version string = "dev"
 )
 
 // emitTown — Event in den Town-Strom (:5433 town.events, PRD A5/P3.1).

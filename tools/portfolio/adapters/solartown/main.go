@@ -44,6 +44,7 @@ var (
 	listen   = flag.Bool("listen", false, "edge-triggered via beads-NOTIFY")
 	link     = flag.Bool("link", false, "auto-link mode scanning all rigs")
 	interval = flag.Duration("interval", 60*time.Second, "watch interval")
+	Version  string = "dev"
 )
 
 type beadStatus struct {

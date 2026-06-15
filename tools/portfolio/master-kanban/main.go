@@ -23,9 +23,10 @@ import (
 )
 
 var (
-	dsn    string
-	pool   *pgxpool.Pool
-	stPool *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
+	dsn     string
+	pool    *pgxpool.Pool
+	stPool  *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
+	Version string = "dev"
 )
 
 // pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
@@ -1319,6 +1320,12 @@ func cmdServe() *cobra.Command {
 					}
 				}
 				fmt.Fprintf(w, `{"ok":true,"matched":%d}`+"\n", matched)
+			})
+			// /api/version - Version und SHA-Endpoint für das CD-Gate/Health-Check (SC1)
+			http.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				json.NewEncoder(w).Encode(map[string]string{"version": Version})
 			})
 			// P2 — Dispatch aus der Karte (st-bopm)
 			http.HandleFunc("/api/dispatch", handleDispatch(p))
