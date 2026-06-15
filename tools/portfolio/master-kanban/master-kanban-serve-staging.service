@@ -1,0 +1,18 @@
+[Unit]
+Description=Master-Kanban serve STAGING (mario-brain Portfolio API + static cockpit)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/stack/bin/master-kanban serve --port 7770
+Environment=PORTFOLIO_DSN=postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain_staging?sslmode=disable
+Environment=PORTFOLIO_API_KEY=dev-secret
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+User=root
+
+[Install]
+WantedBy=multi-user.target
