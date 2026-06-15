@@ -34,16 +34,16 @@ import (
 )
 
 var (
-	dsn       = envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
-	apiURL    = envOr("PORTFOLIO_API", "http://127.0.0.1:7770")
-	apiKey    = envOr("PORTFOLIO_API_KEY", "dev-secret")
-	bdRig     = envOr("BD_RIG", "/opt/solartown")
-	beadsDSN  = envOr("BEADS_DSN", "postgres://remote:remote@127.0.0.1:5433/solartown_clean")
-	once      = flag.Bool("once", false, "single scan + exit")
-	watch     = flag.Bool("watch", false, "loop forever, scan every interval")
-	listen    = flag.Bool("listen", false, "edge-triggered via beads-NOTIFY")
-	link      = flag.Bool("link", false, "auto-link mode scanning all rigs")
-	interval  = flag.Duration("interval", 60*time.Second, "watch interval")
+	dsn      = envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	apiURL   = envOr("PORTFOLIO_API", "http://127.0.0.1:7770")
+	apiKey   = envOr("PORTFOLIO_API_KEY", "dev-secret")
+	bdRig    = envOr("BD_RIG", "/opt/solartown")
+	beadsDSN = envOr("BEADS_DSN", "postgres://remote:remote@127.0.0.1:5433/solartown_clean")
+	once     = flag.Bool("once", false, "single scan + exit")
+	watch    = flag.Bool("watch", false, "loop forever, scan every interval")
+	listen   = flag.Bool("listen", false, "edge-triggered via beads-NOTIFY")
+	link     = flag.Bool("link", false, "auto-link mode scanning all rigs")
+	interval = flag.Duration("interval", 60*time.Second, "watch interval")
 )
 
 type beadStatus struct {
@@ -162,57 +162,58 @@ func runOnce(p *pgxpool.Pool) error {
 		return nil
 	}
 
-	        fmt.Printf("scanning %d bead-links via bd CLI and Rig-Registry\n", len(pairs))
-	        pushed := 0
-	        byInitiative := make(map[string][]*beadStatus)
-	
-	        for _, x := range pairs {
-	                st, err := readBead(x.beadRef)
-	                if err != nil {
-	                        fmt.Fprintf(os.Stderr, "  ✗ %s (%s): %v\n", x.beadRef, x.initiative, err)
-	                        continue
-	                }
-	                byInitiative[x.initiative] = append(byInitiative[x.initiative], st)
-	
-	                kind := "activity"
-	                if st.status == "closed" {
-	                        kind = "completed"
-	                }
-	                payload := map[string]any{"bead_status": st.status, "bead_title": st.title, "ref": x.beadRef}
-	                if err := postEvent(x.initiative, kind, payload); err != nil {
-	                        fmt.Fprintf(os.Stderr, "  ✗ post %s (%s): %v\n", x.beadRef, x.initiative, err)
-	                        continue
-	                }
-	                fmt.Printf("  ✓ %s → %s (%s, %s)\n", x.beadRef, x.initiative, kind, st.status)
-	                pushed++
-	        }
-	
-	        // P2.1 Auto-Stage Verdrahtung
-	        for initID, beads := range byInitiative {
-	                allClosed := true
-	                anyInProgress := false
-	                for _, b := range beads {
-	                        if b.status == "in_progress" {
-	                                anyInProgress = true
-	                        }
-	                        if b.status != "closed" {
-	                                allClosed = false
-	                        }
-	                }
-	                var proposed string
-	                if allClosed && len(beads) > 0 {
-	                        proposed = "watching"
-	                } else if anyInProgress {
-	                        proposed = "now"
-	                }
-	
-	                if proposed != "" {
-	                        _ = postEvent(initID, "stage_proposed", map[string]any{"stage": proposed})
-	                }
-	        }
-	
-	        fmt.Printf("pushed %d/%d events\n", pushed, len(pairs))
-	        return nil}
+	fmt.Printf("scanning %d bead-links via bd CLI and Rig-Registry\n", len(pairs))
+	pushed := 0
+	byInitiative := make(map[string][]*beadStatus)
+
+	for _, x := range pairs {
+		st, err := readBead(x.beadRef)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ %s (%s): %v\n", x.beadRef, x.initiative, err)
+			continue
+		}
+		byInitiative[x.initiative] = append(byInitiative[x.initiative], st)
+
+		kind := "activity"
+		if st.status == "closed" {
+			kind = "completed"
+		}
+		payload := map[string]any{"bead_status": st.status, "bead_title": st.title, "ref": x.beadRef}
+		if err := postEvent(x.initiative, kind, payload); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ post %s (%s): %v\n", x.beadRef, x.initiative, err)
+			continue
+		}
+		fmt.Printf("  ✓ %s → %s (%s, %s)\n", x.beadRef, x.initiative, kind, st.status)
+		pushed++
+	}
+
+	// P2.1 Auto-Stage Verdrahtung
+	for initID, beads := range byInitiative {
+		allClosed := true
+		anyInProgress := false
+		for _, b := range beads {
+			if b.status == "in_progress" {
+				anyInProgress = true
+			}
+			if b.status != "closed" {
+				allClosed = false
+			}
+		}
+		var proposed string
+		if allClosed && len(beads) > 0 {
+			proposed = "watching"
+		} else if anyInProgress {
+			proposed = "now"
+		}
+
+		if proposed != "" {
+			_ = postEvent(initID, "stage_proposed", map[string]any{"stage": proposed})
+		}
+	}
+
+	fmt.Printf("pushed %d/%d events\n", pushed, len(pairs))
+	return nil
+}
 
 func readBead(id string) (*beadStatus, error) {
 	rigDir := bdRig
@@ -301,13 +302,70 @@ func die(ctx string, err error) {
 	os.Exit(1)
 }
 
-func runLink(p *pgxpool.Pool) error {
-	beadsConn, err := pgx.Connect(context.Background(), beadsDSN)
+func scanRigBeads(p *pgxpool.Pool, slugToInitiative map[string]string, rig Rig) (total, newly, linked, orphaned int) {
+	beadsConn, err := pgx.Connect(context.Background(), rig.DSN)
 	if err != nil {
-		return fmt.Errorf("connect to beads db %q: %w", beadsDSN, err)
+		fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): connect error: %v\n", rig.Dir, rig.Prefix, err)
+		return 0, 0, 0, 0
 	}
 	defer beadsConn.Close(context.Background())
 
+	beadsRows, err := beadsConn.Query(context.Background(), `
+		SELECT i.id, COALESCE(i.spec_id, ''), COALESCE(array_to_string(array_agg(l.label), ','), '') as labels
+		FROM beads.issues i
+		LEFT JOIN beads.labels l ON i.id = l.issue_id AND l.deleted_at IS NULL
+		WHERE i.deleted_at IS NULL
+		GROUP BY i.id, i.spec_id`)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): query error: %v\n", rig.Dir, rig.Prefix, err)
+		return 0, 0, 0, 0
+	}
+	defer beadsRows.Close()
+
+	for beadsRows.Next() {
+		var id, specID, labelsStr string
+		if err := beadsRows.Scan(&id, &specID, &labelsStr); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ scan error rig %s: %v\n", rig.Prefix, err)
+			continue
+		}
+		total++
+
+		var labels []string
+		if labelsStr != "" {
+			labels = strings.Split(labelsStr, ",")
+		}
+
+		beadSlug := getJoinKey(specID, labels)
+		if beadSlug == "" {
+			continue
+		}
+		beadSlug = strings.ToLower(beadSlug)
+
+		if initiativeID, ok := slugToInitiative[beadSlug]; ok {
+			tag, err := p.Exec(context.Background(),
+				`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+				 VALUES ($1, 'bead', $2)
+				 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
+				initiativeID, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to link bead %s to %s: %v\n", id, initiativeID, err)
+			} else {
+				if tag.RowsAffected() > 0 {
+					newly++
+					fmt.Printf("  ✓ [%s] auto-linked bead %s to initiative %s (slug: %s)\n", rig.Prefix, id, initiativeID, beadSlug)
+				} else {
+					linked++
+				}
+			}
+		} else {
+			orphaned++
+			fmt.Printf("[ORPHAN] [%s] Bead %s has join-key %q but matches no initiative\n", rig.Prefix, id, beadSlug)
+		}
+	}
+	return
+}
+
+func runLink(p *pgxpool.Pool) error {
 	rows, err := p.Query(context.Background(),
 		`SELECT initiative_id, ref FROM portfolio.initiative_link WHERE kind='plan_file' ORDER BY added_at ASC`)
 	if err != nil {
@@ -335,66 +393,45 @@ func runLink(p *pgxpool.Pool) error {
 		}
 	}
 
-	beadsRows, err := beadsConn.Query(context.Background(), `
-		SELECT i.id, COALESCE(i.spec_id, ''), COALESCE(array_to_string(array_agg(l.label), ','), '') as labels
-		FROM beads.issues i
-		LEFT JOIN beads.labels l ON i.id = l.issue_id AND l.deleted_at IS NULL
-		WHERE i.deleted_at IS NULL
-		GROUP BY i.id, i.spec_id`)
-	if err != nil {
-		return fmt.Errorf("query beads: %w", err)
+	if reg == nil {
+		return fmt.Errorf("rig-registry not initialized")
 	}
-	defer beadsRows.Close()
 
 	totalBeads := 0
 	newlyLinked := 0
 	alreadyLinked := 0
-	orphaned := 0
+	totalOrphaned := 0
 
-	for beadsRows.Next() {
-		var id, specID, labelsStr string
-		if err := beadsRows.Scan(&id, &specID, &labelsStr); err != nil {
-			return fmt.Errorf("scan bead: %w", err)
-		}
-		totalBeads++
-
-		var labels []string
-		if labelsStr != "" {
-			labels = strings.Split(labelsStr, ",")
-		}
-
-		beadSlug := getJoinKey(specID, labels)
-		if beadSlug == "" {
+	scanOrder := []string{"st", "tr", "qu", "sk", "sa", "so", "cl", "ag", "mb"}
+	for _, prefix := range scanOrder {
+		rig, ok := reg.Get(prefix)
+		if !ok {
 			continue
 		}
-		beadSlug = strings.ToLower(beadSlug)
-
-		if initiativeID, ok := slugToInitiative[beadSlug]; ok {
-			tag, err := p.Exec(context.Background(),
-				`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
-				 VALUES ($1, 'bead', $2)
-				 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
-				initiativeID, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ✗ failed to link bead %s to %s: %v\n", id, initiativeID, err)
-			} else {
-				if tag.RowsAffected() > 0 {
-					newlyLinked++
-					fmt.Printf("  ✓ auto-linked bead %s to initiative %s (slug: %s)\n", id, initiativeID, beadSlug)
-				} else {
-					alreadyLinked++
-				}
-			}
-		} else {
-			orphaned++
-			fmt.Printf("[ORPHAN] Bead %s has join-key %q but matches no initiative\n", id, beadSlug)
-		}
+		fmt.Printf("  scanning rig %s (prefix %s, dsn: %s)\n", rig.Dir, rig.Prefix, maskDSN(rig.DSN))
+		t, n, al, o := scanRigBeads(p, slugToInitiative, rig)
+		totalBeads += t
+		newlyLinked += n
+		alreadyLinked += al
+		totalOrphaned += o
 	}
 
-	fmt.Printf("Auto-link scan completed: %d beads processed, %d newly linked, %d already linked, %d orphaned.\n",
-		totalBeads, newlyLinked, alreadyLinked, orphaned)
+	fmt.Printf("Auto-link scan completed (%d rigs): %d beads processed, %d newly linked, %d already linked, %d orphaned.\n",
+		len(scanOrder), totalBeads, newlyLinked, alreadyLinked, totalOrphaned)
 
 	return nil
+}
+
+func maskDSN(dsn string) string {
+	idx := strings.Index(dsn, "://")
+	if idx < 0 {
+		return dsn
+	}
+	after := dsn[idx+3:]
+	if at := strings.Index(after, "@"); at >= 0 {
+		return dsn[:idx+3] + "***" + after[at:]
+	}
+	return dsn[:idx+3] + "***"
 }
 
 func getJoinKey(specID string, labels []string) string {
