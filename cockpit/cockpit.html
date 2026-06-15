@@ -300,6 +300,24 @@
             </div>
           </div>
 
+          <!-- 🚀-Zeile: aktueller Deploy-Status (SC5) — nur sichtbar, wenn ein 'deployed'-Event vorliegt -->
+          <section x-show="latestDeploy()" x-cloak
+            class="flex items-center gap-2 flex-wrap text-sm bg-slate-50 border border-slate-200 rounded-md px-3 py-2"
+            :title="latestDeploy() ? 'Deploy-Event ' + fmtDateTime(latestDeploy().at) : ''">
+            <span class="text-base leading-none">🚀</span>
+            <span class="text-slate-600">deployed</span>
+            <code class="text-xs bg-white px-1.5 py-0.5 rounded border border-slate-200 font-mono"
+              x-text="deployShort((latestDeploy().payload || {}).sha)"></code>
+            <span class="text-slate-400">→</span>
+            <span class="font-medium" x-text="(latestDeploy().payload || {}).env || '—'"></span>
+            <span class="text-slate-300">·</span>
+            <span class="px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide"
+              :class="deployStatusCls((latestDeploy().payload || {}).status)"
+              x-text="(latestDeploy().payload || {}).status || '—'"></span>
+            <span class="text-slate-300">·</span>
+            <span class="text-xs text-slate-500" x-text="fmtRel(latestDeploy().at)"></span>
+          </section>
+
           <!-- Beschreibung (Notion-Seiteninhalt; speichert bei Blur / ⌘+Enter) -->
           <section>
             <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">Beschreibung</h3>
@@ -792,7 +810,21 @@ function liveKanban() {
     eventIcon(k) {
       return { created: '✨', moved: '➜', edited: '✏️', linked: '🔗', unlinked: '✂️',
                activity: '⚡', stage_proposed: '💡', completed: '✅', commented: '💬',
-               dispatched: '🚀' }[k] || '•';
+               dispatched: '🚀', deployed: '🚀' }[k] || '•';
+    },
+    // Deploy-Status (SC5): jüngstes 'deployed'-Event auf der Karte
+    latestDeploy() {
+      if (!this.detail || !this.detail.events) return null;
+      return this.detail.events.find(e => e.kind === 'deployed') || null;
+    },
+    deployShort(sha) {
+      if (!sha) return '—';
+      return String(sha).slice(0, 7);
+    },
+    deployStatusCls(s) {
+      if (s === 'healthy') return 'bg-emerald-100 text-emerald-800';
+      if (s === 'rolled-back' || s === 'failed') return 'bg-red-100 text-red-800';
+      return 'bg-slate-100 text-slate-600';
     },
     getVkLink(e) {
       const p = e.payload || {};
@@ -822,6 +854,12 @@ function liveKanban() {
         case 'completed': return 'Abgeschlossen' + (ref ? ': ' + ref : '');
         case 'stage_proposed': return 'Stage-Vorschlag: ' + (e.to_stage || p.stage || '?');
         case 'edited': return 'Bearbeitet' + (ref ? ': ' + ref : '');
+        case 'deployed': {
+          const sha = this.deployShort(p.sha);
+          const env = p.env || '?';
+          const status = p.status || '?';
+          return 'Deployed ' + sha + ' → ' + env + ' · ' + status;
+        }
         case 'dispatched': {
           const lane = p.lane || '';
           let text = 'Dispatched in Lane: ' + lane;
