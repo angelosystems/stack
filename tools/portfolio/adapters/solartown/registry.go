@@ -36,17 +36,18 @@ func LoadRegistry(configStr string) (*Registry, error) {
 
 	configStr = strings.TrimSpace(configStr)
 	if configStr == "" {
-		// Load standard default rigs
+		// Load standard default rigs. DSN is only needed for the LISTEN channel
+		// (solartown :5433); bead enumeration goes via bd CLI.
 		defaults := []Rig{
-			{Prefix: "st", Dir: "/opt/solartown", DSN: "postgres://remote:remote@127.0.0.1:5433/solartown_clean?sslmode=disable"},
-			{Prefix: "tr", Dir: "/opt/solartown", DSN: "postgres://remote:remote@127.0.0.1:5433/solartown_clean?sslmode=disable"},
-			{Prefix: "qu", Dir: "/opt/quantbot", DSN: "postgres://remote:remote@127.0.0.1:5433/quantbot_clean?sslmode=disable"},
-			{Prefix: "sk", Dir: "/opt/stack", DSN: "postgres://remote:remote@127.0.0.1:5433/stack_clean?sslmode=disable"},
-			{Prefix: "so", Dir: "/root/stayawesomeOS", DSN: "postgres://remote:remote@127.0.0.1:5433/stayawesome_clean?sslmode=disable"},
-			{Prefix: "sa", Dir: "/root/stayawesomeOS", DSN: "postgres://remote:remote@127.0.0.1:5433/stayawesome_clean?sslmode=disable"},
-			{Prefix: "cl", Dir: "/opt/angeloos", DSN: "postgres://remote:remote@127.0.0.1:5433/angeloos_clean?sslmode=disable"},
-			{Prefix: "ag", Dir: "/opt/angeloos", DSN: "postgres://remote:remote@127.0.0.1:5433/angeloos_clean?sslmode=disable"},
-			{Prefix: "mb", Dir: "/root/solartown/mariobrain", DSN: "postgres://remote:remote@127.0.0.1:5433/mariobrain_clean?sslmode=disable"},
+			{Prefix: "st", Dir: "/opt/solartown"},
+			{Prefix: "tr", Dir: "/opt/solartown"},
+			{Prefix: "qu", Dir: "/opt/quantbot"},
+			{Prefix: "sk", Dir: "/opt/stack"},
+			{Prefix: "so", Dir: "/root/stayawesomeOS"},
+			{Prefix: "sa", Dir: "/root/stayawesomeOS"},
+			{Prefix: "cl", Dir: "/opt/angeloos"},
+			{Prefix: "ag", Dir: "/opt/angeloos"},
+			{Prefix: "mb", Dir: "/root/solartown/mariobrain"},
 		}
 		for _, r := range defaults {
 			if err := addRig(r); err != nil {
