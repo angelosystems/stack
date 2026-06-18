@@ -31,6 +31,8 @@ tools/*
 !tools/portfolio/**
 !tools/master-kanban/
 !tools/master-kanban/**
+!tools/secrets-broker/
+!tools/secrets-broker/**
 
 docs/*
 !docs/README.md
