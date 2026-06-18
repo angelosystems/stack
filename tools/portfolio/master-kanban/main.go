@@ -147,7 +147,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdMCP(), cmdCopilot())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -170,15 +170,22 @@ func actorFrom(r *http.Request) string {
 	return "mario"
 }
 
-// checkAuth verifiziert, dass entweder ein gültiger SSO-Header (X-Auth-Request-Email) oder ein gültiger API-Key (X-Api-Key) übergeben wurde.
-func checkAuth(r *http.Request) bool {
-	if email := r.Header.Get("X-Auth-Request-Email"); email != "" {
+// authorized ist der gemeinsame Auth-Kern: gültig bei nicht-leerem SSO-Email
+// (oauth2-proxy) oder passendem API-Key. checkAuth (HTTP) und die MCP-Tools
+// (CallMeta) gehen durch denselben Pfad.
+func authorized(email, apiKey string) bool {
+	if email != "" {
 		return true
 	}
-	if key := r.Header.Get("X-Api-Key"); key != "" && key == envOr("PORTFOLIO_API_KEY", "dev-secret") {
+	if apiKey != "" && apiKey == envOr("PORTFOLIO_API_KEY", "dev-secret") {
 		return true
 	}
 	return false
+}
+
+// checkAuth verifiziert, dass entweder ein gültiger SSO-Header (X-Auth-Request-Email) oder ein gültiger API-Key (X-Api-Key) übergeben wurde.
+func checkAuth(r *http.Request) bool {
+	return authorized(r.Header.Get("X-Auth-Request-Email"), r.Header.Get("X-Api-Key"))
 }
 
 var firmaPrefix = map[string]string{
