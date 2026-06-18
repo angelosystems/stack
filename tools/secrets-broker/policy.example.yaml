@@ -1,0 +1,15 @@
+# Per-tenant secrets-broker policy.
+#
+# Holds only auth tokens and secret *names* — never values.
+# Values are injected via env-vars SECRET_<TENANT>_<NAME> at broker startup,
+# so nothing sensitive ever lands in this file or in the container image.
+tenants:
+  stayawesome:
+    token: replace-with-stayawesome-token
+    secrets:
+      - gmail_oauth
+      - pandadoc_api
+  quantumshift:
+    token: replace-with-quantumshift-token
+    secrets:
+      - binance_api
