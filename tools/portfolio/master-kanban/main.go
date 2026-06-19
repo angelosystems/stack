@@ -1119,6 +1119,167 @@ func cmdServe() *cobra.Command {
 
 			http.HandleFunc("/api/triage", dispatchHandler)
 
+			// L4 — Capture Completeness Metric
+			http.HandleFunc("/api/completeness", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				// 1. Get detector status
+				var lastRun time.Time
+				var status string
+				var unreachableRigs []string
+				err := p.QueryRow(r.Context(),
+					`SELECT last_run, status, unreachable_rigs FROM portfolio.detector_status WHERE id='leak-detector'`).
+					Scan(&lastRun, &status, &unreachableRigs)
+				if err != nil {
+					// Fallback if not run yet
+					lastRun = time.Time{}
+					status = "unknown"
+					unreachableRigs = []string{}
+				}
+
+				// 2. Query bead statistics
+				var linkedBeadsRegular, linkedBeadsCatchall, unlinkedBeads int
+				_ = p.QueryRow(r.Context(),
+					`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedBeadsRegular)
+				_ = p.QueryRow(r.Context(),
+					`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedBeadsCatchall)
+				_ = p.QueryRow(r.Context(),
+					`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='bead'`).Scan(&unlinkedBeads)
+
+				// 3. Query workspace statistics
+				var linkedWorkspacesRegular, linkedWorkspacesCatchall, unlinkedWorkspaces int
+				_ = p.QueryRow(r.Context(),
+					`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedWorkspacesRegular)
+				_ = p.QueryRow(r.Context(),
+					`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedWorkspacesCatchall)
+				_ = p.QueryRow(r.Context(),
+					`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='vk_workspace'`).Scan(&unlinkedWorkspaces)
+
+				// 4. Calculate totals
+				totalBeads := linkedBeadsRegular + linkedBeadsCatchall + unlinkedBeads
+				totalWorkspaces := linkedWorkspacesRegular + linkedWorkspacesCatchall + unlinkedWorkspaces
+				totalWorkItems := totalBeads + totalWorkspaces
+				linkedWorkItems := (linkedBeadsRegular + linkedBeadsCatchall) + (linkedWorkspacesRegular + linkedWorkspacesCatchall)
+				catchallWorkItems := linkedBeadsCatchall + linkedWorkspacesCatchall
+
+				completenessPercentage := 0.0
+				if totalWorkItems > 0 {
+					completenessPercentage = (float64(linkedWorkItems) / float64(totalWorkItems)) * 100.0
+				}
+
+				catchallPercentage := 0.0
+				if totalWorkItems > 0 {
+					catchallPercentage = (float64(catchallWorkItems) / float64(totalWorkItems)) * 100.0
+				}
+
+				response := map[string]any{
+					"detector_last_run": lastRun,
+					"detector_status": status,
+					"unreachable_rigs": unreachableRigs,
+					"beads": map[string]any{
+						"linked_regular":  linkedBeadsRegular,
+						"linked_catchall": linkedBeadsCatchall,
+						"unlinked":        unlinkedBeads,
+						"total":           totalBeads,
+					},
+					"workspaces": map[string]any{
+						"linked_regular":  linkedWorkspacesRegular,
+						"linked_catchall": linkedWorkspacesCatchall,
+						"unlinked":        unlinkedWorkspaces,
+						"total":           totalWorkspaces,
+					},
+					"total_work_items":        totalWorkItems,
+					"linked_work_items":       linkedWorkItems,
+					"completeness_percentage": completenessPercentage,
+					"catchall_percentage":     catchallPercentage,
+				}
+
+				json.NewEncoder(w).Encode(response)
+			})
+
+			// L1 — Unlinked items endpoint
+			http.HandleFunc("/api/unlinked", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				rows, err := p.Query(r.Context(),
+					`SELECT id, kind, title, firma, rig_prefix, join_key, discovered_at FROM portfolio.unlinked_item ORDER BY firma, kind, id`)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer rows.Close()
+
+				type unlinkedItem struct {
+					ID           string    `json:"id"`
+					Kind         string    `json:"kind"`
+					Title        string    `json:"title"`
+					Firma        string    `json:"firma"`
+					RigPrefix    string    `json:"rig_prefix"`
+					JoinKey      *string   `json:"join_key"`
+					DiscoveredAt time.Time `json:"discovered_at"`
+				}
+
+				items := []unlinkedItem{}
+				for rows.Next() {
+					var item unlinkedItem
+					if err := rows.Scan(&item.ID, &item.Kind, &item.Title, &item.Firma, &item.RigPrefix, &item.JoinKey, &item.DiscoveredAt); err != nil {
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					items = append(items, item)
+				}
+
+				json.NewEncoder(w).Encode(items)
+			})
+
+			// L3 — Link an unlinked item to an initiative
+			http.HandleFunc("/api/link", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct {
+					InitiativeID string `json:"initiative_id"`
+					Kind         string `json:"kind"`
+					Ref          string `json:"ref"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				if body.InitiativeID == "" || body.Kind == "" || body.Ref == "" {
+					http.Error(w, "initiative_id, kind und ref sind Pflichtfelder", 400)
+					return
+				}
+
+				_, err := p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+					 VALUES ($1, $2, $3)
+					 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
+					body.InitiativeID, body.Kind, body.Ref)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				// Log event
+				logEvent(p, body.InitiativeID, "linked", "master", "", "", fmt.Sprintf(`{"kind":"%s","ref":"%s"}`, body.Kind, escape(body.Ref)))
+
+				// Remove from unlinked table (cleanup so it disappears immediately from UI)
+				_, _ = p.Exec(r.Context(), `DELETE FROM portfolio.unlinked_item WHERE id=$1`, body.Ref)
+
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
 			// P2.2 — Kapazitätsanzeige je Lane
 			http.HandleFunc("/api/capacity", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
