@@ -163,6 +163,24 @@ func runMcpServer(apiURL string) error {
 						"required": []string{"id", "stage"},
 					},
 				},
+				{
+					Name:        "capture",
+					Description: "Erfasst ein Inline-Event/Aktion und ordnet es der passenden oder Catch-all-Initiative zu. Gewährleistet Idempotenz.",
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"text": map[string]any{
+								"type":        "string",
+								"description": "Der Aktionstext/Event-Inhalt (z.B. Quick Fix details oder Commit-Text).",
+							},
+							"firma": map[string]any{
+								"type":        "string",
+								"description": "Die Firma (stayawesome, solartown, quantbot, mariobrain, angeloos, stack). Optional.",
+							},
+						},
+						"required": []string{"text"},
+					},
+				},
 			}
 			sendMcpResult(req.ID, map[string]any{
 				"tools": tools,
@@ -178,43 +196,78 @@ func runMcpServer(apiURL string) error {
 				continue
 			}
 
-			if params.Name != "move-stage" {
+			if params.Name != "move-stage" && params.Name != "capture" {
 				sendMcpError(req.ID, -32601, "Method not found (unknown tool): "+params.Name)
 				continue
 			}
 
-			var args struct {
-				ID    string `json:"id"`
-				Stage string `json:"stage"`
-			}
-			if err := json.Unmarshal(params.Arguments, &args); err != nil {
-				sendMcpError(req.ID, -32602, "Invalid tool arguments: "+err.Error())
-				continue
-			}
+			if params.Name == "move-stage" {
+				var args struct {
+					ID    string `json:"id"`
+					Stage string `json:"stage"`
+				}
+				if err := json.Unmarshal(params.Arguments, &args); err != nil {
+					sendMcpError(req.ID, -32602, "Invalid tool arguments: "+err.Error())
+					continue
+				}
 
-			resText, isErr, err := callMcpToolMoveStage(apiURL, args.ID, args.Stage)
-			if err != nil {
+				resText, isErr, err := callMcpToolMoveStage(apiURL, args.ID, args.Stage)
+				if err != nil {
+					sendMcpResult(req.ID, mcpToolResponse{
+						Content: []mcpToolContent{
+							{
+								Type: "text",
+								Text: "Fehler beim Ausführen der Aktion: " + err.Error(),
+							},
+						},
+						IsError: true,
+					})
+					continue
+				}
+
 				sendMcpResult(req.ID, mcpToolResponse{
 					Content: []mcpToolContent{
 						{
 							Type: "text",
-							Text: "Fehler beim Ausführen der Aktion: " + err.Error(),
+							Text: resText,
 						},
 					},
-					IsError: true,
+					IsError: isErr,
 				})
-				continue
-			}
+			} else if params.Name == "capture" {
+				var args struct {
+					Text  string `json:"text"`
+					Firma string `json:"firma"`
+				}
+				if err := json.Unmarshal(params.Arguments, &args); err != nil {
+					sendMcpError(req.ID, -32602, "Invalid tool arguments: "+err.Error())
+					continue
+				}
 
-			sendMcpResult(req.ID, mcpToolResponse{
-				Content: []mcpToolContent{
-					{
-						Type: "text",
-						Text: resText,
+				resText, isErr, err := callMcpToolCapture(apiURL, args.Text, args.Firma)
+				if err != nil {
+					sendMcpResult(req.ID, mcpToolResponse{
+						Content: []mcpToolContent{
+							{
+								Type: "text",
+								Text: "Fehler beim Ausführen der Aktion: " + err.Error(),
+							},
+						},
+						IsError: true,
+					})
+					continue
+				}
+
+				sendMcpResult(req.ID, mcpToolResponse{
+					Content: []mcpToolContent{
+						{
+							Type: "text",
+							Text: resText,
+						},
 					},
-				},
-				IsError: isErr,
-			})
+					IsError: isErr,
+				})
+			}
 
 		default:
 			sendMcpError(req.ID, -32601, "Method not found: "+req.Method)
@@ -375,6 +428,57 @@ func callMcpToolMoveStage(apiURL, id, stage string) (string, bool, error) {
 	}
 
 	return fmt.Sprintf("Initiative %s erfolgreich in das Stage '%s' verschoben.", id, stage), false, nil
+}
+
+func callMcpToolCapture(apiURL, text, firma string) (string, bool, error) {
+	payload := map[string]string{
+		"text":  text,
+		"firma": firma,
+	}
+	b, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", apiURL+"/api/capture", bytes.NewReader(b))
+	if err != nil {
+		return "", true, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Forward credentials from the environment if present
+	if key := os.Getenv("PORTFOLIO_API_KEY"); key != "" {
+		req.Header.Set("X-Api-Key", key)
+	}
+	if email := os.Getenv("PORTFOLIO_AUTH_EMAIL"); email != "" {
+		req.Header.Set("X-Auth-Request-Email", email)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", true, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body)), true, nil
+	}
+
+	var res struct {
+		OK        bool   `json:"ok"`
+		MatchedID string `json:"matched_id"`
+		Skipped   bool   `json:"skipped"`
+	}
+	_ = json.Unmarshal(body, &res)
+
+	if !res.OK {
+		return "Aktion nicht erfolgreich: " + string(body), true, nil
+	}
+
+	if res.Skipped {
+		return fmt.Sprintf("Event bereits vorhanden (idempotent übersprungen) für Initiative: %s", res.MatchedID), false, nil
+	}
+
+	return fmt.Sprintf("Event erfolgreich erfasst für Initiative: %s", res.MatchedID), false, nil
 }
 
 func httpGetWrapper(url string) ([]byte, error) {
