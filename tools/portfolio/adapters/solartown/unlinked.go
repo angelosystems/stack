@@ -20,9 +20,13 @@ type Unlinked struct {
 // classifyBeads liefert für jeden Bead ohne Zuhause einen Unlinked-Eintrag.
 // Im Gegensatz zum bisherigen scanRigBeads droppt diese Funktion KEINEN Bead
 // still — auch leere Join-Keys werden als "no_join_key" sichtbar gemacht.
+// Geschlossene und ephemere Beads werden ausgeklammert (Mitigation R-A gegen Flutung).
 func classifyBeads(rigPrefix string, beads []beadRow, slugToInitiative map[string]string) []Unlinked {
 	var out []Unlinked
 	for _, b := range beads {
+		if b.Status == "closed" || b.Ephemeral {
+			continue
+		}
 		slug := getJoinKey(b.SpecID, b.Labels)
 		if slug == "" {
 			out = append(out, Unlinked{Kind: "bead", Rig: rigPrefix, Ref: b.ID, Reason: "no_join_key"})
