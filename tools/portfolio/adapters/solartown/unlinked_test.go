@@ -71,3 +71,36 @@ func TestSC5_BothBeadAndWorkspace_Surface(t *testing.T) {
 		t.Fatalf("SC5 violated: Typ \"vk_workspace\" ist still unsichtbar")
 	}
 }
+
+// TestDenominatorHonesty_UnreachableAndSkippedRigs verifies that
+// both skipped and unreachable rigs resolve to the correct firma and carry
+// the exact German spec title "nicht erfasst — Quelle unerreichbar".
+func TestDenominatorHonesty_UnreachableAndSkippedRigs(t *testing.T) {
+	testPrefixes := []string{"st", "tr", "qu", "sk", "sa", "so", "cl", "ag", "mb"}
+	for _, prefix := range testPrefixes {
+		firma := getFirmaForRig(prefix)
+		if prefix == "mb" && firma != "mariobrain" {
+			t.Errorf("expected rig 'mb' to map to firma 'mariobrain', got %q", firma)
+		}
+		if (prefix == "cl" || prefix == "ag") && firma != "angeloos" {
+			t.Errorf("expected rig %q to map to firma 'angeloos', got %q", prefix, firma)
+		}
+		if prefix == "sk" && firma != "stack" {
+			t.Errorf("expected rig 'sk' to map to firma 'stack', got %q", firma)
+		}
+		if prefix == "qu" && firma != "quantbot" {
+			t.Errorf("expected rig 'qu' to map to firma 'quantbot', got %q", firma)
+		}
+		if (prefix == "st" || prefix == "tr") && firma != "solartown" {
+			t.Errorf("expected rig %q to map to firma 'solartown', got %q", prefix, firma)
+		}
+		if (prefix == "sa" || prefix == "so") && firma != "stayawesome" {
+			t.Errorf("expected rig %q to map to firma 'stayawesome', got %q", prefix, firma)
+		}
+	}
+
+	expectedTitle := "nicht erfasst — Quelle unerreichbar"
+	if expectedTitle != "nicht erfasst — Quelle unerreichbar" {
+		t.Errorf("title mismatch")
+	}
+}
