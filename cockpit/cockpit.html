@@ -63,6 +63,52 @@
 
   <main class="p-6 space-y-6">
 
+    <!-- ════ CAPTURE-COMPLETENESS-METRIC (SC4) ════ -->
+    <div x-show="completeness" x-cloak class="bg-white border border-slate-200 rounded-lg shadow-sm p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div class="space-y-1">
+        <h3 class="text-xs uppercase font-semibold text-slate-500 tracking-wider">Capture-Completeness-Metrik (SC4)</h3>
+        <div class="flex items-baseline gap-2">
+          <span class="text-3xl font-bold tracking-tight text-slate-900" x-text="completeness ? (completeness.completeness_percentage.toFixed(1) + '%') : '—'"></span>
+          <span class="text-xs text-slate-500">
+            Nenner: <span class="font-semibold text-slate-700" x-text="completeness ? completeness.linked_work_items : 0"></span> von 
+            <span class="font-semibold text-slate-700" x-text="completeness ? completeness.total_work_items : 0"></span> Work-Items erfasst
+          </span>
+        </div>
+        <div class="w-full bg-slate-100 rounded-full h-2 max-w-md">
+          <div class="h-2 rounded-full transition-all duration-500" 
+               :class="completeness ? (completeness.completeness_percentage >= 90 ? 'bg-emerald-500' : completeness.completeness_percentage >= 70 ? 'bg-amber-500' : 'bg-red-500') : 'bg-slate-300'"
+               :style="'width: ' + (completeness ? completeness.completeness_percentage : 0) + '%'"></div>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-600 border-t md:border-t-0 md:border-l border-slate-100 pt-3 md:pt-0 md:pl-6 shrink-0">
+        <div>
+          <span class="text-slate-400 block uppercase font-medium tracking-wider text-[10px]">Verteilung</span>
+          <span>Regulär: <strong class="text-slate-800" x-text="completeness ? (completeness.beads.linked_regular + completeness.workspaces.linked_regular) : 0"></strong></span> · 
+          <span>Sonstiges (Catch-all): <strong class="text-slate-800" x-text="completeness ? (completeness.beads.linked_catchall + completeness.workspaces.linked_catchall) : 0"></strong> (<span x-text="completeness ? (completeness.catchall_percentage.toFixed(1) + '%') : '0%'"></span>)</span>
+        </div>
+        <div>
+          <span class="text-slate-400 block uppercase font-medium tracking-wider text-[10px]">Unlinked</span>
+          <span>Beads: <strong class="text-red-600" x-text="completeness ? completeness.beads.unlinked : 0"></strong></span> · 
+          <span>Workspaces: <strong class="text-red-600" x-text="completeness ? completeness.workspaces.unlinked : 0"></strong></span>
+        </div>
+        <div>
+          <span class="text-slate-400 block uppercase font-medium tracking-wider text-[10px]">Detektor Heartbeat</span>
+          <div class="flex items-center gap-1.5 mt-0.5">
+            <span :class="completeness ? (completeness.detector_status === 'healthy' ? 'bg-emerald-500' : 'bg-amber-500') : 'bg-slate-300'" class="w-2.5 h-2.5 rounded-full inline-block"></span>
+            <span class="font-medium text-slate-800" x-text="completeness ? (completeness.detector_status === 'healthy' ? 'Healthy' : 'Warning') : 'Unknown'"></span>
+            <span class="text-slate-400">·</span>
+            <span :title="completeness ? fmtDateTime(completeness.detector_last_run) : ''" x-text="completeness ? fmtRel(completeness.detector_last_run) : 'nie'"></span>
+          </div>
+          <!-- Alarm bei unvollständigem Nenner -->
+          <span x-show="completeness && completeness.unreachable_rigs.length" x-cloak class="text-[10px] text-red-600 font-semibold block mt-0.5" 
+                :title="'Sicherheits-Alarm: ' + (completeness ? completeness.unreachable_rigs.join(', ') : '') + ' offline!'">
+            ⚠ Alarm: Rigs offline!
+          </span>
+        </div>
+      </div>
+    </div>
+
     <!-- ════ BOARD-VIEW (Portfolio, wie gehabt + Plan-Baum pro Karte) ════ -->
     <template x-if="view==='board'">
       <div class="space-y-6" x-init="$nextTick(() => initFirmaSort($el))">
@@ -208,6 +254,64 @@
           </template>
         </ul>
         <div x-show="!backlogFiltered.length" class="px-5 py-8 text-center text-sm text-slate-400">Backlog leer 🎉</div>
+      </section>
+    </template>
+
+    <!-- ════ UNLINKED-VIEW (L1 — Unlinked-Lane / needs home) ════ -->
+    <template x-if="view==='unlinked'">
+      <section class="bg-white rounded-lg shadow-sm">
+        <header class="px-5 py-3 border-b border-slate-200 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <h2 class="font-semibold uppercase tracking-wide text-sm">⚠ Unlinked — braucht ein Zuhause</h2>
+            <span class="text-xs text-slate-400">Work-Items ohne Initiative-Zuhause · Gruppiert nach Firma</span>
+          </div>
+          <button @click="refresh()" class="text-xs px-2 py-1 border border-slate-300 rounded hover:bg-slate-50">Aktualisieren</button>
+        </header>
+        <div class="p-5 space-y-6">
+          <template x-for="f in orderedFirmas" :key="'unlinked-f-' + f.id">
+            <div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50">
+              <header class="bg-white border-b border-slate-200 px-4 py-2.5 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-lg" x-text="f.icon"></span>
+                  <h3 class="font-semibold text-slate-800" x-text="f.label"></h3>
+                  <span class="text-xs bg-red-100 text-red-800 px-2 py-0.5 rounded-full font-semibold" 
+                        x-text="unlinkedItems.filter(i => i.firma === f.id).length + ' unlinked'"></span>
+                </div>
+              </header>
+              <ul class="divide-y divide-slate-100 bg-white">
+                <template x-for="item in unlinkedItems.filter(i => i.firma === f.id)" :key="item.id">
+                  <li class="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-4 text-sm hover:bg-slate-50">
+                    <div class="flex-1 min-w-0 space-y-1">
+                      <div class="flex items-center gap-2">
+                        <span x-text="item.kind === 'bead' ? '🐝 Bead' : '🔧 Workspace'" 
+                              :class="item.kind === 'bead' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'"
+                              class="text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase shrink-0"></span>
+                        <code class="text-xs font-mono text-slate-400 shrink-0" x-text="item.id"></code>
+                        <span x-show="item.join_key" class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-mono shrink-0" :title="'Join Key: ' + item.join_key" x-text="'Key: ' + item.join_key"></span>
+                      </div>
+                      <h4 class="font-medium text-slate-900 truncate" x-text="item.title"></h4>
+                    </div>
+
+                    <!-- Zuweisungs-Triage direkt vor Ort -->
+                    <div class="flex items-center gap-2 shrink-0">
+                      <select @change="assignUnlinked(item, $event.target.value)" class="text-xs border border-slate-300 rounded px-2 py-1.5 bg-white max-w-[200px] focus:outline-none focus:ring-2 focus:ring-sky-300">
+                        <option value="">Zuhause zuweisen…</option>
+                        <option :value="f.id + '-catch-all'" class="font-semibold">→ Catch-all / Sonstiges</option>
+                        <template x-for="c in cards.filter(c => c.firma === f.id && c.stage !== 'done')" :key="c.id">
+                          <option :value="c.id" x-text="c.title"></option>
+                        </template>
+                      </select>
+                      <span class="text-[11px] text-slate-400" :title="fmtDateTime(item.discovered_at)" x-text="fmtRel(item.discovered_at)"></span>
+                    </div>
+                  </li>
+                </template>
+                <div x-show="!unlinkedItems.filter(i => i.firma === f.id).length" class="p-4 text-center text-xs text-slate-400">
+                  Keine verwaisten Work-Items für <span x-text="f.label"></span>. Ausgezeichnet! 🎉
+                </div>
+              </ul>
+            </div>
+          </template>
+        </div>
       </section>
     </template>
 
@@ -537,6 +641,7 @@ function liveKanban() {
       { id: 'board',    label: 'Board' },
       { id: 'pipeline', label: 'Pipeline' },
       { id: 'backlog',  label: 'Backlog' },
+      { id: 'unlinked', label: 'Unlinked (⚠)' },
     ],
     firmas: [
       { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 4 },
@@ -571,6 +676,8 @@ function liveKanban() {
     backlog: [],
     backlogRig: '',
     lastFetched: '',
+    unlinkedItems: [],
+    completeness: null,
 
     dispatchOpen: false,
     dispatchBead: null,
@@ -898,6 +1005,40 @@ function liveKanban() {
       } catch (e) { console.error('capacity fetch:', e); }
     },
 
+    async loadUnlinked() {
+      try {
+        const r = await fetch(this.apiBase + '/api/unlinked');
+        this.unlinkedItems = r.ok ? await r.json() : [];
+      } catch (e) {
+        console.error('unlinked fetch:', e);
+      }
+    },
+
+    async loadCompleteness() {
+      try {
+        const r = await fetch(this.apiBase + '/api/completeness');
+        this.completeness = r.ok ? await r.json() : null;
+      } catch (e) {
+        console.error('completeness fetch:', e);
+      }
+    },
+
+    async assignUnlinked(item, initiativeId) {
+      if (!initiativeId) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initiative_id: initiativeId, kind: item.kind, ref: item.id }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.showToast('Work-Item erfolgreich verknüpft!');
+        await this.refresh();
+      } catch (e) {
+        this.showToast('Verknüpfung fehlgeschlagen: ' + e.message, 'error');
+      }
+    },
+
     async refresh(silent) {
       try {
         const r = await fetch(this.apiBase + '/api/initiatives');
@@ -906,6 +1047,8 @@ function liveKanban() {
         this.apiOk = true;
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
+        if (this.view === 'unlinked') await this.loadUnlinked();
+        await this.loadCompleteness();
         const t = new Date().toLocaleTimeString('de-DE');
         this.lastFetched = (silent ? 'auto-refresh' : 'geladen') + ' ' + t;
       } catch (e) {
@@ -918,6 +1061,7 @@ function liveKanban() {
       this.view = v;
       if (v === 'pipeline') await this.loadAllPlans();
       if (v === 'backlog') await this.loadBacklog();
+      if (v === 'unlinked') await this.loadUnlinked();
     },
 
     // ── Plan-Baum (P4.1) ──
