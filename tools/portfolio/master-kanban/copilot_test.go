@@ -202,3 +202,187 @@ func TestCopilotChatEndpoint_ValidationAndAuth(t *testing.T) {
 		t.Errorf("expected 1 history item, got %d", count)
 	}
 }
+
+func TestAgenticOrchestrator_Loop(t *testing.T) {
+	// Set up ZAI_KEY and REVIEWER_BASE_URL to point to mock server
+	os.Setenv("ZAI_KEY", "mock-zai-key")
+	defer os.Unsetenv("ZAI_KEY")
+
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration tests; database not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration tests; database ping failed:", err)
+	}
+
+	// Self-healing schema migration in case the column is missing in test Postgres
+	_, _ = p.Exec(ctx, "ALTER TABLE portfolio.initiative ADD COLUMN IF NOT EXISTS stage_locked_by_human boolean DEFAULT false")
+
+	// Create test card
+	testCardID := "sa-test-loop-card"
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testCardID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testCardID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
+		VALUES ($1, 'stayawesome', 'idea', 'Test Loop Card', 'plan_file')`, testCardID)
+	if err != nil {
+		t.Fatalf("failed to create test card: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testCardID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testCardID)
+
+	// Keep track of the number of GLM calls
+	callCount := 0
+
+	// Set up mock GLM Server representing Z.ai anthropic compatibility
+	mockGLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+
+		// Read the request to see what was sent
+		var reqBody struct {
+			System   string              `json:"system"`
+			Messages []map[string]string `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+
+		if callCount == 1 {
+			// First call: GLM returns a tool call request
+			resp := map[string]any{
+				"content": []map[string]any{
+					{
+						"type": "text",
+						"text": `Hallo! Ich sehe, dass die Karte aktuell im Stage 'idea' ist. Ich verschiebe sie nun nach 'watching'.
+TOOL_CALL: move-stage {"id": "sa-test-loop-card", "stage": "watching"}`,
+					},
+				},
+			}
+			b, _ := json.Marshal(resp)
+			w.Write(b)
+		} else {
+			// Second call: GLM gets the TOOL_RESPONSE and returns the final response
+			// Verify that the TOOL_RESPONSE was indeed passed in the messages
+			hasToolResponse := false
+			for _, m := range reqBody.Messages {
+				if strings.Contains(m["content"], "TOOL_RESPONSE: Erfolg:") {
+					hasToolResponse = true
+				}
+			}
+			if !hasToolResponse {
+				t.Errorf("expected messages in the second call to contain TOOL_RESPONSE, but did not find it")
+			}
+
+			resp := map[string]any{
+				"content": []map[string]any{
+					{
+						"type": "text",
+						"text": "Ich habe die Karte erfolgreich in das Stage 'watching' verschoben. Kann ich sonst noch etwas tun?",
+					},
+				},
+			}
+			b, _ := json.Marshal(resp)
+			w.Write(b)
+		}
+	}))
+	defer mockGLM.Close()
+
+	os.Setenv("REVIEWER_BASE_URL", mockGLM.URL)
+	defer os.Unsetenv("REVIEWER_BASE_URL")
+
+	// Instantiate the orchestrator
+	orchestrator := NewAgenticOrchestrator(p)
+
+	chatReq := CopilotChatRequest{
+		InitiativeID: testCardID,
+		SessionID:    "test-loop-session-456",
+		Message:      "Verschiebe diese Initiative bitte in das watching-Stage.",
+	}
+
+	answer, err := orchestrator.Orchestrate(ctx, chatReq, "test-user@stayawesome.de")
+	if err != nil {
+		t.Fatalf("Orchestrate failed: %v", err)
+	}
+
+	expectedAnswer := "Ich habe die Karte erfolgreich in das Stage 'watching' verschoben. Kann ich sonst noch etwas tun?"
+	if answer != expectedAnswer {
+		t.Errorf("expected answer %q, got %q", expectedAnswer, answer)
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected exactly 2 calls to the mock GLM server, but got %d", callCount)
+	}
+
+	// Verify that stage in database was updated to "watching"
+	var currentStage string
+	err = p.QueryRow(ctx, "SELECT stage FROM portfolio.initiative WHERE id = $1", testCardID).Scan(&currentStage)
+	if err != nil {
+		t.Fatalf("failed to query stage: %v", err)
+	}
+	if currentStage != "watching" {
+		t.Errorf("expected stage 'watching', got %q", currentStage)
+	}
+
+	// Verify that the conversation events were correctly inserted (L4)
+	var events []struct {
+		Kind  string
+		Actor string
+	}
+	rows, err := p.Query(ctx, "SELECT kind, actor FROM portfolio.initiative_event WHERE initiative_id = $1 ORDER BY at ASC", testCardID)
+	if err != nil {
+		t.Fatalf("failed to query events: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ev struct {
+			Kind  string
+			Actor string
+		}
+		if err := rows.Scan(&ev.Kind, &ev.Actor); err == nil {
+			events = append(events, ev)
+		}
+	}
+
+	// We expect at least:
+	// 1. User message event (kind: activity, actor: test-user@stayawesome.de)
+	// 2. Moved event (kind: moved, actor: test-user@stayawesome.de)
+	// 3. Assistant message event (kind: activity, actor: mcp-copilot)
+	if len(events) < 3 {
+		t.Errorf("expected at least 3 events, got %d: %+v", len(events), events)
+	}
+
+	hasUserMsg := false
+	hasMoved := false
+	hasAssistantMsg := false
+	for _, ev := range events {
+		if ev.Kind == "activity" && ev.Actor == "test-user@stayawesome.de" {
+			hasUserMsg = true
+		}
+		if ev.Kind == "moved" && ev.Actor == "test-user@stayawesome.de" {
+			hasMoved = true
+		}
+		if ev.Kind == "activity" && ev.Actor == "mcp-copilot" {
+			hasAssistantMsg = true
+		}
+	}
+
+	if !hasUserMsg {
+		t.Errorf("expected a user message activity event with actor test-user@stayawesome.de")
+	}
+	if !hasMoved {
+		t.Errorf("expected a moved event with actor test-user@stayawesome.de")
+	}
+	if !hasAssistantMsg {
+		t.Errorf("expected an assistant message activity event with actor mcp-copilot")
+	}
+}
+

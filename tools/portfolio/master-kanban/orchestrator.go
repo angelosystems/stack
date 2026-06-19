@@ -38,6 +38,34 @@ func NewAgenticOrchestrator(p *pgxpool.Pool) *AgenticOrchestrator {
 	return &AgenticOrchestrator{pool: p}
 }
 
+func mapPathToActiveWorktree(planPath string) string {
+	if !strings.HasPrefix(planPath, "/opt/stack/") {
+		return planPath
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return strings.Replace(planPath, "/opt/stack", "/root/solartown/stack/polecats/flint/stack", 1)
+	}
+	idx := strings.Index(cwd, "/polecats/")
+	if idx != -1 {
+		sub := cwd[idx+len("/polecats/"):]
+		slashIdx := strings.Index(sub, "/")
+		var polecatName string
+		if slashIdx != -1 {
+			polecatName = sub[:slashIdx]
+		} else {
+			polecatName = sub
+		}
+		prefix := cwd[:idx]
+		activeWorktree := prefix + "/polecats/" + polecatName + "/stack"
+		return strings.Replace(planPath, "/opt/stack", activeWorktree, 1)
+	}
+	if strings.Contains(cwd, "/solartown/stack/") {
+		return strings.Replace(planPath, "/opt/stack", "/root/solartown/stack", 1)
+	}
+	return strings.Replace(planPath, "/opt/stack", "/root/solartown/stack/polecats/flint/stack", 1)
+}
+
 // Orchestrate executes the conversation grounding, calls the LLM, parses any Tool calls
 // requested by the LLM, executes the local tool (e.g., move-stage), passes results back,
 // and persists conversation history as initiative activity events.
@@ -67,11 +95,8 @@ func (ao *AgenticOrchestrator) Orchestrate(ctx context.Context, req CopilotChatR
 
 	prdContent := "Kein verlinktes Plan-Dokument (PRD) vorhanden."
 	if planPath != "" {
-		// Map to current worktree path
-		mappedPath := planPath
-		if strings.HasPrefix(planPath, "/opt/stack/") {
-			mappedPath = strings.Replace(planPath, "/opt/stack", "/root/solartown/stack/polecats/flint/stack", 1)
-		}
+		// Map to current worktree path dynamically
+		mappedPath := mapPathToActiveWorktree(planPath)
 		if raw, err := os.ReadFile(mappedPath); err == nil {
 			prdContent = string(raw)
 		}
