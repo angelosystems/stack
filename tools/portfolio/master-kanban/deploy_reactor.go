@@ -315,7 +315,7 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 			for i := 0; i < 15; i++ {
 				time.Sleep(retrySleep)
 				fmt.Println(fmt.Sprintf("Health Check %s (Versuch %d/15)...", svc.HealthProbe, i+1))
-				
+
 				func() {
 					resp, err := http.Get(svc.HealthProbe)
 					if err != nil {

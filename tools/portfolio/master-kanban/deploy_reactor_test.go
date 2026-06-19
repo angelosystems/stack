@@ -142,8 +142,8 @@ repos:
 	payloadMap := map[string]any{
 		"action": "closed",
 		"pull_request": map[string]any{
-			"merged":             true,
-			"merge_commit_sha":   headSha,
+			"merged":           true,
+			"merge_commit_sha": headSha,
 			"base": map[string]any{
 				"ref": "main",
 			},
@@ -377,8 +377,8 @@ repos:
 	payloadMap := map[string]any{
 		"action": "closed",
 		"pull_request": map[string]any{
-			"merged":             true,
-			"merge_commit_sha":   headSha,
+			"merged":           true,
+			"merge_commit_sha": headSha,
 			"base": map[string]any{
 				"ref": "main",
 			},

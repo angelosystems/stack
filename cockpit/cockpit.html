@@ -268,13 +268,16 @@
                     </div>
                     
                     <!-- Quick action triage helper for beads (PRD steady-state-triage) -->
-                    <div class="mt-3 pt-2 border-t border-slate-100 flex justify-end">
-                      <template x-if="item.kind === 'bead'">
-                        <button @click="openDispatch(item)" class="text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>
-                      </template>
-                      <template x-if="item.kind === 'vk_workspace'">
-                        <a :href="'http://' + location.hostname + ':54682/workspaces/' + item.id" target="_blank" rel="noopener" class="text-xs px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-semibold border border-indigo-200 flex items-center gap-1">Öffnen ↗</a>
-                      </template>
+                    <div class="mt-3 pt-2 border-t border-slate-100 flex justify-between items-center gap-2">
+                      <button @click="openLinkModal(item)" class="text-xs px-2.5 py-1 rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold border border-emerald-200 flex items-center gap-1">🔗 Zuweisen…</button>
+                      <div class="flex gap-1">
+                        <template x-if="item.kind === 'bead'">
+                          <button @click="openDispatch(item)" class="text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>
+                        </template>
+                        <template x-if="item.kind === 'vk_workspace'">
+                          <a :href="'http://' + location.hostname + ':54682/workspaces/' + item.id" target="_blank" rel="noopener" class="text-xs px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-semibold border border-indigo-200 flex items-center gap-1">Öffnen ↗</a>
+                        </template>
+                      </div>
                     </div>
                   </div>
                 </template>
@@ -593,6 +596,44 @@
     </div>
   </div>
 
+  <!-- ════ LINKING MODAL (Phase 3a) ════ -->
+  <div x-show="linkOpen" x-cloak class="fixed inset-0 bg-slate-900/40 z-50 flex items-center justify-center p-4" @click.self="closeLinkModal()">
+    <div class="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden flex flex-col"
+         x-show="linkOpen"
+         x-transition:enter="transition ease-out duration-150"
+         x-transition:enter-start="opacity-0 scale-95"
+         x-transition:enter-end="opacity-100 scale-100"
+         x-transition:leave="transition ease-in duration-100"
+         x-transition:leave-start="opacity-100 scale-100"
+         x-transition:leave-end="opacity-0 scale-95"
+         @click.stop>
+      <header class="px-5 py-3 border-b border-slate-200 flex justify-between items-center">
+        <h3 class="font-semibold text-slate-800">Element verknüpfen (Zuweisen)</h3>
+        <button @click="closeLinkModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+      </header>
+      <main class="px-5 py-4 space-y-4 text-sm text-slate-600">
+        <div>
+          <span class="text-xs font-mono text-slate-400" x-text="linkItem ? (linkItem.kind === 'bead' ? '🐝 bead' : '🔧 vk-workspace') + ' · ' + linkItem.id : ''"></span>
+          <h4 class="font-medium text-slate-900 text-base" x-text="linkItem ? linkItem.title : ''"></h4>
+        </div>
+        
+        <div class="space-y-1.5">
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Initiative auswählen (<span x-text="linkItem ? (firmas.find(f => f.id === linkItem.firma) || {label: linkItem.firma}).label : ''"></span>)</label>
+          <select x-model="linkInitiativeId" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300 bg-white">
+            <option value="">-- Initiative auswählen --</option>
+            <template x-for="c in linkCandidates" :key="c.id">
+              <option :value="c.id" x-text="c.title + ' (' + c.id + ')'"></option>
+            </template>
+          </select>
+        </div>
+      </main>
+      <footer class="px-5 py-3 border-t border-slate-200 bg-slate-50 flex justify-end gap-2">
+        <button @click="closeLinkModal()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-100 bg-white">Abbrechen</button>
+        <button @click="submitLink()" :disabled="!linkInitiativeId" class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold">Verknüpfen</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- Toasts Container -->
   <div class="fixed bottom-5 right-5 z-50 space-y-2">
     <template x-for="t in toasts" :key="t.id">
@@ -658,6 +699,10 @@ function liveKanban() {
     dispatchOpen: false,
     dispatchBead: null,
     dispatchLane: 'hack',
+
+    linkOpen: false,
+    linkItem: null,
+    linkInitiativeId: '',
 
     dispatchDrawerOpen: false,
     dispatchDrawerLane: 'hack',
@@ -1140,6 +1185,51 @@ function liveKanban() {
         this.closeDispatch();
       } catch (e) {
         this.showToast('Triage miss: ' + e.message, 'error');
+      }
+    },
+
+    openLinkModal(item) {
+      this.linkItem = item;
+      const candidates = this.linkCandidates;
+      const catchAll = candidates.find(c => c.id.endsWith('-catch-all') || c.id.endsWith('-catchall'));
+      this.linkInitiativeId = catchAll ? catchAll.id : '';
+      this.linkOpen = true;
+    },
+    closeLinkModal() {
+      this.linkOpen = false;
+      this.linkItem = null;
+      this.linkInitiativeId = '';
+    },
+    get linkCandidates() {
+      if (!this.linkItem) return [];
+      const items = this.cards.filter(c => c.firma === this.linkItem.firma);
+      return items.sort((a, b) => {
+        const aCatch = a.id.endsWith('-catch-all') || a.id.endsWith('-catchall');
+        const bCatch = b.id.endsWith('-catch-all') || b.id.endsWith('-catchall');
+        if (aCatch && !bCatch) return -1;
+        if (!aCatch && bCatch) return 1;
+        return a.title.localeCompare(b.title);
+      });
+    },
+    async submitLink() {
+      if (!this.linkItem || !this.linkInitiativeId) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            initiative_id: this.linkInitiativeId,
+            kind: this.linkItem.kind,
+            ref: this.linkItem.id
+          }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.showToast('Erfolgreich zugewiesen!');
+        this.unlinkedItems = this.unlinkedItems.filter(x => x.id !== this.linkItem.id);
+        this.closeLinkModal();
+        await this.refresh(true);
+      } catch (e) {
+        this.showToast('Zuweisung misslungen: ' + e.message, 'error');
       }
     },
 
