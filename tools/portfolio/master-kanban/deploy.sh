@@ -17,6 +17,9 @@ go build -ldflags "-X main.Version=${SHA}" -o /opt/stack/bin/${BINARY_NAME}.${SH
 echo "Atomic swap of binary to /opt/stack/bin/${BINARY_NAME}"
 mv /opt/stack/bin/${BINARY_NAME}.${SHA} /opt/stack/bin/${BINARY_NAME}
 
+echo "Creating symlink /usr/local/bin/mk -> /opt/stack/bin/${BINARY_NAME}"
+ln -sf /opt/stack/bin/${BINARY_NAME} /usr/local/bin/mk
+
 echo "Restarting service ${SERVICE_NAME}"
 systemctl restart ${SERVICE_NAME}
 
