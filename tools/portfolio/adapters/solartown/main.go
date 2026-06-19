@@ -304,60 +304,92 @@ func die(ctx string, err error) {
 }
 
 type beadRow struct {
-	ID     string   `json:"id"`
-	SpecID string   `json:"spec_id"`
-	Labels []string `json:"labels"`
+	ID        string   `json:"id"`
+	SpecID    string   `json:"spec_id"`
+	Labels    []string `json:"labels"`
+	Status    string   `json:"status"`
+	Ephemeral bool     `json:"ephemeral"`
+	Title     string   `json:"title"`
 }
 
-func scanRigBeads(p *pgxpool.Pool, slugToInitiative map[string]string, rig Rig) (total, newly, linked, orphaned int) {
+func scanRigBeads(p *pgxpool.Pool, slugToInitiative map[string]string, rig Rig, linkedBeads map[string]bool) (total, newly, linked, orphaned int, err error) {
 	cmd := exec.Command("bd", "list", "--json")
 	cmd.Dir = rig.Dir
 	out, err := cmd.Output()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): bd list error: %v\n", rig.Dir, rig.Prefix, err)
-		return 0, 0, 0, 0
+		return 0, 0, 0, 0, fmt.Errorf("bd list error: %w", err)
 	}
 
 	var beads []beadRow
 	if err := json.Unmarshal(out, &beads); err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): json error: %v\n", rig.Dir, rig.Prefix, err)
-		return 0, 0, 0, 0
+		return 0, 0, 0, 0, fmt.Errorf("json unmarshal error: %w", err)
 	}
 
 	for _, b := range beads {
 		total++
 
 		beadSlug := getJoinKey(b.SpecID, b.Labels)
-		if beadSlug == "" {
-			continue
-		}
-		beadSlug = strings.ToLower(beadSlug)
+		if beadSlug != "" {
+			beadSlug = strings.ToLower(beadSlug)
 
-		if initiativeID, ok := slugToInitiative[beadSlug]; ok {
-			tag, err := p.Exec(context.Background(),
-				`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
-				 VALUES ($1, 'bead', $2)
-				 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
-				initiativeID, b.ID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ✗ failed to link bead %s to %s: %v\n", b.ID, initiativeID, err)
-			} else {
-				if tag.RowsAffected() > 0 {
-					newly++
-					fmt.Printf("  ✓ [%s] auto-linked bead %s to initiative %s (slug: %s)\n", rig.Prefix, b.ID, initiativeID, beadSlug)
+			if initiativeID, ok := slugToInitiative[beadSlug]; ok {
+				tag, err := p.Exec(context.Background(),
+					`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+					 VALUES ($1, 'bead', $2)
+					 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
+					initiativeID, b.ID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  ✗ failed to link bead %s to %s: %v\n", b.ID, initiativeID, err)
 				} else {
-					linked++
+					if tag.RowsAffected() > 0 {
+						newly++
+						fmt.Printf("  ✓ [%s] auto-linked bead %s to initiative %s (slug: %s)\n", rig.Prefix, b.ID, initiativeID, beadSlug)
+					} else {
+						linked++
+					}
+					linkedBeads[b.ID] = true // Mark as linked
+				}
+			} else {
+				orphaned++
+				fmt.Printf("[ORPHAN] [%s] Bead %s has join-key %q but matches no initiative\n", rig.Prefix, b.ID, beadSlug)
+			}
+		}
+
+		// Leak detector: check if bead is unlinked (open, non-ephemeral, and not linked)
+		if b.Status != "closed" && !b.Ephemeral {
+			if !linkedBeads[b.ID] {
+				firma := getFirmaForRig(rig.Prefix)
+				title := b.Title
+				if title == "" {
+					title = b.ID
+				}
+				_, err = p.Exec(context.Background(),
+					`INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key)
+					 VALUES ($1, 'bead', $2, $3, $4, $5)
+					 ON CONFLICT (id) DO UPDATE SET
+					    kind = EXCLUDED.kind,
+					    title = EXCLUDED.title,
+					    firma = EXCLUDED.firma,
+					    rig_prefix = EXCLUDED.rig_prefix,
+					    join_key = EXCLUDED.join_key,
+					    discovered_at = now()`,
+					b.ID, title, firma, rig.Prefix, sqlNullString(beadSlug))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  ✗ failed to record unlinked bead %s: %v\n", b.ID, err)
 				}
 			}
-		} else {
-			orphaned++
-			fmt.Printf("[ORPHAN] [%s] Bead %s has join-key %q but matches no initiative\n", rig.Prefix, b.ID, beadSlug)
 		}
 	}
 	return
 }
 
 func runLink(p *pgxpool.Pool) error {
+	// 1. Clear unlinked_items table
+	_, err := p.Exec(context.Background(), `DELETE FROM portfolio.unlinked_item`)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ failed to clear portfolio.unlinked_item: %v\n", err)
+	}
+
 	rows, err := p.Query(context.Background(),
 		`SELECT initiative_id, ref FROM portfolio.initiative_link WHERE kind='plan_file' ORDER BY added_at ASC`)
 	if err != nil {
@@ -389,10 +421,32 @@ func runLink(p *pgxpool.Pool) error {
 		return fmt.Errorf("rig-registry not initialized")
 	}
 
+	// Load existing linked beads and workspaces
+	linkedBeads := make(map[string]bool)
+	linkedWorkspaces := make(map[string]bool)
+
+	linkRows, err := p.Query(context.Background(), `SELECT kind, ref FROM portfolio.initiative_link WHERE kind IN ('bead', 'vk_workspace')`)
+	if err == nil {
+		defer linkRows.Close()
+		for linkRows.Next() {
+			var kind, ref string
+			if err := linkRows.Scan(&kind, &ref); err == nil {
+				if kind == "bead" {
+					linkedBeads[ref] = true
+				} else if kind == "vk_workspace" {
+					linkedWorkspaces[ref] = true
+				}
+			}
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "  ⚠ failed to query existing links: %v\n", err)
+	}
+
 	totalBeads := 0
 	newlyLinked := 0
 	alreadyLinked := 0
 	totalOrphaned := 0
+	var unreachableRigs []string
 
 	scanOrder := []string{"st", "tr", "qu", "sk", "sa", "so", "cl", "ag", "mb"}
 	for _, prefix := range scanOrder {
@@ -401,11 +455,58 @@ func runLink(p *pgxpool.Pool) error {
 			continue
 		}
 		fmt.Printf("  scanning rig %s (prefix %s)\n", rig.Dir, rig.Prefix)
-		t, n, al, o := scanRigBeads(p, slugToInitiative, rig)
+		t, n, al, o, err := scanRigBeads(p, slugToInitiative, rig, linkedBeads)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ skip rig %s (prefix %s): %v\n", rig.Dir, rig.Prefix, err)
+			unreachableRigs = append(unreachableRigs, rig.Prefix)
+
+			firma := getFirmaForRig(rig.Prefix)
+			rigID := "rig:" + rig.Prefix
+			title := fmt.Sprintf("Rig %s is unreachable", rig.Prefix)
+
+			_, dbErr := p.Exec(context.Background(),
+				`INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key)
+				 VALUES ($1, 'rig', $2, $3, $4, NULL)
+				 ON CONFLICT (id) DO UPDATE SET
+				    kind = EXCLUDED.kind,
+				    title = EXCLUDED.title,
+				    firma = EXCLUDED.firma,
+				    rig_prefix = EXCLUDED.rig_prefix,
+				    join_key = EXCLUDED.join_key,
+				    discovered_at = now()`,
+				rigID, title, firma, rig.Prefix)
+			if dbErr != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to record unreachable rig %s: %v\n", rig.Prefix, dbErr)
+			}
+			continue
+		}
 		totalBeads += t
 		newlyLinked += n
 		alreadyLinked += al
 		totalOrphaned += o
+	}
+
+	// 2. Scan unlinked vk-Workspaces
+	if err := scanUnlinkedWorkspaces(p, linkedWorkspaces); err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ failed to scan unlinked workspaces: %v\n", err)
+	}
+
+	// 3. Update detector status (heartbeat)
+	detectorStatus := "healthy"
+	if len(unreachableRigs) > 0 {
+		detectorStatus = "warning"
+	}
+	_, err = p.Exec(context.Background(),
+		`INSERT INTO portfolio.detector_status (id, last_run, status, unreachable_rigs, error_message)
+		 VALUES ('leak-detector', now(), $1, $2, NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    unreachable_rigs = EXCLUDED.unreachable_rigs,
+		    error_message = EXCLUDED.error_message`,
+		detectorStatus, unreachableRigs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ✗ failed to update detector status: %v\n", err)
 	}
 
 	fmt.Printf("Auto-link scan completed (%d rigs): %d beads processed, %d newly linked, %d already linked, %d orphaned.\n",
@@ -450,4 +551,121 @@ func slugFromSpecID(specID string) string {
 	base = strings.TrimSuffix(base, ".md")
 	base = strings.TrimSuffix(base, "-prd")
 	return base
+}
+
+func sqlNullString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func getFirmaForRig(prefix string) string {
+	switch prefix {
+	case "sa", "so":
+		return "stayawesome"
+	case "st", "tr":
+		return "solartown"
+	case "qu":
+		return "quantbot"
+	case "mb":
+		return "mariobrain"
+	case "ag", "cl":
+		return "angeloos"
+	case "sk":
+		return "stack"
+	default:
+		return "solartown"
+	}
+}
+
+func hexToUUID(h string) string {
+	h = strings.ToLower(h)
+	if len(h) != 32 {
+		return h
+	}
+	return fmt.Sprintf("%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+}
+
+func parseWorkspaceMetadata(name, branch string) (rigPrefix, firma string) {
+	knownPrefixes := []string{"st", "tr", "qu", "sk", "sa", "so", "cl", "ag", "mb"}
+	lowerBranch := strings.ToLower(branch)
+	lowerName := strings.ToLower(name)
+
+	for _, prefix := range knownPrefixes {
+		if strings.Contains(lowerBranch, prefix+"-") || strings.Contains(lowerBranch, "/"+prefix) ||
+			strings.Contains(lowerName, "sol-"+prefix) || strings.Contains(lowerName, "bd/"+prefix) ||
+			strings.Contains(lowerName, "["+prefix+"-") {
+			rigPrefix = prefix
+			break
+		}
+	}
+
+	if rigPrefix == "" {
+		for _, prefix := range knownPrefixes {
+			if strings.Contains(lowerBranch, prefix) || strings.Contains(lowerName, prefix) {
+				rigPrefix = prefix
+				break
+			}
+		}
+	}
+
+	if rigPrefix == "" {
+		rigPrefix = "st"
+	}
+
+	return rigPrefix, getFirmaForRig(rigPrefix)
+}
+
+func scanUnlinkedWorkspaces(p *pgxpool.Pool, linkedWorkspaces map[string]bool) error {
+	vkDB := envOr("VK_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
+		return nil
+	}
+
+	cmd := exec.Command("sqlite3", "-readonly", "-separator", "\x1f", vkDB,
+		"SELECT hex(id), name, branch FROM workspaces WHERE archived = 0 AND worktree_deleted = 0;")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("sqlite query workspaces: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\x1f")
+		if len(parts) != 3 {
+			continue
+		}
+		hexID := parts[0]
+		name := parts[1]
+		branch := parts[2]
+
+		uuid := hexToUUID(hexID)
+		if !linkedWorkspaces[uuid] {
+			rigPrefix, firma := parseWorkspaceMetadata(name, branch)
+			title := name
+			if title == "" {
+				title = fmt.Sprintf("Workspace %s", uuid)
+			}
+
+			_, err = p.Exec(context.Background(),
+				`INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key)
+				 VALUES ($1, 'vk_workspace', $2, $3, $4, NULL)
+				 ON CONFLICT (id) DO UPDATE SET
+				    kind = EXCLUDED.kind,
+				    title = EXCLUDED.title,
+				    firma = EXCLUDED.firma,
+				    rig_prefix = EXCLUDED.rig_prefix,
+				    join_key = EXCLUDED.join_key,
+				    discovered_at = now()`,
+				uuid, title, firma, rigPrefix)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to insert unlinked workspace %s: %v\n", uuid, err)
+			}
+		}
+	}
+	return nil
 }
