@@ -287,11 +287,13 @@
                         <li class="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-4 text-sm hover:bg-slate-50">
                           <div class="flex-1 min-w-0 space-y-1">
                             <div class="flex items-center gap-2">
-                              <span x-text="item.kind === 'bead' ? '🐝 Bead' : '🔧 Workspace'" 
-                                    :class="item.kind === 'bead' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'"
+                              <span x-text="item.kind === 'bead' ? '🐝 Bead' : (item.kind === 'rig' ? '📡 Rig offline' : '🔧 Workspace')"
+                                    :class="item.kind === 'bead' ? 'bg-amber-100 text-amber-800' : (item.kind === 'rig' ? 'bg-rose-100 text-rose-800' : 'bg-indigo-100 text-indigo-800')"
                                     class="text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase shrink-0"></span>
                               <code class="text-xs font-mono text-slate-400 shrink-0" x-text="item.id"></code>
                               <span x-show="item.join_key" class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-mono shrink-0" :title="'Join Key: ' + item.join_key" x-text="'Key: ' + item.join_key"></span>
+                              <span x-show="item.reason" class="text-[10px] text-rose-600 font-medium shrink-0"
+                                    x-text="({no_join_key: 'kein Join-Key', no_match: 'kein Match', no_link: 'kein Link', source_unreachable: 'Quelle unerreichbar'})[item.reason] || item.reason"></span>
                             </div>
                             <h4 class="font-medium text-slate-900 truncate" x-text="item.title"></h4>
                           </div>

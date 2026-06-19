@@ -1134,8 +1134,13 @@ func cmdServe() *cobra.Command {
 				if err != nil {
 					// Fallback if not run yet
 					lastRun = time.Time{}
-					status = "unknown"
+					status = "danger"
 					unreachableRigs = []string{}
+				} else {
+					// Liveness check (Nygard/Hohpe MUST-FIX): change status to danger if detector run is stale (> 5m) or zero
+					if lastRun.IsZero() || time.Since(lastRun) > 5*time.Minute {
+						status = "danger"
+					}
 				}
 
 				// 2. Query bead statistics
@@ -1156,10 +1161,15 @@ func cmdServe() *cobra.Command {
 				_ = p.QueryRow(r.Context(),
 					`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='vk_workspace'`).Scan(&unlinkedWorkspaces)
 
-				// 4. Calculate totals
+				// 3.5 Query unreachable/skipped rig statistics (Nenner-Ehrlichkeit, SC1b/PRD-Must-Fix)
+				var unlinkedRigs int
+				_ = p.QueryRow(r.Context(),
+					`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='rig'`).Scan(&unlinkedRigs)
+
+				// 4. Calculate totals (unlinkedRigs must not fall out of the denominator!)
 				totalBeads := linkedBeadsRegular + linkedBeadsCatchall + unlinkedBeads
 				totalWorkspaces := linkedWorkspacesRegular + linkedWorkspacesCatchall + unlinkedWorkspaces
-				totalWorkItems := totalBeads + totalWorkspaces
+				totalWorkItems := totalBeads + totalWorkspaces + unlinkedRigs
 				linkedWorkItems := (linkedBeadsRegular + linkedBeadsCatchall) + (linkedWorkspacesRegular + linkedWorkspacesCatchall)
 				catchallWorkItems := linkedBeadsCatchall + linkedWorkspacesCatchall
 
@@ -1189,6 +1199,10 @@ func cmdServe() *cobra.Command {
 						"unlinked":        unlinkedWorkspaces,
 						"total":           totalWorkspaces,
 					},
+					"rigs": map[string]any{
+						"unlinked": unlinkedRigs,
+						"total":    unlinkedRigs,
+					},
 					"total_work_items":        totalWorkItems,
 					"linked_work_items":       linkedWorkItems,
 					"completeness_percentage": completenessPercentage,
@@ -1196,42 +1210,6 @@ func cmdServe() *cobra.Command {
 				}
 
 				json.NewEncoder(w).Encode(response)
-			})
-
-			// L1 — Unlinked items endpoint
-			http.HandleFunc("/api/unlinked", func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-
-				rows, err := p.Query(r.Context(),
-					`SELECT id, kind, title, firma, rig_prefix, join_key, discovered_at FROM portfolio.unlinked_item ORDER BY firma, kind, id`)
-				if err != nil {
-					http.Error(w, err.Error(), 500)
-					return
-				}
-				defer rows.Close()
-
-				type unlinkedItem struct {
-					ID           string    `json:"id"`
-					Kind         string    `json:"kind"`
-					Title        string    `json:"title"`
-					Firma        string    `json:"firma"`
-					RigPrefix    string    `json:"rig_prefix"`
-					JoinKey      *string   `json:"join_key"`
-					DiscoveredAt time.Time `json:"discovered_at"`
-				}
-
-				items := []unlinkedItem{}
-				for rows.Next() {
-					var item unlinkedItem
-					if err := rows.Scan(&item.ID, &item.Kind, &item.Title, &item.Firma, &item.RigPrefix, &item.JoinKey, &item.DiscoveredAt); err != nil {
-						http.Error(w, err.Error(), 500)
-						return
-					}
-					items = append(items, item)
-				}
-
-				json.NewEncoder(w).Encode(items)
 			})
 
 			// L3 — Link an unlinked item to an initiative
@@ -1512,6 +1490,7 @@ func cmdServe() *cobra.Command {
 					RigPrefix    string    `json:"rig_prefix"`
 					JoinKey      string    `json:"join_key"`
 					DiscoveredAt time.Time `json:"discovered_at"`
+					Reason       string    `json:"reason"`
 				}
 
 				items := []UnlinkedJSONItem{}
@@ -1520,6 +1499,18 @@ func cmdServe() *cobra.Command {
 					if err := rows.Scan(&item.ID, &item.Kind, &item.Title, &item.Firma, &item.RigPrefix, &item.JoinKey, &item.DiscoveredAt); err != nil {
 						http.Error(w, err.Error(), 500)
 						return
+					}
+					// Dynamically populate reason field based on unlinked item properties
+					if item.Kind == "bead" {
+						if item.JoinKey == "" {
+							item.Reason = "no_join_key"
+						} else {
+							item.Reason = "no_match"
+						}
+					} else if item.Kind == "vk_workspace" {
+						item.Reason = "no_link"
+					} else if item.Kind == "rig" {
+						item.Reason = "source_unreachable"
 					}
 					items = append(items, item)
 				}
@@ -1540,8 +1531,13 @@ func cmdServe() *cobra.Command {
 					Scan(&det.LastRun, &det.Status, &det.UnreachableRigs, &det.ErrorMessage)
 				if err != nil {
 					// It's possible the status hasn't been written yet or table is empty.
-					det.Status = "unknown"
+					det.Status = "danger"
 					det.UnreachableRigs = []string{}
+				} else {
+					// Liveness check (Nygard/Hohpe MUST-FIX): change status to danger if detector run is stale (> 5m) or zero
+					if det.LastRun.IsZero() || time.Since(det.LastRun) > 5*time.Minute {
+						det.Status = "danger"
+					}
 				}
 
 				response := map[string]any{

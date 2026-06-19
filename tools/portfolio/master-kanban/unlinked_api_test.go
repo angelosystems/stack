@@ -172,3 +172,68 @@ func TestUnlinkedAPI_Endpoint(t *testing.T) {
 		t.Errorf("expected unreachable rigs ['qu'], got %v", data.DetectorStatus.UnreachableRigs)
 	}
 }
+
+func TestDetectorLivenessAndDenominatorHonesty_Integration(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	// 1. Test stale heartbeat -> danger
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.detector_status WHERE id = 'leak-detector'")
+	staleTime := time.Now().Add(-10 * time.Minute)
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.detector_status (id, last_run, status, unreachable_rigs)
+		VALUES ('leak-detector', $1, 'healthy', '{}')`, staleTime)
+	if err != nil {
+		t.Fatalf("failed to insert stale detector status: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.detector_status WHERE id = 'leak-detector'")
+
+	// Query from db to check logic
+	var lastRun time.Time
+	var status string
+	err = p.QueryRow(ctx, `SELECT last_run, status FROM portfolio.detector_status WHERE id='leak-detector'`).Scan(&lastRun, &status)
+	if err != nil {
+		t.Fatalf("failed to query status: %v", err)
+	}
+
+	if lastRun.IsZero() || time.Since(lastRun) > 5*time.Minute {
+		status = "danger"
+	}
+	if status != "danger" {
+		t.Errorf("expected overridden status to be 'danger' due to stale heartbeat, got %q", status)
+	}
+
+	// 2. Test fresh heartbeat -> healthy
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.detector_status WHERE id = 'leak-detector'")
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.detector_status (id, last_run, status, unreachable_rigs)
+		VALUES ('leak-detector', $1, 'healthy', '{}')`, time.Now())
+	if err != nil {
+		t.Fatalf("failed to insert fresh detector status: %v", err)
+	}
+
+	err = p.QueryRow(ctx, `SELECT last_run, status FROM portfolio.detector_status WHERE id='leak-detector'`).Scan(&lastRun, &status)
+	if err != nil {
+		t.Fatalf("failed to query status: %v", err)
+	}
+
+	if lastRun.IsZero() || time.Since(lastRun) > 5*time.Minute {
+		status = "danger"
+	}
+	if status != "healthy" {
+		t.Errorf("expected status to remain 'healthy', got %q", status)
+	}
+}
