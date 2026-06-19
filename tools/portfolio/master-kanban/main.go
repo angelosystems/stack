@@ -147,7 +147,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -625,8 +625,12 @@ func cmdServe() *cobra.Command {
 			http.HandleFunc("/api/move", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Auth-Request-Email, X-Api-Key")
 				if r.Method == "OPTIONS" {
+					return
+				}
+				if !checkAuth(r) {
+					http.Error(w, "unauthorized", 401)
 					return
 				}
 				var body struct{ Id, Stage string }
@@ -634,13 +638,14 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
-				_, err := p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = 				                              `, body.Id, body.Stage)
+				_, err := p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, body.Id, body.Stage)
 				if err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
+			http.HandleFunc("/api/copilot/chat", handleCopilotChat(p))
 			// A6 — Review-Workbench: Dokument lesen
 			http.HandleFunc("/api/plan-content", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
