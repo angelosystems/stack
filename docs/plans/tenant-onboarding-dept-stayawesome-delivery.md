@@ -84,3 +84,15 @@ spätere Tenants (`dept-quantbot`, `dept-solartown`).
    Code-Change erwartet, nur Authentik-Gruppe + Seed-Daten.
 2. **Mario-Approval-Path** für Cross-Tenant-Operationen bleibt manuell, bis
    `ag-cross-tenant-trennung` Phase 2 liefert.
+
+## End-to-End-Validierungsbericht (Jade, 2026-06-19)
+
+Wir haben den End-to-End-Pfad für den ersten Tenant `dept-stayawesome` mit Angelo als Akteur erfolgreich validiert:
+
+1. **SSO-Login-Kanal (SC-1):** Der Header `X-Auth-Request-Email: angelo@stayawesome.de` wird korrekt durchgereicht. Das Backend ordnet Anfragen via `actorFrom` der Domäne zu.
+2. **Workspace-Sichtbarkeit (SC-2):** Über `/api/backlog?firma=stayawesome` werden die `sa-*` Plan-Items korrekt ausgeliefert.
+3. **Plan-Review (SC-3):** Das Persistieren von Verdicts funktioniert. Verdicts werden ordnungsgemäß an die Plan-Dateien angehängt.
+4. **Initiative-Event-Generierung (SC-4):** Beim Klick auf Review wird das entsprechende `reviewed` Event mit `source_backend=plan_file` und `actor=angelo@stayawesome.de` in die `portfolio.initiative_event` Datenbank-Tabelle geschrieben.
+5. **Master-Kanban-Update (SC-5):** Die Sparkline-Aktivität und das `last_activity`-Feld der entsprechenden Karte auf dem Board aktualisieren sich innerhalb der geforderten 5 Sekunden.
+
+Sämtliche Invarianten zur Tenant-Isolation (Sicherheits-Schutzgitter aus §5/§8) sind im Coder-Template `dept-stayawesome/main.tf` und dem begleitenden Negativ-Test `negative-access.sh` umgesetzt. Eine zweite Abteilung (z. B. `dept-finance`) lässt sich ohne Code-Änderungen rein deklarativ über die Terraform-Variablen konfigurieren.
