@@ -62,3 +62,61 @@ func TestMaskDSN(t *testing.T) {
 		}
 	}
 }
+
+func TestHexToUUID(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"AA108CBA4A144387A75A9D9684BD9E78", "aa108cba-4a14-4387-a75a-9d9684bd9e78"},
+		{"05021F1F765846E299B6A36B39DC39F8", "05021f1f-7658-46e2-99b6-a36b39dc39f8"},
+		{"short", "short"},
+	}
+	for _, tc := range tests {
+		actual := hexToUUID(tc.input)
+		if actual != tc.expected {
+			t.Errorf("hexToUUID(%q) = %q; expected %q", tc.input, actual, tc.expected)
+		}
+	}
+}
+
+func TestGetFirmaForRig(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"sa", "stayawesome"},
+		{"st", "solartown"},
+		{"qu", "quantbot"},
+		{"sk", "stack"},
+		{"invalid", "solartown"},
+	}
+	for _, tc := range tests {
+		actual := getFirmaForRig(tc.input)
+		if actual != tc.expected {
+			t.Errorf("getFirmaForRig(%q) = %q; expected %q", tc.input, actual, tc.expected)
+		}
+	}
+}
+
+func TestParseWorkspaceMetadata(t *testing.T) {
+	tests := []struct {
+		name       string
+		branch     string
+		expectedRP string
+		expectedF  string
+	}{
+		{"sol-st-yozd", "vk/0502-sol-st-yozd", "st", "solartown"},
+		{"sol-tr-vksmoke", "vk/aa10-sol-tr", "tr", "solartown"},
+		{"[tr-8et5z] some task", "bd/tr-8et5z", "tr", "solartown"},
+		{"sol-so-pgus", "vk/74e1-sol-so-pgus", "so", "stayawesome"},
+		{"unknown", "unknown", "st", "solartown"},
+	}
+	for _, tc := range tests {
+		rp, f := parseWorkspaceMetadata(tc.name, tc.branch)
+		if rp != tc.expectedRP || f != tc.expectedF {
+			t.Errorf("parseWorkspaceMetadata(%q, %q) = (%q, %q); expected (%q, %q)",
+				tc.name, tc.branch, rp, f, tc.expectedRP, tc.expectedF)
+		}
+	}
+}
