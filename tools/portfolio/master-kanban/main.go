@@ -26,7 +26,7 @@ var (
 	dsn     string
 	pool    *pgxpool.Pool
 	stPool  *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
-	Version string = "dev"
+	Version string        = "dev"
 )
 
 // pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
@@ -1175,8 +1175,8 @@ func cmdServe() *cobra.Command {
 
 				response := map[string]any{
 					"detector_last_run": lastRun,
-					"detector_status": status,
-					"unreachable_rigs": unreachableRigs,
+					"detector_status":   status,
+					"unreachable_rigs":  unreachableRigs,
 					"beads": map[string]any{
 						"linked_regular":  linkedBeadsRegular,
 						"linked_catchall": linkedBeadsCatchall,
@@ -2097,4 +2097,3 @@ func cmdCapture() *cobra.Command {
 	c.Flags().StringVarP(&firma, "firma", "f", "", "Firma (stayawesome|solartown|quantbot|mariobrain|angeloos|stack)")
 	return c
 }
-

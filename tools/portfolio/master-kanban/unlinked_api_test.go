@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,5 +171,120 @@ func TestUnlinkedAPI_Endpoint(t *testing.T) {
 	}
 	if len(data.DetectorStatus.UnreachableRigs) != 1 || data.DetectorStatus.UnreachableRigs[0] != "qu" {
 		t.Errorf("expected unreachable rigs ['qu'], got %v", data.DetectorStatus.UnreachableRigs)
+	}
+}
+
+func TestLinkAPI_Endpoint(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	// Clean up any test records
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = 'st-catch-all' AND kind = 'bead' AND ref = 'test-unlinked-bead-link'")
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.unlinked_item WHERE id = 'test-unlinked-bead-link'")
+
+	// Insert test unlinked item
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key, discovered_at)
+		VALUES ('test-unlinked-bead-link', 'bead', 'Test Link Bead', 'solartown', 'st', 'some-join-key', $1)`,
+		time.Now())
+	if err != nil {
+		t.Fatalf("failed to insert test unlinked bead: %v", err)
+	}
+	defer func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.unlinked_item WHERE id = 'test-unlinked-bead-link'")
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = 'st-catch-all' AND kind = 'bead' AND ref = 'test-unlinked-bead-link'")
+	}()
+
+	// Simulating /api/link endpoint request
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/link", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		var body struct {
+			InitiativeID string `json:"initiative_id"`
+			Kind         string `json:"kind"`
+			Ref          string `json:"ref"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if body.InitiativeID == "" || body.Kind == "" || body.Ref == "" {
+			http.Error(w, "initiative_id, kind und ref sind Pflichtfelder", 400)
+			return
+		}
+
+		_, err := p.Exec(r.Context(),
+			`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (initiative_id, kind, ref) DO NOTHING`,
+			body.InitiativeID, body.Kind, body.Ref)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		// Remove from unlinked table
+		_, _ = p.Exec(r.Context(), `DELETE FROM portfolio.unlinked_item WHERE id=$1`, body.Ref)
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Send POST request
+	reqBody := `{"initiative_id":"st-catch-all","kind":"bead","ref":"test-unlinked-bead-link"}`
+	resp, err := http.Post(server.URL+"/api/link", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("failed to post link request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var resData map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&resData); err != nil {
+		t.Fatalf("failed to decode link response: %v", err)
+	}
+
+	if resData["ok"] != true {
+		t.Errorf("expected ok: true, got %v", resData["ok"])
+	}
+
+	// Verify unlinked item is gone from database
+	var count int
+	err = p.QueryRow(ctx, "SELECT COUNT(*) FROM portfolio.unlinked_item WHERE id = 'test-unlinked-bead-link'").Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query unlinked_item table: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected unlinked item to be deleted from table, but count is %d", count)
+	}
+
+	// Verify initiative link was inserted correctly
+	var linkExists bool
+	err = p.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM portfolio.initiative_link WHERE initiative_id = 'st-catch-all' AND kind = 'bead' AND ref = 'test-unlinked-bead-link')").Scan(&linkExists)
+	if err != nil {
+		t.Fatalf("failed to query initiative_link table: %v", err)
+	}
+	if !linkExists {
+		t.Errorf("expected initiative link to be inserted into table, but it was not found")
 	}
 }
