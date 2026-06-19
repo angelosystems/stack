@@ -278,37 +278,44 @@
                         x-text="unlinkedItems.filter(i => i.firma === f.id).length + ' unlinked'"></span>
                 </div>
               </header>
-              <ul class="divide-y divide-slate-100 bg-white">
-                <template x-for="item in unlinkedItems.filter(i => i.firma === f.id)" :key="item.id">
-                  <li class="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-4 text-sm hover:bg-slate-50">
-                    <div class="flex-1 min-w-0 space-y-1">
-                      <div class="flex items-center gap-2">
-                        <span x-text="item.kind === 'bead' ? '🐝 Bead' : '🔧 Workspace'" 
-                              :class="item.kind === 'bead' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'"
-                              class="text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase shrink-0"></span>
-                        <code class="text-xs font-mono text-slate-400 shrink-0" x-text="item.id"></code>
-                        <span x-show="item.join_key" class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-mono shrink-0" :title="'Join Key: ' + item.join_key" x-text="'Key: ' + item.join_key"></span>
-                      </div>
-                      <h4 class="font-medium text-slate-900 truncate" x-text="item.title"></h4>
-                    </div>
+              <div class="bg-white">
+                <template x-for="group in getUnlinkedByAge(f.id)" :key="group.id">
+                  <div>
+                    <div class="bg-slate-100/60 px-4 py-1.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider border-y border-slate-100" x-text="group.label"></div>
+                    <ul class="divide-y divide-slate-100 bg-white">
+                      <template x-for="item in group.items" :key="item.id">
+                        <li class="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-4 text-sm hover:bg-slate-50">
+                          <div class="flex-1 min-w-0 space-y-1">
+                            <div class="flex items-center gap-2">
+                              <span x-text="item.kind === 'bead' ? '🐝 Bead' : '🔧 Workspace'" 
+                                    :class="item.kind === 'bead' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'"
+                                    class="text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase shrink-0"></span>
+                              <code class="text-xs font-mono text-slate-400 shrink-0" x-text="item.id"></code>
+                              <span x-show="item.join_key" class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-mono shrink-0" :title="'Join Key: ' + item.join_key" x-text="'Key: ' + item.join_key"></span>
+                            </div>
+                            <h4 class="font-medium text-slate-900 truncate" x-text="item.title"></h4>
+                          </div>
 
-                    <!-- Zuweisungs-Triage direkt vor Ort -->
-                    <div class="flex items-center gap-2 shrink-0">
-                      <select @change="assignUnlinked(item, $event.target.value)" class="text-xs border border-slate-300 rounded px-2 py-1.5 bg-white max-w-[200px] focus:outline-none focus:ring-2 focus:ring-sky-300">
-                        <option value="">Zuhause zuweisen…</option>
-                        <option :value="f.id + '-catch-all'" class="font-semibold">→ Catch-all / Sonstiges</option>
-                        <template x-for="c in cards.filter(c => c.firma === f.id && c.stage !== 'done')" :key="c.id">
-                          <option :value="c.id" x-text="c.title"></option>
-                        </template>
-                      </select>
-                      <span class="text-[11px] text-slate-400" :title="fmtDateTime(item.discovered_at)" x-text="fmtRel(item.discovered_at)"></span>
-                    </div>
-                  </li>
+                          <!-- Zuweisungs-Triage direkt vor Ort -->
+                          <div class="flex items-center gap-2 shrink-0">
+                            <select @change="assignUnlinked(item, $event.target.value)" class="text-xs border border-slate-300 rounded px-2 py-1.5 bg-white max-w-[200px] focus:outline-none focus:ring-2 focus:ring-sky-300">
+                              <option value="">Zuhause zuweisen…</option>
+                              <option :value="f.id + '-catch-all'" class="font-semibold">→ Catch-all / Sonstiges</option>
+                              <template x-for="c in cards.filter(c => c.firma === f.id && c.stage !== 'done')" :key="c.id">
+                                <option :value="c.id" x-text="c.title"></option>
+                              </template>
+                            </select>
+                            <span class="text-[11px] text-slate-400" :title="fmtDateTime(item.discovered_at)" x-text="fmtRel(item.discovered_at)"></span>
+                          </div>
+                        </li>
+                      </template>
+                    </ul>
+                  </div>
                 </template>
                 <div x-show="!unlinkedItems.filter(i => i.firma === f.id).length" class="p-4 text-center text-xs text-slate-400">
                   Keine verwaisten Work-Items für <span x-text="f.label"></span>. Ausgezeichnet! 🎉
                 </div>
-              </ul>
+              </div>
             </div>
           </template>
         </div>
@@ -1021,6 +1028,28 @@ function liveKanban() {
       } catch (e) {
         console.error('completeness fetch:', e);
       }
+    },
+
+    getUnlinkedByAge(firmaId) {
+      const items = this.unlinkedItems.filter(i => i.firma === firmaId);
+      const groups = [
+        { id: 'new', label: 'Neu (heute)', items: [] },
+        { id: 'recent', label: 'Kürzlich (diese Woche)', items: [] },
+        { id: 'old', label: 'Alt (älter)', items: [] }
+      ];
+      const now = Date.now();
+      for (const item of items) {
+        const ageMs = now - new Date(item.discovered_at).getTime();
+        const ageDays = ageMs / (1000 * 60 * 60 * 24);
+        if (ageDays < 1) {
+          groups[0].items.push(item);
+        } else if (ageDays < 7) {
+          groups[1].items.push(item);
+        } else {
+          groups[2].items.push(item);
+        }
+      }
+      return groups.filter(g => g.items.length > 0);
     },
 
     async assignUnlinked(item, initiativeId) {

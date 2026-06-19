@@ -71,3 +71,18 @@ func TestSC5_BothBeadAndWorkspace_Surface(t *testing.T) {
 		t.Fatalf("SC5 violated: Typ \"vk_workspace\" ist still unsichtbar")
 	}
 }
+
+// TestClassifyBeads_ExcludesClosedAndEphemeral verifies that closed or ephemeral beads are excluded from classifyBeads output.
+func TestClassifyBeads_ExcludesClosedAndEphemeral(t *testing.T) {
+	closedBead := beadRow{ID: "st-closed", SpecID: "", Labels: nil, Status: "closed"}
+	ephemeralBead := beadRow{ID: "st-ephem", SpecID: "", Labels: nil, Ephemeral: true}
+	openBead := beadRow{ID: "st-open", SpecID: "", Labels: nil, Status: "open"}
+
+	got := classifyBeads("st", []beadRow{closedBead, ephemeralBead, openBead}, map[string]string{})
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 unlinked bead (the open one), got %d (%+v)", len(got), got)
+	}
+	if got[0].Ref != "st-open" {
+		t.Fatalf("expected open bead st-open, got %q", got[0].Ref)
+	}
+}
