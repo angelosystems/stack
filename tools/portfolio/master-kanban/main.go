@@ -147,7 +147,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -1706,3 +1706,170 @@ TBD
 		json.NewEncoder(w).Encode(respData)
 	}
 }
+
+func normalizeFirma(f string) string {
+	f = strings.ToLower(strings.TrimSpace(f))
+	if _, ok := firmaPrefix[f]; ok {
+		return f
+	}
+	for k, v := range firmaPrefix {
+		if f == v {
+			return k
+		}
+	}
+	return f
+}
+
+func guessFirmaFromCWD() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	cwd = strings.ToLower(cwd)
+	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") {
+		return "stack"
+	}
+	if strings.Contains(cwd, "stayawesome") {
+		return "stayawesome"
+	}
+	if strings.Contains(cwd, "quantbot") {
+		return "quantbot"
+	}
+	if strings.Contains(cwd, "solartown") {
+		return "solartown"
+	}
+	if strings.Contains(cwd, "mariobrain") {
+		return "mariobrain"
+	}
+	if strings.Contains(cwd, "angeloos") {
+		return "angeloos"
+	}
+	return ""
+}
+
+func cmdCapture() *cobra.Command {
+	var firma string
+	c := &cobra.Command{
+		Use:   "capture <text>",
+		Short: "Hängt eine Inline-Aktion mit einem Befehl als Event an die passende oder die Catch-all-Initiative",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			text := args[0]
+			p := connect()
+
+			// 1. Fetch all active non-archived initiative IDs
+			rows, err := p.Query(context.Background(), `SELECT id, firma FROM portfolio.initiative WHERE archived_at IS NULL`)
+			if err != nil {
+				return fmt.Errorf("fehler beim laden der initiativen: %w", err)
+			}
+			defer rows.Close()
+
+			type matchCandidate struct {
+				key string
+				id  string
+			}
+			var candidates []matchCandidate
+
+			for rows.Next() {
+				var id, f string
+				if err := rows.Scan(&id, &f); err != nil {
+					return err
+				}
+				// Add full ID as match key
+				candidates = append(candidates, matchCandidate{key: id, id: id})
+				// Add slug (without company prefix) as match key
+				if parts := strings.SplitN(id, "-", 2); len(parts) == 2 {
+					candidates = append(candidates, matchCandidate{key: parts[1], id: id})
+				}
+			}
+			rows.Close()
+
+			// Sort match keys by length descending to match the most specific candidate first
+			sort.Slice(candidates, func(i, j int) bool {
+				return len(candidates[i].key) > len(candidates[j].key)
+			})
+
+			// 2. Look for matching initiative in the text
+			var matchedID string
+			textLower := strings.ToLower(text)
+			for _, cand := range candidates {
+				if strings.Contains(textLower, strings.ToLower(cand.key)) {
+					matchedID = cand.id
+					break
+				}
+			}
+
+			// 3. Fallback to catch-all if no specific initiative matched
+			if matchedID == "" {
+				targetFirma := normalizeFirma(firma)
+				if targetFirma == "" {
+					targetFirma = normalizeFirma(guessFirmaFromCWD())
+				}
+				if targetFirma == "" {
+					targetFirma = "solartown" // default fallback
+				}
+
+				// Standard catch-all ID for the given firma prefix
+				prefix := firmaPrefix[targetFirma]
+				var exists bool
+				if prefix != "" {
+					candidateID := prefix + "-catch-all"
+					err := p.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id=$1)`, candidateID).Scan(&exists)
+					if err == nil && exists {
+						matchedID = candidateID
+					}
+				}
+
+				// Global fallback searching for any available %-catch-all in the database
+				if matchedID == "" {
+					var fallbackID string
+					err := p.QueryRow(context.Background(), `SELECT id FROM portfolio.initiative WHERE id LIKE '%-catch-all' LIMIT 1`).Scan(&fallbackID)
+					if err == nil && fallbackID != "" {
+						matchedID = fallbackID
+					} else {
+						return fmt.Errorf("keine passende Initiative gefunden und keine Catch-all-Initiative in der Datenbank vorhanden")
+					}
+				}
+			}
+
+			// 4. Ensure idempotence (check if an identical 'activity' event exists for this initiative)
+			var eventExists bool
+			err = p.QueryRow(context.Background(),
+				`SELECT EXISTS(
+					SELECT 1 FROM portfolio.initiative_event
+					WHERE initiative_id = $1
+					  AND kind = 'activity'
+					  AND source_backend = 'master'
+					  AND payload->>'title' = $2
+				)`, matchedID, text).Scan(&eventExists)
+			if err != nil {
+				return fmt.Errorf("fehler beim idempotenz-check: %w", err)
+			}
+
+			if eventExists {
+				fmt.Printf("✓ Event bereits vorhanden (idempotent übersprungen) für Initiative: %s\n", matchedID)
+				return nil
+			}
+
+			// 5. Insert event into portfolio.initiative_event
+			payload, err := json.Marshal(map[string]any{"title": text})
+			if err != nil {
+				return fmt.Errorf("fehler beim serialisieren des payloads: %w", err)
+			}
+
+			_, err = p.Exec(context.Background(),
+				`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				 VALUES ($1, 'activity', 'master', $2::jsonb, 'cli')`,
+				matchedID, string(payload))
+			if err != nil {
+				return fmt.Errorf("fehler beim schreiben des events: %w", err)
+			}
+
+			fmt.Printf("✓ Event erfolgreich erfasst für Initiative: %s\n", matchedID)
+			return nil
+		},
+	}
+	c.Flags().StringVarP(&firma, "firma", "f", "", "Firma (stayawesome|solartown|quantbot|mariobrain|angeloos|stack)")
+	return c
+}
+
