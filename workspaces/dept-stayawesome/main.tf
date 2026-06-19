@@ -93,6 +93,14 @@ resource "docker_container" "workspace" {
     drop = ["ALL"]
   }
 
+  # Network restriction: ONLY Authentik and Kanban (mario-brain) networks
+  networks_advanced {
+    name = "authentik_default"
+  }
+  networks_advanced {
+    name = "mario-brain_default"
+  }
+
   env = [
     "CODER_AGENT_TOKEN=${coder_agent.main.token}",
     "CODER_AGENT_URL=${data.coder_workspace.me.access_url}",
