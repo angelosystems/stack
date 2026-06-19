@@ -1488,11 +1488,75 @@ func cmdServe() *cobra.Command {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				json.NewEncoder(w).Encode(map[string]string{"version": Version})
 			})
+			// /api/unlinked - Unlinked-Lane endpoint showing work-items without initiative-link (Capture-Completeness, L1)
+			http.HandleFunc("/api/unlinked", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				// Query unlinked items from portfolio.unlinked_item
+				rows, err := p.Query(r.Context(),
+					`SELECT id, kind, title, firma, rig_prefix, COALESCE(join_key, ''), discovered_at
+					 FROM portfolio.unlinked_item
+					 ORDER BY discovered_at ASC`)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer rows.Close()
+
+				type UnlinkedJSONItem struct {
+					ID           string    `json:"id"`
+					Kind         string    `json:"kind"`
+					Title        string    `json:"title"`
+					Firma        string    `json:"firma"`
+					RigPrefix    string    `json:"rig_prefix"`
+					JoinKey      string    `json:"join_key"`
+					DiscoveredAt time.Time `json:"discovered_at"`
+				}
+
+				items := []UnlinkedJSONItem{}
+				for rows.Next() {
+					var item UnlinkedJSONItem
+					if err := rows.Scan(&item.ID, &item.Kind, &item.Title, &item.Firma, &item.RigPrefix, &item.JoinKey, &item.DiscoveredAt); err != nil {
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					items = append(items, item)
+				}
+
+				// Query detector status from portfolio.detector_status
+				type DetectorStatusJSON struct {
+					LastRun         time.Time `json:"last_run"`
+					Status          string    `json:"status"`
+					UnreachableRigs []string  `json:"unreachable_rigs"`
+					ErrorMessage    *string   `json:"error_message"`
+				}
+
+				var det DetectorStatusJSON
+				err = p.QueryRow(r.Context(),
+					`SELECT last_run, status, unreachable_rigs, error_message
+					 FROM portfolio.detector_status
+					 WHERE id = 'leak-detector'`).
+					Scan(&det.LastRun, &det.Status, &det.UnreachableRigs, &det.ErrorMessage)
+				if err != nil {
+					// It's possible the status hasn't been written yet or table is empty.
+					det.Status = "unknown"
+					det.UnreachableRigs = []string{}
+				}
+
+				response := map[string]any{
+					"items":           items,
+					"detector_status": det,
+				}
+
+				json.NewEncoder(w).Encode(response)
+			})
 			// P2 — Dispatch aus der Karte (st-bopm)
 			http.HandleFunc("/api/dispatch", handleDispatch(p))
 			fmt.Println("master-kanban serve auf :" + port)
 			fmt.Println("  GET  /api/initiatives  — initiative_summary VIEW")
 			fmt.Println("  GET  /api/initiative   — Karten-Detail (?id=…)")
+			fmt.Println("  GET  /api/unlinked     — List unlinked items and detector status")
 			fmt.Println("  POST /api/move         — {id, stage}")
 			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
 			fmt.Println("  POST /api/github-webhook — GitHub pull_request (HMAC)")
