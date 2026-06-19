@@ -211,6 +211,86 @@
       </section>
     </template>
 
+    <!-- ════ UNLINKED-VIEW (Capture-Completeness, L1) ════ -->
+    <template x-if="view==='unlinked'">
+      <section class="bg-white rounded-lg shadow-sm">
+        <header class="px-5 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-3">
+          <div class="flex items-center gap-3">
+            <h2 class="font-semibold uppercase tracking-wide text-sm">⚠ Unlinked — braucht Zuhause</h2>
+            <span class="text-xs text-slate-400">Arbeit-ohne-Zuhause: orphane Beads und unverlinkte vk-Workspaces</span>
+          </div>
+          <!-- Detector status widget (Liveness & Nenner-Ehrlichkeit, SC1a/SC1b/PRD-Must-Fix) -->
+          <div class="text-xs flex items-center gap-2 flex-wrap">
+            <span class="text-slate-500 font-medium">Leak-Detektor:</span>
+            <span class="px-2 py-0.5 rounded-full font-bold uppercase tracking-wider text-[10px]"
+              :class="detectorStatusClass(detectorStatus.status)"
+              x-text="detectorStatus.status || 'unknown'"></span>
+            <span class="text-slate-400">|</span>
+            <span class="text-slate-500">Letzter Lauf:</span>
+            <span class="font-medium text-slate-700" x-text="detectorStatus.last_run ? fmtDateTime(detectorStatus.last_run) : '—'"></span>
+            <span x-show="detectorStatus.unreachable_rigs && detectorStatus.unreachable_rigs.length" class="text-amber-600 font-medium ml-2"
+              :title="'Unerreichbare Rigs: ' + detectorStatus.unreachable_rigs.join(', ')">
+              ⚠️ <span x-text="detectorStatus.unreachable_rigs.length"></span> Rigs offline
+            </span>
+          </div>
+        </header>
+
+        <!-- Main grouping by Company (Stay Awesome, Solartown, etc.) -->
+        <div class="p-5 space-y-6">
+          <template x-for="f in orderedFirmas" :key="f.id">
+            <div x-show="unlinkedItemsByFirma(f.id).length > 0" class="border border-slate-100 rounded-lg p-4 bg-slate-50/50">
+              <h3 class="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
+                <span x-text="f.icon"></span>
+                <span x-text="f.label"></span>
+                <span class="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full font-bold" x-text="unlinkedItemsByFirma(f.id).length"></span>
+              </h3>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                <template x-for="item in unlinkedItemsByFirma(f.id)" :key="item.id">
+                  <div class="bg-white border border-slate-200 rounded-md p-3 text-sm shadow-sm flex flex-col justify-between">
+                    <div>
+                      <div class="flex items-center justify-between gap-2 mb-1">
+                        <span class="font-mono text-xs font-semibold px-2 py-0.5 rounded"
+                          :class="item.kind === 'bead' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'"
+                          x-text="item.kind === 'bead' ? '🐝 bead' : '🔧 vk-workspace'"></span>
+                        <span class="text-[11px] text-slate-400" x-text="fmtRel(item.discovered_at)"></span>
+                      </div>
+                      <h4 class="font-medium text-slate-800 truncate" :title="item.title" x-text="item.title"></h4>
+                      <div class="text-[11px] text-slate-500 mt-1 font-mono break-all" x-text="'ID: ' + item.id"></div>
+                      <div x-show="item.join_key" class="text-[11px] text-slate-500 mt-1">
+                        Join-Key: <code class="bg-slate-100 px-1 py-0.2 rounded text-rose-600 font-mono" x-text="item.join_key"></code>
+                      </div>
+                      <div class="text-[11px] text-slate-500 mt-0.5">
+                        Fehler: 
+                        <span class="font-medium text-rose-600"
+                          x-text="{no_join_key: 'Kein Join-Key (Kein spec_id oder plan:<slug> Label)', no_match: 'Join-Key passt auf keine Initiative', no_link: 'Kein initiative_link verknüpft'}[item.reason] || item.reason"></span>
+                      </div>
+                    </div>
+                    
+                    <!-- Quick action triage helper for beads (PRD steady-state-triage) -->
+                    <div class="mt-3 pt-2 border-t border-slate-100 flex justify-end">
+                      <template x-if="item.kind === 'bead'">
+                        <button @click="openDispatch(item)" class="text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>
+                      </template>
+                      <template x-if="item.kind === 'vk_workspace'">
+                        <a :href="'http://' + location.hostname + ':54682/workspaces/' + item.id" target="_blank" rel="noopener" class="text-xs px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-semibold border border-indigo-200 flex items-center gap-1">Öffnen ↗</a>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <div x-show="unlinkedItems.length === 0" class="py-12 text-center text-slate-400">
+            <span class="text-3xl">🎉</span>
+            <div class="mt-2 font-semibold">Keine unlinked Items!</div>
+            <div class="text-xs mt-1">Alles hat ein ordentliches Zuhause. Jede Arbeit ist rückverfolgbar.</div>
+          </div>
+        </div>
+      </section>
+    </template>
+
     <footer class="text-xs text-slate-500 pt-4 pb-12">
       Master-Kanban LIVE · Board = Portfolio · Pipeline = Plan-Status (git-Frontmatter) · Backlog = Beads ohne Lane ·
       SoT: git + solartown_clean — dieses Board ist reine Projektion
@@ -537,6 +617,7 @@ function liveKanban() {
       { id: 'board',    label: 'Board' },
       { id: 'pipeline', label: 'Pipeline' },
       { id: 'backlog',  label: 'Backlog' },
+      { id: 'unlinked', label: '⚠ Unlinked — braucht Zuhause' },
     ],
     firmas: [
       { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 4 },
@@ -570,6 +651,8 @@ function liveKanban() {
     expanded: {},
     backlog: [],
     backlogRig: '',
+    unlinkedItems: [],
+    detectorStatus: { status: 'unknown', unreachable_rigs: [] },
     lastFetched: '',
 
     dispatchOpen: false,
@@ -608,6 +691,7 @@ function liveKanban() {
       await this.refresh();
       this.loadRollup();
       this.loadCapacity();
+      this.loadUnlinked();
       setInterval(() => { this.refresh(true); this.loadCapacity(); }, 30000);
       // Deep-Link: #<initiative-id> öffnet Karte + Baum
       const h = location.hash.slice(1);
@@ -906,6 +990,7 @@ function liveKanban() {
         this.apiOk = true;
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
+        if (this.view === 'unlinked') await this.loadUnlinked();
         const t = new Date().toLocaleTimeString('de-DE');
         this.lastFetched = (silent ? 'auto-refresh' : 'geladen') + ' ' + t;
       } catch (e) {
@@ -918,6 +1003,31 @@ function liveKanban() {
       this.view = v;
       if (v === 'pipeline') await this.loadAllPlans();
       if (v === 'backlog') await this.loadBacklog();
+      if (v === 'unlinked') await this.loadUnlinked();
+    },
+
+    async loadUnlinked() {
+      try {
+        const r = await fetch(this.apiBase + '/api/unlinked');
+        if (r.ok) {
+          const res = await r.json();
+          this.unlinkedItems = res.items || [];
+          this.detectorStatus = res.detector_status || { status: 'unknown', unreachable_rigs: [] };
+        }
+      } catch (e) {
+        console.error('unlinked fetch error:', e);
+      }
+    },
+    unlinkedItemsByFirma(firmaId) {
+      return this.unlinkedItems.filter(item => item.firma === firmaId);
+    },
+    detectorStatusClass(status) {
+      return {
+        healthy: 'bg-emerald-100 text-emerald-800',
+        warning: 'bg-amber-100 text-amber-800 border border-amber-200',
+        danger: 'bg-red-100 text-red-800 border border-red-200',
+        unknown: 'bg-slate-100 text-slate-500',
+      }[status] || 'bg-slate-100 text-slate-500';
     },
 
     // ── Plan-Baum (P4.1) ──
