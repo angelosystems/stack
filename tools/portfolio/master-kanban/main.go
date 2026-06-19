@@ -1549,6 +1549,13 @@ func cmdServe() *cobra.Command {
 			})
 			// P2 — Dispatch aus der Karte (st-bopm)
 			http.HandleFunc("/api/dispatch", handleDispatch(p))
+
+			// Phase 1 — MCP endpoints (st-573ds)
+			http.HandleFunc("/api/mcp", handleMcp(p))
+			http.HandleFunc("/api/mcp/sse", handleMcpSSE(p))
+			http.HandleFunc("/api/mcp/message", handleMcpMessage(p))
+			http.HandleFunc("/api/mcp/orchestrate", handleMcpOrchestrate(p))
+
 			fmt.Println("master-kanban serve auf :" + port)
 			fmt.Println("  GET  /api/initiatives  — initiative_summary VIEW")
 			fmt.Println("  GET  /api/initiative   — Karten-Detail (?id=…)")
@@ -1968,6 +1975,117 @@ func guessFirmaFromCWD() string {
 	return ""
 }
 
+func captureEvent(ctx context.Context, p *pgxpool.Pool, text string, targetFirmaInput string, actor string) (string, bool, error) {
+	// 1. Fetch all active non-archived initiative IDs
+	rows, err := p.Query(ctx, `SELECT id, firma FROM portfolio.initiative WHERE archived_at IS NULL`)
+	if err != nil {
+		return "", false, fmt.Errorf("fehler beim laden der initiativen: %w", err)
+	}
+	defer rows.Close()
+
+	type matchCandidate struct {
+		key string
+		id  string
+	}
+	var candidates []matchCandidate
+
+	for rows.Next() {
+		var id, f string
+		if err := rows.Scan(&id, &f); err != nil {
+			return "", false, err
+		}
+		// Add full ID as match key
+		candidates = append(candidates, matchCandidate{key: id, id: id})
+		// Add slug (without company prefix) as match key
+		if parts := strings.SplitN(id, "-", 2); len(parts) == 2 {
+			candidates = append(candidates, matchCandidate{key: parts[1], id: id})
+		}
+	}
+	rows.Close()
+
+	// Sort match keys by length descending to match the most specific candidate first
+	sort.Slice(candidates, func(i, j int) bool {
+		return len(candidates[i].key) > len(candidates[j].key)
+	})
+
+	// 2. Look for matching initiative in the text
+	var matchedID string
+	textLower := strings.ToLower(text)
+	for _, cand := range candidates {
+		if strings.Contains(textLower, strings.ToLower(cand.key)) {
+			matchedID = cand.id
+			break
+		}
+	}
+
+	// 3. Fallback to catch-all if no specific initiative matched
+	if matchedID == "" {
+		targetFirma := normalizeFirma(targetFirmaInput)
+		if targetFirma == "" {
+			targetFirma = normalizeFirma(guessFirmaFromCWD())
+		}
+		if targetFirma == "" {
+			targetFirma = "solartown" // default fallback
+		}
+
+		// Standard catch-all ID for the given firma prefix
+		prefix := firmaPrefix[targetFirma]
+		var exists bool
+		if prefix != "" {
+			candidateID := prefix + "-catch-all"
+			err := p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id=$1)`, candidateID).Scan(&exists)
+			if err == nil && exists {
+				matchedID = candidateID
+			}
+		}
+
+		// Global fallback searching for any available %-catch-all in the database
+		if matchedID == "" {
+			var fallbackID string
+			err := p.QueryRow(ctx, `SELECT id FROM portfolio.initiative WHERE id LIKE '%-catch-all' LIMIT 1`).Scan(&fallbackID)
+			if err == nil && fallbackID != "" {
+				matchedID = fallbackID
+			} else {
+				return "", false, fmt.Errorf("keine passende Initiative gefunden und keine Catch-all-Initiative in der Datenbank vorhanden")
+			}
+		}
+	}
+
+	// 4. Ensure idempotence (check if an identical 'activity' event exists for this initiative)
+	var eventExists bool
+	err = p.QueryRow(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event
+			WHERE initiative_id = $1
+			  AND kind = 'activity'
+			  AND source_backend = 'master'
+			  AND payload->>'title' = $2
+		)`, matchedID, text).Scan(&eventExists)
+	if err != nil {
+		return "", false, fmt.Errorf("fehler beim idempotenz-check: %w", err)
+	}
+
+	if eventExists {
+		return matchedID, true, nil
+	}
+
+	// 5. Insert event into portfolio.initiative_event
+	payload, err := json.Marshal(map[string]any{"title": text})
+	if err != nil {
+		return "", false, fmt.Errorf("fehler beim serialisieren des payloads: %w", err)
+	}
+
+	_, err = p.Exec(ctx,
+		`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+		 VALUES ($1, 'activity', 'master', $2::jsonb, $3)`,
+		matchedID, string(payload), actor)
+	if err != nil {
+		return "", false, fmt.Errorf("fehler beim schreiben des events: %w", err)
+	}
+
+	return matchedID, false, nil
+}
+
 func cmdCapture() *cobra.Command {
 	var firma string
 	c := &cobra.Command{
@@ -1978,119 +2096,682 @@ func cmdCapture() *cobra.Command {
 			text := args[0]
 			p := connect()
 
-			// 1. Fetch all active non-archived initiative IDs
-			rows, err := p.Query(context.Background(), `SELECT id, firma FROM portfolio.initiative WHERE archived_at IS NULL`)
+			matchedID, duplicated, err := captureEvent(context.Background(), p, text, firma, "cli")
 			if err != nil {
-				return fmt.Errorf("fehler beim laden der initiativen: %w", err)
-			}
-			defer rows.Close()
-
-			type matchCandidate struct {
-				key string
-				id  string
-			}
-			var candidates []matchCandidate
-
-			for rows.Next() {
-				var id, f string
-				if err := rows.Scan(&id, &f); err != nil {
-					return err
-				}
-				// Add full ID as match key
-				candidates = append(candidates, matchCandidate{key: id, id: id})
-				// Add slug (without company prefix) as match key
-				if parts := strings.SplitN(id, "-", 2); len(parts) == 2 {
-					candidates = append(candidates, matchCandidate{key: parts[1], id: id})
-				}
-			}
-			rows.Close()
-
-			// Sort match keys by length descending to match the most specific candidate first
-			sort.Slice(candidates, func(i, j int) bool {
-				return len(candidates[i].key) > len(candidates[j].key)
-			})
-
-			// 2. Look for matching initiative in the text
-			var matchedID string
-			textLower := strings.ToLower(text)
-			for _, cand := range candidates {
-				if strings.Contains(textLower, strings.ToLower(cand.key)) {
-					matchedID = cand.id
-					break
-				}
+				return err
 			}
 
-			// 3. Fallback to catch-all if no specific initiative matched
-			if matchedID == "" {
-				targetFirma := normalizeFirma(firma)
-				if targetFirma == "" {
-					targetFirma = normalizeFirma(guessFirmaFromCWD())
-				}
-				if targetFirma == "" {
-					targetFirma = "solartown" // default fallback
-				}
-
-				// Standard catch-all ID for the given firma prefix
-				prefix := firmaPrefix[targetFirma]
-				var exists bool
-				if prefix != "" {
-					candidateID := prefix + "-catch-all"
-					err := p.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id=$1)`, candidateID).Scan(&exists)
-					if err == nil && exists {
-						matchedID = candidateID
-					}
-				}
-
-				// Global fallback searching for any available %-catch-all in the database
-				if matchedID == "" {
-					var fallbackID string
-					err := p.QueryRow(context.Background(), `SELECT id FROM portfolio.initiative WHERE id LIKE '%-catch-all' LIMIT 1`).Scan(&fallbackID)
-					if err == nil && fallbackID != "" {
-						matchedID = fallbackID
-					} else {
-						return fmt.Errorf("keine passende Initiative gefunden und keine Catch-all-Initiative in der Datenbank vorhanden")
-					}
-				}
-			}
-
-			// 4. Ensure idempotence (check if an identical 'activity' event exists for this initiative)
-			var eventExists bool
-			err = p.QueryRow(context.Background(),
-				`SELECT EXISTS(
-					SELECT 1 FROM portfolio.initiative_event
-					WHERE initiative_id = $1
-					  AND kind = 'activity'
-					  AND source_backend = 'master'
-					  AND payload->>'title' = $2
-				)`, matchedID, text).Scan(&eventExists)
-			if err != nil {
-				return fmt.Errorf("fehler beim idempotenz-check: %w", err)
-			}
-
-			if eventExists {
+			if duplicated {
 				fmt.Printf("✓ Event bereits vorhanden (idempotent übersprungen) für Initiative: %s\n", matchedID)
-				return nil
+			} else {
+				fmt.Printf("✓ Event erfolgreich erfasst für Initiative: %s\n", matchedID)
 			}
-
-			// 5. Insert event into portfolio.initiative_event
-			payload, err := json.Marshal(map[string]any{"title": text})
-			if err != nil {
-				return fmt.Errorf("fehler beim serialisieren des payloads: %w", err)
-			}
-
-			_, err = p.Exec(context.Background(),
-				`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
-				 VALUES ($1, 'activity', 'master', $2::jsonb, 'cli')`,
-				matchedID, string(payload))
-			if err != nil {
-				return fmt.Errorf("fehler beim schreiben des events: %w", err)
-			}
-
-			fmt.Printf("✓ Event erfolgreich erfasst für Initiative: %s\n", matchedID)
 			return nil
 		},
 	}
 	c.Flags().StringVarP(&firma, "firma", "f", "", "Firma (stayawesome|solartown|quantbot|mariobrain|angeloos|stack)")
 	return c
+}
+
+// --- Phase 1: Model Context Protocol (MCP) Server & Agent Orchestrator (st-573ds) ---
+
+type McpRequest struct {
+	JsonRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	ID      any             `json:"id"`
+}
+
+type McpResponse struct {
+	JsonRPC string `json:"jsonrpc"`
+	Result  any    `json:"result,omitempty"`
+	Error   any    `json:"error,omitempty"`
+	ID      any    `json:"id"`
+}
+
+func dispatchMcpRequest(ctx context.Context, p *pgxpool.Pool, req McpRequest, r *http.Request) McpResponse {
+	switch req.Method {
+	case "resources/list":
+		var resources []map[string]any
+		resources = append(resources, map[string]any{
+			"uri":         "board",
+			"name":        "Master-Kanban Board State",
+			"description": "Exposes all active initiatives, capacities, and backlog for triage.",
+			"mimeType":    "application/json",
+		})
+
+		// Active initiatives
+		rows, err := p.Query(ctx, "SELECT id, title FROM portfolio.initiative WHERE archived_at IS NULL ORDER BY id")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id, title string
+				if err := rows.Scan(&id, &title); err == nil {
+					resources = append(resources, map[string]any{
+						"uri":         "initiative/" + id,
+						"name":        "Initiative: " + title,
+						"description": "Details, links, and event history for card " + id,
+						"mimeType":    "application/json",
+					})
+				}
+			}
+		}
+
+		// Plan files
+		rows2, err := p.Query(ctx, "SELECT id, title FROM portfolio.plan_item ORDER BY id")
+		if err == nil {
+			defer rows2.Close()
+			for rows2.Next() {
+				var id, title string
+				if err := rows2.Scan(&id, &title); err == nil {
+					resources = append(resources, map[string]any{
+						"uri":         "plan-file/" + id,
+						"name":        "Plan File: " + title,
+						"description": "PRD Markdown text content for " + id,
+						"mimeType":    "text/markdown",
+					})
+				}
+			}
+		}
+
+		return McpResponse{JsonRPC: "2.0", ID: req.ID, Result: map[string]any{"resources": resources}}
+
+	case "resources/read":
+		var params struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32602, "message": "Invalid params"}}
+		}
+
+		if params.URI == "board" {
+			var initiatives []json.RawMessage
+			rows, err := p.Query(ctx, "SELECT row_to_json(s) FROM portfolio.initiative_summary s ORDER BY firma, stage, id")
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var j json.RawMessage
+					if err := rows.Scan(&j); err == nil {
+						initiatives = append(initiatives, j)
+					}
+				}
+			}
+
+			var backlog []map[string]any
+			sp, err := solartownPool()
+			if err == nil {
+				rows, err := sp.Query(ctx, `
+					SELECT i.id, i.rig, i.title, i.issue_type, COALESCE(i.priority, 0), i.created_at
+					FROM beads.issues i
+					WHERE i.status='open' AND i.deleted_at IS NULL
+					  AND COALESCE(i.ephemeral,false)=false
+					  AND NOT EXISTS (SELECT 1 FROM beads.labels l
+					                  WHERE l.issue_id=i.id AND l.label LIKE 'lane:%' AND l.deleted_at IS NULL)
+					ORDER BY i.created_at DESC LIMIT 20`)
+				if err == nil {
+					defer rows.Close()
+					for rows.Next() {
+						item := make(map[string]any)
+						var id, rig, title, issueType string
+						var priority int
+						var createdAt time.Time
+						if err := rows.Scan(&id, &rig, &title, &issueType, &priority, &createdAt); err == nil {
+							item["id"] = id
+							item["rig"] = rig
+							item["title"] = title
+							item["issue_type"] = issueType
+							item["priority"] = priority
+							item["created_at"] = createdAt
+							backlog = append(backlog, item)
+						}
+					}
+				}
+			}
+
+			boardData := map[string]any{
+				"initiatives": initiatives,
+				"backlog":     backlog,
+			}
+			boardJSON, _ := json.Marshal(boardData)
+			return McpResponse{
+				JsonRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]any{
+					"contents": []map[string]any{
+						{
+							"uri":      "board",
+							"mimeType": "application/json",
+							"text":     string(boardJSON),
+						},
+					},
+				},
+			}
+		}
+
+		if strings.HasPrefix(params.URI, "initiative/") {
+			id := strings.TrimPrefix(params.URI, "initiative/")
+			var j json.RawMessage
+			err := p.QueryRow(ctx, `SELECT json_build_object(
+				'initiative', (SELECT row_to_json(s) FROM portfolio.initiative_summary s WHERE s.id=$1),
+				'links', COALESCE((SELECT json_agg(row_to_json(l) ORDER BY l.kind, l.added_at)
+				                   FROM portfolio.initiative_link l WHERE l.initiative_id=$1), '[]'::json),
+				'events', COALESCE((SELECT json_agg(row_to_json(e)) FROM (
+				                     SELECT kind, source_backend, from_stage, to_stage, payload, actor, at
+				                     FROM portfolio.initiative_event WHERE initiative_id=$1
+				                     ORDER BY at DESC LIMIT 40) e), '[]'::json))`, id).Scan(&j)
+			if err != nil {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": 404, "message": "Initiative not found"}}
+			}
+			return McpResponse{
+				JsonRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]any{
+					"contents": []map[string]any{
+						{
+							"uri":      params.URI,
+							"mimeType": "application/json",
+							"text":     string(j),
+						},
+					},
+				},
+			}
+		}
+
+		if strings.HasPrefix(params.URI, "plan-file/") {
+			id := strings.TrimPrefix(params.URI, "plan-file/")
+			it, err := planItem(p, id)
+			if err != nil {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": 404, "message": "Plan file not found"}}
+			}
+			raw, err := os.ReadFile(it.Path)
+			if err != nil {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": 500, "message": "Failed to read file"}}
+			}
+			return McpResponse{
+				JsonRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]any{
+					"contents": []map[string]any{
+						{
+							"uri":      params.URI,
+							"mimeType": "text/markdown",
+							"text":     string(raw),
+						},
+					},
+				},
+			}
+		}
+
+		return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32602, "message": "Resource URI not found"}}
+
+	case "tools/list":
+		tools := []map[string]any{
+			{
+				"name":        "move-stage",
+				"description": "Verschiebt eine Initiative in eine andere Stage (idea, soon, now, watching, done).",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id": map[string]any{
+							"type":        "string",
+							"description": "Die ID der Initiative (z.B. sa-feature).",
+						},
+						"stage": map[string]any{
+							"type":        "string",
+							"enum":        []string{"idea", "soon", "now", "watching", "done"},
+							"description": "Die Ziel-Stage.",
+						},
+					},
+					"required": []string{"id", "stage"},
+				},
+			},
+			{
+				"name":        "capture",
+				"description": "Erfasst eine Inline-Aktion oder einen Befehl als Event und ordnet ihn der passenden oder einer Catch-all-Initiative zu.",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"text": map[string]any{
+							"type":        "string",
+							"description": "Die Inline-Aktion oder der Befehl (z.B. cockpit-Reconcile 08b1119). Kann eine Initiative-ID/Slug zur Zuordnung enthalten.",
+						},
+						"firma": map[string]any{
+							"type":        "string",
+							"description": "Optional: Die Firma (stayawesome|solartown|quantbot|mariobrain|angeloos|stack) für den Catch-all Fall.",
+						},
+					},
+					"required": []string{"text"},
+				},
+			},
+		}
+		return McpResponse{JsonRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": tools}}
+
+	case "tools/call":
+		var params struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32602, "message": "Invalid params"}}
+		}
+
+		if params.Name == "move-stage" {
+			// Auth constraint check for mutating tools (SC5)
+			if r == nil || !checkAuth(r) {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": 401, "message": "unauthorized"}}
+			}
+
+			var args struct {
+				ID    string `json:"id"`
+				Stage string `json:"stage"`
+			}
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32602, "message": "Invalid tool arguments"}}
+			}
+
+			// Validate stage
+			validStages := map[string]bool{"idea": true, "soon": true, "now": true, "watching": true, "done": true}
+			if !validStages[args.Stage] {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32602, "message": "Invalid stage: " + args.Stage}}
+			}
+
+			tag, err := p.Exec(ctx, `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, args.ID, args.Stage)
+			if err != nil {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": 500, "message": err.Error()}}
+			}
+			if tag.RowsAffected() == 0 {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": 404, "message": "Initiative not found"}}
+			}
+
+			return McpResponse{
+				JsonRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]any{
+					"content": []map[string]any{
+						{
+							"type": "text",
+							"text": fmt.Sprintf("Initiative %s erfolgreich nach %s verschoben.", args.ID, args.Stage),
+						},
+					},
+				},
+			}
+		}
+
+		if params.Name == "capture" {
+			// Auth constraint check for mutating tools (SC5)
+			if r == nil || !checkAuth(r) {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": 401, "message": "unauthorized"}}
+			}
+
+			var args struct {
+				Text  string `json:"text"`
+				Firma string `json:"firma"`
+			}
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32602, "message": "Invalid tool arguments"}}
+			}
+
+			if args.Text == "" {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32602, "message": "Text parameter is required"}}
+			}
+
+			actor := "mcp"
+			if r != nil {
+				actor = actorFrom(r)
+			}
+
+			matchedID, duplicated, err := captureEvent(ctx, p, args.Text, args.Firma, actor)
+			if err != nil {
+				return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": 500, "message": err.Error()}}
+			}
+
+			var responseText string
+			if duplicated {
+				responseText = fmt.Sprintf("✓ Event bereits vorhanden (idempotent übersprungen) für Initiative: %s", matchedID)
+			} else {
+				responseText = fmt.Sprintf("✓ Event erfolgreich erfasst für Initiative: %s", matchedID)
+			}
+
+			return McpResponse{
+				JsonRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]any{
+					"content": []map[string]any{
+						{
+							"type": "text",
+							"text": responseText,
+						},
+					},
+				},
+			}
+		}
+
+		return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32601, "message": "Method not found"}}
+
+	default:
+		return McpResponse{JsonRPC: "2.0", ID: req.ID, Error: map[string]any{"code": -32601, "message": "Method not found"}}
+	}
+}
+
+func handleMcp(p *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Auth-Request-Email, X-Api-Key")
+		if r.Method == "OPTIONS" {
+			return
+		}
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
+
+		var req McpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		resp := dispatchMcpRequest(r.Context(), p, req, r)
+		if resp.Error != nil {
+			errMap, ok := resp.Error.(map[string]any)
+			if ok && errMap["message"] == "unauthorized" {
+				w.WriteHeader(http.StatusUnauthorized)
+			}
+		}
+
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func handleMcpSSE(p *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
+		fmt.Fprintf(w, "event: endpoint\ndata: /api/mcp/message?session_id=%s\n\n", sessionID)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		// Keep connection alive
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprintf(w, ":ping\n\n")
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}
+}
+
+func handleMcpMessage(p *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Auth-Request-Email, X-Api-Key")
+		if r.Method == "OPTIONS" {
+			return
+		}
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
+
+		var req McpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		resp := dispatchMcpRequest(r.Context(), p, req, r)
+		if resp.Error != nil {
+			errMap, ok := resp.Error.(map[string]any)
+			if ok && errMap["message"] == "unauthorized" {
+				w.WriteHeader(http.StatusUnauthorized)
+			}
+		}
+
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+type McpOrchestrateRequest struct {
+	InitiativeID string `json:"initiative_id"`
+	UserMessage  string `json:"user_message"`
+	SessionID    string `json:"session_id"`
+}
+
+type McpOrchestrateResponse struct {
+	Answer string `json:"answer"`
+}
+
+func handleMcpOrchestrate(p *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
+
+		var req McpOrchestrateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		req.InitiativeID = strings.TrimSpace(req.InitiativeID)
+		req.UserMessage = strings.TrimSpace(req.UserMessage)
+		if req.InitiativeID == "" || req.UserMessage == "" {
+			http.Error(w, "initiative_id und user_message sind Pflichtfelder", 400)
+			return
+		}
+
+		answer, err := RunAgentOrchestrator(r.Context(), p, req.InitiativeID, req.UserMessage, req.SessionID)
+		if err != nil {
+			http.Error(w, "Agentenfehler: "+err.Error(), 500)
+			return
+		}
+
+		json.NewEncoder(w).Encode(McpOrchestrateResponse{Answer: answer})
+	}
+}
+
+// RunAgentOrchestrator runs the server-side agentic loop (LLM <-> Tool) with memory and session isolation.
+func RunAgentOrchestrator(ctx context.Context, p *pgxpool.Pool, initiativeID, userMessage, sessionID string) (string, error) {
+	// 1. Log user message as initiative event (ai_message, user role)
+	userPayload, _ := json.Marshal(map[string]any{
+		"text":       userMessage,
+		"role":       "user",
+		"session_id": sessionID,
+	})
+	_, _ = p.Exec(ctx,
+		`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+		 VALUES ($1, 'ai_message', 'master', $2::jsonb, 'user')`,
+		initiativeID, string(userPayload))
+
+	// 2. Query conversation history from events
+	var messages []map[string]string
+	rows, err := p.Query(ctx, `
+		SELECT kind, payload, actor FROM portfolio.initiative_event
+		WHERE initiative_id = $1 AND kind IN ('ai_message', 'ai_action') AND (payload->>'session_id' = $2 OR $2 = '')
+		ORDER BY at ASC LIMIT 50`, initiativeID, sessionID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var kind, actor string
+			var payloadRaw []byte
+			if err := rows.Scan(&kind, &payloadRaw, &actor); err == nil {
+				if kind == "ai_message" {
+					var pLoad struct {
+						Text string `json:"text"`
+						Role string `json:"role"`
+					}
+					if err := json.Unmarshal(payloadRaw, &pLoad); err == nil && pLoad.Text != "" {
+						messages = append(messages, map[string]string{"role": pLoad.Role, "content": pLoad.Text})
+					}
+				} else if kind == "ai_action" {
+					var pLoad struct {
+						Action    string          `json:"action"`
+						Arguments json.RawMessage `json:"arguments"`
+						Status    string          `json:"status"`
+					}
+					if err := json.Unmarshal(payloadRaw, &pLoad); err == nil {
+						messages = append(messages, map[string]string{"role": "assistant", "content": fmt.Sprintf("[TOOL CALL: %s, args: %s, status: %s]", pLoad.Action, string(pLoad.Arguments), pLoad.Status)})
+					}
+				}
+			}
+		}
+	}
+
+	// If history is empty, add the user message explicitly
+	if len(messages) == 0 {
+		messages = append(messages, map[string]string{"role": "user", "content": userMessage})
+	}
+
+	// 3. Gather real card context for Grounding (SC1)
+	var initTitle, initDesc, initStage, initFirma string
+	_ = p.QueryRow(ctx, "SELECT title, COALESCE(description,''), stage, firma FROM portfolio.initiative WHERE id=$1", initiativeID).
+		Scan(&initTitle, &initDesc, &initStage, &initFirma)
+
+	var links []string
+	lnkRows, lnkErr := p.Query(ctx, "SELECT kind, ref FROM portfolio.initiative_link WHERE initiative_id=$1", initiativeID)
+	if lnkErr == nil {
+		defer lnkRows.Close()
+		for lnkRows.Next() {
+			var k, r string
+			if err := lnkRows.Scan(&k, &r); err == nil {
+				links = append(links, fmt.Sprintf("- %s: %s", k, r))
+			}
+		}
+	}
+
+	var planMarkdown string
+	var planPath string
+	_ = p.QueryRow(ctx, "SELECT path FROM portfolio.plan_item WHERE initiative_id=$1 LIMIT 1", initiativeID).Scan(&planPath)
+	if planPath != "" {
+		raw, err := os.ReadFile(planPath)
+		if err == nil {
+			planMarkdown = string(raw)
+		}
+	}
+
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString(fmt.Sprintf("Initiative ID: %s\nTitle: %s\nDescription: %s\nCurrent Stage: %s\nFirma: %s\n\n", initiativeID, initTitle, initDesc, initStage, initFirma))
+	if len(links) > 0 {
+		contextBuilder.WriteString("Linked Backends:\n" + strings.Join(links, "\n") + "\n\n")
+	}
+	if planMarkdown != "" {
+		contextBuilder.WriteString("Plan / PRD Markdown Content:\n" + planMarkdown + "\n\n")
+	}
+
+	systemPrompt := "Du bist der interaktive Master-Kanban Copilot. " +
+		"Deine Aufgabe ist es, Fragen zur folgenden Initiative präzise und auf Grundlage der realen Projektdaten zu beantworten (Grounding). " +
+		"Nutze für deine Antworten ausschließlich die echten Details der Initiative. Wenn du Daten nicht hast, erfinde sie nicht.\n\n" +
+		"=== REALER KARTEN-KONTEXT ===\n" +
+		contextBuilder.String() +
+		"=============================\n\n" +
+		"Du hast Zugriff auf das Tool 'move-stage'.\n" +
+		"Wenn der User dich bittet, die Karte in eine andere Phase/Stage zu verschieben (z.B. nach soon, now, watching, done), " +
+		"rufe das Tool auf, indem du EXAKT folgenden JSON-Block am Anfang oder Ende deiner Antwort ausgibst:\n" +
+		"```tool\n" +
+		"{\n" +
+		"  \"name\": \"move-stage\",\n" +
+		"  \"arguments\": {\n" +
+		"    \"id\": \"" + initiativeID + "\",\n" +
+		"    \"stage\": \"soon\"\n" +
+		"  }\n" +
+		"}\n" +
+		"```\n" +
+		"Unterstützte Stages sind: idea, soon, now, watching, done."
+
+	// 4. Call GLM
+	answer, err := callGlm(systemPrompt, messages)
+	if err != nil {
+		return "", err
+	}
+
+	// 5. Parse for Tool Calls & Execute
+	var toolBlock string
+	if strings.Contains(answer, "```tool") {
+		parts := strings.Split(answer, "```tool")
+		if len(parts) > 1 {
+			subparts := strings.Split(parts[1], "```")
+			if len(subparts) > 0 {
+				toolBlock = strings.TrimSpace(subparts[0])
+			}
+		}
+	}
+
+	if toolBlock != "" {
+		var toolCall struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(toolBlock), &toolCall); err == nil && toolCall.Name == "move-stage" {
+			var args struct {
+				ID    string `json:"id"`
+				Stage string `json:"stage"`
+			}
+			if err := json.Unmarshal(toolCall.Arguments, &args); err == nil {
+				// Execute move-stage
+				_, updateErr := p.Exec(ctx, `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, args.ID, args.Stage)
+
+				status := "success"
+				if updateErr != nil {
+					status = "failed: " + updateErr.Error()
+				}
+
+				// Record ai_action event (SC3)
+				actionPayload, _ := json.Marshal(map[string]any{
+					"action":     "move-stage",
+					"arguments":  args,
+					"status":     status,
+					"session_id": sessionID,
+				})
+				_, _ = p.Exec(ctx,
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1, 'ai_action', 'master', $2::jsonb, $3)`,
+					initiativeID, string(actionPayload), "mcp-copilot")
+
+				if updateErr == nil {
+					// Append tool call and result to history to prompt GLM for final conversational reply
+					toolMsg := fmt.Sprintf("Führe Tool-Call aus: move-stage für ID %s nach Stage %s.", args.ID, args.Stage)
+					messages = append(messages, map[string]string{"role": "assistant", "content": toolMsg})
+					messages = append(messages, map[string]string{"role": "user", "content": fmt.Sprintf("Tool-Ergebnis: Die Karte %s wurde erfolgreich in die Stage %s verschoben.", args.ID, args.Stage)})
+
+					finalAnswer, finalErr := callGlm(systemPrompt, messages)
+					if finalErr == nil {
+						answer = finalAnswer
+					}
+				}
+			}
+		}
+	}
+
+	// 6. Record assistant answer as initiative event (ai_message, assistant role)
+	assistantPayload, _ := json.Marshal(map[string]any{
+		"text":       answer,
+		"role":       "assistant",
+		"session_id": sessionID,
+	})
+	_, _ = p.Exec(ctx,
+		`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+		 VALUES ($1, 'ai_message', 'master', $2::jsonb, 'mcp-copilot')`,
+		initiativeID, string(assistantPayload))
+
+	return answer, nil
 }
 
