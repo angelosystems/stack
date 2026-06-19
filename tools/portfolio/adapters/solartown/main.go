@@ -34,16 +34,16 @@ import (
 )
 
 var (
-	dsn      = envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
-	apiURL   = envOr("PORTFOLIO_API", "http://127.0.0.1:7770")
-	apiKey   = envOr("PORTFOLIO_API_KEY", "dev-secret")
-	bdRig    = envOr("BD_RIG", "/opt/solartown")
-	beadsDSN = envOr("BEADS_DSN", "postgres://remote:remote@127.0.0.1:5433/solartown_clean")
-	once     = flag.Bool("once", false, "single scan + exit")
-	watch    = flag.Bool("watch", false, "loop forever, scan every interval")
-	listen   = flag.Bool("listen", false, "edge-triggered via beads-NOTIFY")
-	link     = flag.Bool("link", false, "auto-link mode scanning all rigs")
-	interval = flag.Duration("interval", 60*time.Second, "watch interval")
+	dsn             = envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	apiURL          = envOr("PORTFOLIO_API", "http://127.0.0.1:7770")
+	apiKey          = envOr("PORTFOLIO_API_KEY", "dev-secret")
+	bdRig           = envOr("BD_RIG", "/opt/solartown")
+	beadsDSN        = envOr("BEADS_DSN", "postgres://remote:remote@127.0.0.1:5433/solartown_clean")
+	once            = flag.Bool("once", false, "single scan + exit")
+	watch           = flag.Bool("watch", false, "loop forever, scan every interval")
+	listen          = flag.Bool("listen", false, "edge-triggered via beads-NOTIFY")
+	link            = flag.Bool("link", false, "auto-link mode scanning all rigs")
+	interval        = flag.Duration("interval", 60*time.Second, "watch interval")
 	Version  string = "dev"
 )
 
@@ -452,6 +452,27 @@ func runLink(p *pgxpool.Pool) error {
 	for _, prefix := range scanOrder {
 		rig, ok := reg.Get(prefix)
 		if !ok {
+			// Skipped/not in registry rig prefix is treated as unreachable (denominator honesty)
+			unreachableRigs = append(unreachableRigs, prefix)
+
+			firma := getFirmaForRig(prefix)
+			rigID := "rig:" + prefix
+			title := "nicht erfasst — Quelle unerreichbar"
+
+			_, dbErr := p.Exec(context.Background(),
+				`INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key)
+				 VALUES ($1, 'rig', $2, $3, $4, NULL)
+				 ON CONFLICT (id) DO UPDATE SET
+				    kind = EXCLUDED.kind,
+				    title = EXCLUDED.title,
+				    firma = EXCLUDED.firma,
+				    rig_prefix = EXCLUDED.rig_prefix,
+				    join_key = EXCLUDED.join_key,
+				    discovered_at = now()`,
+				rigID, title, firma, prefix)
+			if dbErr != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to record skipped rig %s: %v\n", prefix, dbErr)
+			}
 			continue
 		}
 		fmt.Printf("  scanning rig %s (prefix %s)\n", rig.Dir, rig.Prefix)
@@ -462,7 +483,7 @@ func runLink(p *pgxpool.Pool) error {
 
 			firma := getFirmaForRig(rig.Prefix)
 			rigID := "rig:" + rig.Prefix
-			title := fmt.Sprintf("Rig %s is unreachable", rig.Prefix)
+			title := "nicht erfasst — Quelle unerreichbar"
 
 			_, dbErr := p.Exec(context.Background(),
 				`INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key)
