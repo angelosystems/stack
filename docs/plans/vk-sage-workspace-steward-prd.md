@@ -21,20 +21,20 @@ references:
 
 ## Problem
 
-vk archiviert oder heilt tote Workspaces nicht. Belegt 2026-06-19:
+vk archiviert oder heilt ruhende Workspaces nicht. Belegt 2026-06-19:
 
 - **Rituale-Workspace**: Worktree ist *kein gültiges git-Repo*, 0 PR / 0 Merge,
   Execution `killed`, hängt seit ~7 Tagen `archived=0`.
-- **3 Deck-Zombies** (`st-yozd`/`st-1bpf`/`st-ib5e`): `vk-paused:no-commits-exit1`,
+- **3 pausierte Deck-Beads** (`st-yozd`/`st-1bpf`/`st-ib5e`): `vk-paused:no-commits-exit1`,
   **4-5× über Tage re-dispatcht und jedes Mal wieder gescheitert** — nie
   erfolgreich, nie aufgeräumt.
 - Unter den „aktiven" Workspaces: 31 completed + **14 failed + 2 killed**
   Executions, real laufend nur 2.
 
-Folge: Tote Workspaces hängen als „aktiv", verzerren die Agenten-Auslastung,
-verbrennen Retry-Compute. **Jeder Workspace wurde mit einem Grund (Bead)
+Folge: Ruhende Workspaces hängen als „aktiv", verzerren die Agenten-Auslastung,
+binden Retry-Compute. **Jeder Workspace wurde mit einem Grund (Bead)
 angelegt** — ein toter Workspace ist ein *unerledigtes Ziel*, nicht nur Müll.
-Aber: **naives „bei Fehler neu starten" loopt ewig** (die 3 Zombies beweisen es).
+Aber: **naives „bei Fehler neu starten" loopt ewig** (die 3 pausierten Beads beweisen es).
 
 ## Ziel
 
@@ -60,7 +60,7 @@ Subscribe auf das Execution-End-Event (`completed/failed/killed` — der
 `running`-aber-stuck (kein Update seit > T). Kein Dauer-Poll.
 
 ### L2 — Diagnose (das Sage-Hirn)
-Für einen toten Workspace mit Bead: GLM-5.1 liest **Bead-Ziel + Outcome**
+Für einen ruhenden Workspace mit Bead: GLM-5.1 liest **Bead-Ziel + Outcome**
 (exit-code, `no-commits`-Flag, Worktree-Zustand/git-Validität, letzter
 Agent-Output) → Fehlerklasse. Wie Sage's Hook-Block→GLM-5.1-Rat, nur auf
 Workspace-Lifecycle.
@@ -78,7 +78,7 @@ PR da, aber unmerged                       →  Merge anstoßen (Refinery-Nudge)
 Pro Bead ein Heil-Zähler. Nach **N** erfolglosen Heilungen (Default 2): **STOP +
 eskalieren** (Board-Event + advisor-Signal), keine weitere Auto-Heilung. Der
 Zähler liegt am Bead (überlebt Restarts). **Alternative verworfen:** unbegrenzt
-retryen — verworfen, weil genau das die 3 Deck-Zombies erzeugt hat.
+retryen — verworfen, weil genau das die 3 pausierte Deck-Beads erzeugt hat.
 
 ### L5 — Sichtbarkeit + Sage-Liveness
 Jede Sage-Aktion (heal/close/escalate/archive/merge-nudge) = ein Board-Event
@@ -91,7 +91,7 @@ still.
 
 - SC1: Ein `no-commits-exit1`-Workspace, dessen Ziel schon existiert, wird vom
   Sage binnen eines Zyklus „already done" geschlossen + archiviert — verifiziert
-  an einem der aktuellen Deck-Zombies.
+  an einem der aktuellen pausierte Deck-Beads.
 - SC2: Ein echt-unfertiger gescheiterter Workspace wird mit einem Prompt
   re-dispatcht, der die **Diagnose enthält** — der neue Versuch unterscheidet
   sich nachweisbar vom identischen Retry.
@@ -124,12 +124,12 @@ still.
 
 ## Phasen (Granularität, keine Zeit)
 
-1. **Detektion + Diagnose + Report (read-only)** (Gran. 3) — tote Workspaces
+1. **Detektion + Diagnose + Report (read-only)** (Gran. 3) — ruhende Workspaces
    klassifizieren + als Board-Events sichtbar machen, **keine Mutation**.
    Done wenn SC4 (Aktionen geloggt) für den Klassifizier-Schritt + Dry-Run-Report
-   über die aktuellen 4 Leichen.
+   über die aktuellen 4 pausierten Workspaces.
 2. **Aktion: close-as-done + archivieren** (Gran. 2) — die sichere Aktion, stoppt
-   die Zombie-Loops zuerst. Done wenn SC1 + SC5.
+   die Retry-Loops zuerst. Done wenn SC1 + SC5.
 3. **Aktion: diagnose-informiertes re-dispatch + Retry-Budget + Stop-&-Eskalieren**
    (Gran. 3) — inkl. der SC3-Eskalation (Stop nach N). Done wenn SC2 + SC3.
 4. **Sage-Liveness + dangling-Metrik** (Gran. 2) — Done wenn (a) der
@@ -164,13 +164,13 @@ Ein klar strukturierten Plan mit starkem Problembeleg, bewusst plausibler Scope-
 
 **MUST-FIX vor Phase-1-Beads (3):**
 
-1. **[Nygard — KRITISCH] Der Sage muss die *alleinige* Re-Dispatch-Autorität bei Fehlern sein.** Heute re-dispatchen **zwei** Dinge gescheiterte Beads: der bestehende Auto-Retry (der die 3 Zombies 4-5× geloopt hat) **und** der Reactor. Einen smarten Healer danebenzustellen, *ohne den dummen Retry zu entfernen/unterzuordnen*, macht das Retry-Budget wirkungslos — die Zombies bleiben. Das PRD muss spezifizieren: alten Auto-Retry abschalten, **alle** Failure-Re-Dispatches durch den Sage routen.
+1. **[Nygard — KRITISCH] Der Sage muss die *alleinige* Re-Dispatch-Autorität bei Fehlern sein.** Heute re-dispatchen **zwei** Dinge gescheiterte Beads: der bestehende Auto-Retry (der die 3 Zombies 4-5× geloopt hat) **und** der Reactor. Einen smarten Healer danebenzustellen, *ohne den dummen Retry zu entfernen/unterzuordnen*, macht das Retry-Budget wirkungslos — die pausierten Beads bleiben. Das PRD muss spezifizieren: alten Auto-Retry abschalten, **alle** Failure-Re-Dispatches durch den Sage routen.
 2. **[Fowler — MAJOR] Der „close-as-done"-Sicherheitsmechanismus ist hand-waved.** Es ist die *gefährlichste* Aktion (markiert Arbeit still als erledigt). R-A nennt „verifizierbarer Check", aber **wie** der Sage das Done-Artefakt eines beliebigen Beads mit Prosa-Akzeptanz kennt, ist unspezifiziert. Entweder Beads tragen einen **maschinen-prüfbaren Done-Probe**, oder close-as-done braucht **Mensch-Bestätigung**. Sonst droppt ein false-close Arbeit lautlos — das Gegenteil der Capture-Completeness-Maxime.
-3. **[Hohpe — MAJOR] Atomarer Claim/Lock vor jeder Aktion.** Ohne per-Bead-Lease/Compare-and-Set handeln zwei Sage-Zyklen (oder Sage+Reactor) doppelt am selben toten Workspace. Heal-Counter-Inkrement **und** Aktion müssen atomar sein.
+3. **[Hohpe — MAJOR] Atomarer Claim/Lock vor jeder Aktion.** Ohne per-Bead-Lease/Compare-and-Set handeln zwei Sage-Zyklen (oder Sage+Reactor) doppelt am selben ruhenden Workspace. Heal-Counter-Inkrement **und** Aktion müssen atomar sein.
 
 **NOTES:**
-- **[Crispin/Wiegers] Kalibrierungs-Gate vor Autonomie.** Phase 1 ist read-only — ergänze ein Kriterium: die Sage-Klassifikationen müssen mit dem Mensch-Urteil über die aktuellen 4 Leichen übereinstimmen (≥ Schwelle), **bevor** Phase 2 ihn handeln lässt. Keinen autonomen Mutator mit unbewiesenem Urteil scharfschalten. **Bestanden & Dokumentiert am 20.06.2026:** Siehe [vk-Sage Kalibrierung](vk-sage-calibration.md) (100% Übereinstimmung erreicht).
+- **[Crispin/Wiegers] Kalibrierungs-Gate vor Autonomie.** Phase 1 ist read-only — ergänze ein Kriterium: die Sage-Klassifikationen müssen mit dem Mensch-Urteil über die aktuellen 4 pausierten Workspaces übereinstimmen (≥ Schwelle), **bevor** Phase 2 ihn handeln lässt. Keinen autonomen Mutator mit unbewiesenem Urteil scharfschalten. **Bestanden & Dokumentiert am 20.06.2026:** Siehe [vk-Sage Kalibrierung](vk-sage-calibration.md) (100% Übereinstimmung erreicht).
 - **[Cockburn] Live-Geld-Ausnahme.** quantbot/Trading-Path-Beads → Sage **nur eskalieren**, kein autonomes close/re-dispatch (Live-Geld-Konvention „keine Änderungen ohne Permission").
 - **[Hohpe] Subscribable Execution-End-Event verifizieren** (wie Dispatch-PRD A1) — emittiert der vibekanban-adapter wirklich ein abonnierbares Event, oder degradiert „edge-triggered" still zu Poll?
-- **[Newman] Heal-Counter-Reset-Semantik** — setzt partieller Fortschritt (ein paar Commits, dann Fehler) den Zähler zurück oder nicht? Definieren, sonst verhungern harte Tasks oder Zombies bleiben.
+- **[Newman] Heal-Counter-Reset-Semantik** — setzt partieller Fortschritt (ein paar Commits, dann Fehler) den Zähler zurück oder nicht? Definieren, sonst verhungern harte Tasks oder pausierten Beads bleiben.
 - **[Crispin] Den Sage testen braucht eine Sandbox** (fake failed Bead/Workspace) — an die Staging-vk-Instanz koppeln, den autonomen Mutator nicht gegen prod-Beads testen.
