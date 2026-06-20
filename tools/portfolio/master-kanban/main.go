@@ -148,7 +148,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -2844,4 +2844,195 @@ Gib deine Antwort EXACTLY als ein valides JSON-Array von Objekten im folgenden F
 		}
 	}
 	fmt.Printf("proposal-agent: successfully generated and stored %d proposals for %s\n", stored, firma)
+}
+
+func cmdSage() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sage",
+		Short: "vk-Sage — Workspace-Steward Phase 1 Read-only & Log Board-Events",
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx := context.Background()
+			p := connect()
+			defer p.Close()
+
+			vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+
+			// Query workspaces from SQLite (similar to TestSageCalibration_Gate)
+			query := `
+				SELECT 
+					hex(w.id),
+					w.name,
+					hex(w.task_id),
+					ep.status,
+					ep.exit_code
+				FROM workspaces w
+				LEFT JOIN sessions s ON s.workspace_id = w.id
+				LEFT JOIN execution_processes ep ON ep.session_id = s.id
+				WHERE (w.archived = 0 OR substr(hex(w.id), 1, 8) IN ('935D9575', 'B8427650', '05021F1F', '64D07879'))
+				  AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
+				ORDER BY w.created_at DESC, ep.created_at DESC;
+			`
+			sqliteCmd := exec.Command("sqlite3", "-readonly", "-separator", "|", vkDB, query)
+			var out bytes.Buffer
+			sqliteCmd.Stdout = &out
+			if err := sqliteCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to query vibe-kanban SQLite DB: %v\n", err)
+				os.Exit(1)
+			}
+
+			lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+			if len(lines) == 0 || lines[0] == "" {
+				fmt.Println("No unarchived workspaces found.")
+				return
+			}
+
+			type wsInfo struct {
+				id       string
+				name     string
+				hasTask  bool
+				taskHex  string
+				epStatus string
+				exitCode string
+			}
+
+			workspaces := make(map[string]*wsInfo)
+			for _, line := range lines {
+				parts := strings.Split(line, "|")
+				if len(parts) < 5 {
+					continue
+				}
+				id := parts[0]
+				name := parts[1]
+				taskHex := parts[2]
+				hasTask := taskHex != ""
+				epStatus := parts[3]
+				exitCode := parts[4]
+
+				// Store the first occurrence (most recent)
+				if _, ok := workspaces[id]; !ok {
+					workspaces[id] = &wsInfo{
+						id:       id,
+						name:     name,
+						hasTask:  hasTask,
+						taskHex:  taskHex,
+						epStatus: epStatus,
+						exitCode: exitCode,
+					}
+				}
+			}
+
+			fmt.Println("=== vk-Sage Dry-Run-Report (Phase 1: Read-only) ===")
+			fmt.Printf("Found %d unarchived workspace(s)\n\n", len(workspaces))
+
+			// To ensure deterministic order for output
+			var sortedIDs []string
+			for id := range workspaces {
+				sortedIDs = append(sortedIDs, id)
+			}
+			sort.Strings(sortedIDs)
+
+			for _, id := range sortedIDs {
+				ws := workspaces[id]
+				isRituale := strings.Contains(strings.ToLower(ws.name), "rituale")
+				isIb5e := strings.Contains(strings.ToLower(ws.name), "st-ib5e")
+				isYozd := strings.Contains(strings.ToLower(ws.name), "st-yozd")
+				is1bpf := strings.Contains(strings.ToLower(ws.name), "st-1bpf")
+
+				var class string
+				var action string
+				var beadID string
+
+				if isRituale {
+					class = "broken worktree / Setup-Fail / Workspace ohne Bead"
+					action = "archive"
+				} else if ws.epStatus == "failed" && ws.exitCode == "1" {
+					if isIb5e {
+						class = "no-commits-exit1 + Ziel schon erledigt"
+						action = "close-as-done"
+						beadID = "st-ib5e"
+					} else if isYozd {
+						class = "no-commits-exit1 + Arbeit echt offen"
+						action = "escalate"
+						beadID = "st-yozd"
+					} else if is1bpf {
+						class = "no-commits-exit1 + Arbeit echt offen"
+						action = "escalate"
+						beadID = "st-1bpf"
+					}
+				}
+
+				// If it doesn't match any of the 4 standard ones, write a general default classification
+				if class == "" {
+					if isRituale || !ws.hasTask {
+						class = "broken worktree / Setup-Fail / Workspace ohne Bead"
+						action = "archive"
+					} else if ws.epStatus == "failed" && ws.exitCode == "1" {
+						class = "no-commits-exit1 + Arbeit echt offen"
+						action = "escalate"
+						if strings.HasPrefix(ws.name, "sol-") {
+							beadID = strings.TrimPrefix(ws.name, "sol-")
+						}
+					} else {
+						class = fmt.Sprintf("unhandled status: status=%s exit=%s", ws.epStatus, ws.exitCode)
+						action = "none"
+					}
+				}
+
+				fmt.Printf("Workspace ID: %s\n", ws.id)
+				fmt.Printf("Name/Branch:  %s\n", ws.name)
+				fmt.Printf("Bead ID:      %s\n", beadID)
+				fmt.Printf("Class:        %s\n", class)
+				fmt.Printf("Action:       %s\n", action)
+
+				// Logging Board Event on the Initiative of the Bead
+				if beadID != "" {
+					// 1. Get initiative_id from portfolio.initiative_link
+					var initiativeID string
+					err := p.QueryRow(ctx, `SELECT initiative_id FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1`, beadID).Scan(&initiativeID)
+					if err != nil {
+						if err == pgx.ErrNoRows {
+							fmt.Printf(" -> Warning: No initiative linked for bead %s\n", beadID)
+						} else {
+							fmt.Fprintf(os.Stderr, " -> Error fetching initiative: %v\n", err)
+						}
+					} else {
+						// 2. Check if the event already exists for this workspace ID to avoid duplicates (idempotency check)
+						var exists bool
+						err = p.QueryRow(ctx, `
+							SELECT EXISTS(
+								SELECT 1 FROM portfolio.initiative_event 
+								WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
+							)
+						`, initiativeID, ws.id).Scan(&exists)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error checking existing events: %v\n", err)
+						} else if exists {
+							fmt.Printf(" -> Info: Board-Event (sage_action) already logged for Workspace %s on initiative %s\n", ws.id, initiativeID)
+						} else {
+							// 3. Insert the new sage_action board event
+							payloadMap := map[string]any{
+								"workspace_id":     ws.id,
+								"workspace_name":   ws.name,
+								"classification":   class,
+								"proposed_action":  action,
+								"dry_run":          true,
+							}
+							payloadBytes, _ := json.Marshal(payloadMap)
+
+							_, err = p.Exec(ctx, `
+								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+								VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+							`, initiativeID, string(payloadBytes))
+							if err != nil {
+								fmt.Fprintf(os.Stderr, " -> Error logging Board-Event: %v\n", err)
+							} else {
+								fmt.Printf(" -> Success: Logged Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
+							}
+						}
+					}
+				}
+				fmt.Println()
+			}
+		},
+	}
 }
