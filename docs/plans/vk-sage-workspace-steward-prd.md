@@ -80,6 +80,12 @@ eskalieren** (Board-Event + advisor-Signal), keine weitere Auto-Heilung. Der
 Zähler liegt am Bead (überlebt Restarts). **Alternative verworfen:** unbegrenzt
 retryen — verworfen, weil genau das die 3 pausierte Deck-Beads erzeugt hat.
 
+**Heal-Counter-Reset-Semantik (Newman-Note / Counter-Reset-Rule):**
+Macht eine schwierige Aufgabe im Verlauf eines Versuchs Fortschritte, darf der Versuch nicht durch ein starres Heilungs-Budget vorzeitig abgewürgt werden. Daher gilt die folgende Regel zur Zählerrücksetzung:
+- Weist der Workspace im aktuellen Heilungsversuch einen **partiellen Fortschritt** auf (nachgewiesen dadurch, dass neue Commits im Workspace-Repository entstanden sind, d. h. `before_head_commit != after_head_commit`), so wird der Heal-Counter bei diesem Durchlauf auf **0** zurückgesetzt.
+- Erzielt der Versuch hingegen **keinerlei Code-Fortschritt** (0 Commits, typischerweise bei einem abrupten `no-commits-exit1` Setup-Fehler oder einer Blockade), wird der Heal-Counter normal inkrementiert.
+- Dadurch wird sichergestellt, dass Aufgaben, die sich schrittweise ihrer Lösung annähern (inkrementeller Fortschritt), beliebig oft weiterversucht werden können, während echte hängengebliebene Schleifen (Zombies) zuverlässig nach $N=2$ Versuchen gestoppt und eskaliert werden.
+
 ### L5 — Sichtbarkeit + Sage-Liveness
 Jede Sage-Aktion (heal/close/escalate/archive/merge-nudge) = ein Board-Event
 (`kind=sage_action`) auf der Initiative des Beads. Eskalationen erscheinen in

@@ -62,7 +62,7 @@ func TestExecuteSageAction_Concurrency(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func(actorName string) {
 			defer wg.Done()
-			acquired, err := ExecuteSageAction(ctx, p, testBead, testWS, actorName, actionFn)
+			acquired, err := ExecuteSageAction(ctx, p, testBead, testWS, actorName, false, actionFn)
 			if err != nil {
 				t.Errorf("error during ExecuteSageAction: %v", err)
 				return
