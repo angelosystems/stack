@@ -155,7 +155,7 @@ Antworte immer freundlich, präzise und auf Deutsch.`, info.ID, grounding, info.
 		 WHERE initiative_id = $1 AND kind = 'activity' AND source_backend = 'master' AND payload->>'category' = 'copilot' AND payload->>'session_id' = $2
 		 ORDER BY at ASC LIMIT 50`,
 		req.InitiativeID, req.SessionID)
-
+	
 	messages := []map[string]string{}
 	if err == nil {
 		defer historyRows.Close()

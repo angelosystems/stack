@@ -1755,12 +1755,12 @@ func cmdServe() *cobra.Command {
 				}
 
 				resp := map[string]any{
-					"last_run":            lastRun,
-					"status":              status,
-					"error_message":       errMsg,
-					"dangling_count":      len(dangling),
-					"dangling_baseline":   4,
-					"outage_simulated":    sageOutageSimulated,
+					"last_run":          lastRun,
+					"status":            status,
+					"error_message":     errMsg,
+					"dangling_count":    len(dangling),
+					"dangling_baseline": 4,
+					"outage_simulated":  sageOutageSimulated,
 					"dangling_workspaces": dangling,
 				}
 				json.NewEncoder(w).Encode(resp)
@@ -2969,13 +2969,7 @@ func startSageSteward(p *pgxpool.Pool) {
 }
 
 func getDanglingWorkspaces() ([]DanglingWorkspace, error) {
-	vkDB := os.Getenv("VK_DB")
-	if vkDB == "" {
-		vkDB = os.Getenv("VIBE_KANBAN_DB")
-	}
-	if vkDB == "" {
-		vkDB = "/root/.local/share/vibe-kanban/db.v2.sqlite"
-	}
+	vkDB := envOr("VK_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
 	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
 		return []DanglingWorkspace{}, nil
 	}
@@ -3211,11 +3205,11 @@ func cmdSage() *cobra.Command {
 						} else {
 							// 3. Insert the new sage_action board event
 							payloadMap := map[string]any{
-								"workspace_id":    ws.id,
-								"workspace_name":  ws.name,
-								"classification":  class,
-								"proposed_action": action,
-								"dry_run":         true,
+								"workspace_id":     ws.id,
+								"workspace_name":   ws.name,
+								"classification":   class,
+								"proposed_action":  action,
+								"dry_run":          true,
 							}
 							payloadBytes, _ := json.Marshal(payloadMap)
 

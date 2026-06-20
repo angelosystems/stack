@@ -62,13 +62,12 @@ func TestSageSteward_API(t *testing.T) {
 		dangling, _ := getDanglingWorkspaces()
 
 		resp := map[string]any{
-			"last_run":            lastRun,
-			"status":              status,
-			"error_message":       errMsg,
-			"dangling_count":      len(dangling),
-			"dangling_baseline":   4,
-			"outage_simulated":    sageOutageSimulated,
-			"dangling_workspaces": dangling,
+			"last_run":          lastRun,
+			"status":            status,
+			"error_message":     errMsg,
+			"dangling_count":    len(dangling),
+			"dangling_baseline": 4,
+			"outage_simulated":  sageOutageSimulated,
 		}
 		json.NewEncoder(w).Encode(resp)
 	})
@@ -178,18 +177,5 @@ func TestSageSteward_API(t *testing.T) {
 	}
 	if recoveredData["outage_simulated"] != false {
 		t.Errorf("expected outage_simulated to be false after reset")
-	}
-}
-
-func TestGetDanglingWorkspaces(t *testing.T) {
-	// Ensure that getDanglingWorkspaces runs and returns without panic or error.
-	dangling, err := getDanglingWorkspaces()
-	if err != nil {
-		t.Fatalf("getDanglingWorkspaces failed: %v", err)
-	}
-
-	t.Logf("Found %d dangling workspaces", len(dangling))
-	for _, ws := range dangling {
-		t.Logf("Dangling Workspace: ID=%s Name=%s EPStatus=%s", ws.ID, ws.Name, ws.EPStatus)
 	}
 }

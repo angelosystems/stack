@@ -385,3 +385,4 @@ TOOL_CALL: move-stage {"id": "sa-test-loop-card", "stage": "watching"}`,
 		t.Errorf("expected an assistant message activity event with actor mcp-copilot")
 	}
 }
+
