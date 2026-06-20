@@ -17,15 +17,24 @@ import (
 
 // TestIdentityJoinKeySpike implements the end-to-end multi-space identity join key chain:
 // Space 1 (OS Runtime / Process Cgroup):
-//   PID -> /proc/<PID>/cgroup -> Slice -> Provider
+//
+//	PID -> /proc/<PID>/cgroup -> Slice -> Provider
+//
 // Space 2 (Session / Worktree Log):
-//   PID -> /proc/<PID>/cwd -> /var/log/vk-sessions.jsonl -> Workspace UUID (R2)
+//
+//	PID -> /proc/<PID>/cwd -> /var/log/vk-sessions.jsonl -> Workspace UUID (R2)
+//
 // Space 3 (Vibe-Kanban Metadata):
-//   Workspace UUID -> SQLite (vibe-kanban database) -> Workspace Name & Bead ID
+//
+//	Workspace UUID -> SQLite (vibe-kanban database) -> Workspace Name & Bead ID
+//
 // Space 4 (Beads Tracking):
-//   Bead ID -> Postgres (port 5433 - beads) -> Bead Status
+//
+//	Bead ID -> Postgres (port 5433 - beads) -> Bead Status
+//
 // Space 5 (Master Kanban Board / Portfolio):
-//   Bead ID -> Postgres (port 5434 - portfolio) -> Initiative Card on Kanban (R3/R4)
+//
+//	Bead ID -> Postgres (port 5434 - portfolio) -> Initiative Card on Kanban (R3/R4)
 func TestIdentityJoinKeySpike(t *testing.T) {
 	printSpecificationHeader(t)
 

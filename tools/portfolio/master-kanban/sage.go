@@ -340,7 +340,24 @@ func cmdSage() *cobra.Command {
 				} else {
 					// No bead associated (e.g. rituale). Lock on lockID (ws.id) to avoid duplicates.
 					actionFn := func(tx pgx.Tx, healCount int) error {
-						return nil
+						// Build payload for non-bead workspaces (e.g. rituale)
+						payloadMap := map[string]any{
+							"workspace_id":    ws.id,
+							"workspace_name":  ws.name,
+							"bead_id":         "",
+							"classification":  sageClass,
+							"proposed_action": proposedAction,
+							"reason":          reason,
+							"heal_count":      healCount,
+						}
+						payloadJSON, _ := json.Marshal(payloadMap)
+
+						// Insert sage_action event on the general Sage Steward initiative
+						_, err := tx.Exec(ctx, `
+							INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+							VALUES ('sk-vk-sage-workspace-steward', 'sage_action', 'sage', $1, 'sage-steward')
+						`, payloadJSON)
+						return err
 					}
 
 					acquired, err := ExecuteSageAction(ctx, p, lockID, ws.id, "sage-steward", hasPartialProgress, actionFn)
@@ -513,4 +530,3 @@ func buildDiagnosisPrompt(healCount int, isYozd, is1bpf bool) string {
 		specificDiagnosis,
 	)
 }
-

@@ -1981,29 +1981,33 @@ func escape(s string) string { return strings.ReplaceAll(s, `"`, `\"`) }
 //
 // Dieser dreiräumige Join spezifiziert das Mapping entlang der Kette:
 // Space 1 (Laufzeit / Session):
-//   Ein laufender Prozess/Workspace wird eindeutig identifiziert über seine PID und seine CWD (Current Working Directory).
-//   Jede ausgeführte Session/Agenten-Session protokolliert Setup- und Stop-Events in das globale Log unter
-//   /var/log/vk-sessions.jsonl.
-//   Die Brücke [Session-Log-UUID ↔ PID/Workspace] löst den Join über das Feld "workspace_id" (UUID) auf:
-//     PID -> /proc/<PID>/cwd -> Pfad-Präfix (z. B. "1134-sol-st-4aibw") -> Suche in /var/log/vk-sessions.jsonl -> Workspace UUID (R2)
+//
+//	Ein laufender Prozess/Workspace wird eindeutig identifiziert über seine PID und seine CWD (Current Working Directory).
+//	Jede ausgeführte Session/Agenten-Session protokolliert Setup- und Stop-Events in das globale Log unter
+//	/var/log/vk-sessions.jsonl.
+//	Die Brücke [Session-Log-UUID ↔ PID/Workspace] löst den Join über das Feld "workspace_id" (UUID) auf:
+//	  PID -> /proc/<PID>/cwd -> Pfad-Präfix (z. B. "1134-sol-st-4aibw") -> Suche in /var/log/vk-sessions.jsonl -> Workspace UUID (R2)
 //
 // Space 2 (Workspace / Vibe-Kanban):
-//   Die Workspace-UUID aus dem Session-Log verbindet sich mit dem Vibe-Kanban SQLite-Datenbankschema:
-//     Workspace-UUID -> workspaces Table (hex(id) match) -> Workspace Name (z. B. "sol-st-4aibw") & extrahierter Bead ID (z. B. "st-4aibw").
+//
+//	Die Workspace-UUID aus dem Session-Log verbindet sich mit dem Vibe-Kanban SQLite-Datenbankschema:
+//	  Workspace-UUID -> workspaces Table (hex(id) match) -> Workspace Name (z. B. "sol-st-4aibw") & extrahierter Bead ID (z. B. "st-4aibw").
 //
 // Space 3 (Master-Kanban / Portfolio):
-//   Die extrahierte Bead ID verbindet den lokalen Task/Bead mit dem übergeordneten Master-Kanban Board:
-//     - Dolt-Postgres (Port 5433 - beads): Bead ID -> beads.issues.id -> Bead Status (z. B. 'hooked', 'open')
-//     - Board-Postgres (Port 5434 - portfolio): Bead ID -> portfolio.initiative_link (kind='bead', ref=Bead ID) -> initiative_id (Kanban-Karte, R3/R4)
+//
+//	Die extrahierte Bead ID verbindet den lokalen Task/Bead mit dem übergeordneten Master-Kanban Board:
+//	  - Dolt-Postgres (Port 5433 - beads): Bead ID -> beads.issues.id -> Bead Status (z. B. 'hooked', 'open')
+//	  - Board-Postgres (Port 5434 - portfolio): Bead ID -> portfolio.initiative_link (kind='bead', ref=Bead ID) -> initiative_id (Kanban-Karte, R3/R4)
 //
 // Die 5 Kanban-Slices / Provider (Domain-Objekte des Kanban-Tools für die Ressourcenverteilung):
-//   Jeder Provider (Firma) repräsentiert einen logischen Ressourcen-Kanal (Domain-Slice) auf dem Board.
-//   Die Abbildung von Provider auf das entsprechende Code-Repository und Präfix erfolgt über:
-//     1. "stayawesome" -> /root/stayawesomeOS -> Präfix "sa"
-//     2. "quantbot"    -> /opt/quantbot        -> Präfix "qb"
-//     3. "solartown"   -> /root/solartown       -> Präfix "st"
-//     4. "mariobrain"  -> /root/mario-brain     -> Präfix "mb"
-//     5. "angeloos"    -> /opt/stack            -> Präfix "ag" (mit Fallback/Alias "stack" -> "sk")
+//
+//	Jeder Provider (Firma) repräsentiert einen logischen Ressourcen-Kanal (Domain-Slice) auf dem Board.
+//	Die Abbildung von Provider auf das entsprechende Code-Repository und Präfix erfolgt über:
+//	  1. "stayawesome" -> /root/stayawesomeOS -> Präfix "sa"
+//	  2. "quantbot"    -> /opt/quantbot        -> Präfix "qb"
+//	  3. "solartown"   -> /root/solartown       -> Präfix "st"
+//	  4. "mariobrain"  -> /root/mario-brain     -> Präfix "mb"
+//	  5. "angeloos"    -> /opt/stack            -> Präfix "ag" (mit Fallback/Alias "stack" -> "sk")
 //
 // rigTownMap maps a company (firma) to its standard local git repository root path.
 var rigTownMap = map[string]string{
@@ -3237,6 +3241,7 @@ func runSageSweep(ctx context.Context, p *pgxpool.Pool) {
 		}
 	}
 }
+
 type DanglingWorkspace struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -3481,4 +3486,3 @@ func hasPartialProgress(sessionHex string) bool {
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	return len(lines) > 0 && lines[0] != ""
 }
-
