@@ -222,3 +222,27 @@ func TestExecuteSageActionConcurrency(t *testing.T) {
 	// Clean up
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", beadID)
 }
+
+func TestStewardReport(t *testing.T) {
+	vkDB := os.Getenv("VK_DB")
+	if vkDB == "" {
+		vkDB = "/root/.local/share/vibe-kanban/db.v2.sqlite"
+	}
+	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
+		t.Skip("vibe-kanban SQLite database not found, skipping steward report test")
+		return
+	}
+
+	// Set default test DSN if empty
+	if dsn == "" {
+		dsn = os.Getenv("PORTFOLIO_DSN")
+		if dsn == "" {
+			dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+		}
+	}
+
+	err := runStewardPhase1()
+	if err != nil {
+		t.Errorf("expected no error running runStewardPhase1, got: %v", err)
+	}
+}
