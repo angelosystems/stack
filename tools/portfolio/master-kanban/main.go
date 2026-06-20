@@ -14,7 +14,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,8 +30,22 @@ var (
 	dsn     string
 	pool    *pgxpool.Pool
 	stPool  *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
+	qbPool  *pgxpool.Pool // Quantbot-Ledger (read KPI events)
 	Version string        = "dev"
 )
+
+func quantbotPool() (*pgxpool.Pool, error) {
+	if qbPool != nil {
+		return qbPool, nil
+	}
+	p, err := pgxpool.New(context.Background(),
+		envOr("QUANTBOT_DSN", "postgres://quantbot@127.0.0.1:54330/quantbot?sslmode=disable"))
+	if err != nil {
+		return nil, err
+	}
+	qbPool = p
+	return p, nil
+}
 
 // pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
 type pgxRows interface {
@@ -1342,6 +1358,190 @@ func cmdServe() *cobra.Command {
 				_, _ = p.Exec(r.Context(), `DELETE FROM portfolio.unlinked_item WHERE id=$1`, body.Ref)
 
 				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
+			// P2.1 — Host-Kapazitätsanzeige (RAM/CPU/Swap/PSI + Headroom + Governor-Verdict + Freeze-Marge)
+			http.HandleFunc("/api/host-capacity", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				qbp, err := quantbotPool()
+				var dbCPU, dbRAM, dbDisk float64
+				var lastUpdated time.Time
+				dbConnected := false
+				if err == nil {
+					dbConnected = true
+					var cpuTime, ramTime, diskTime time.Time
+					_ = qbp.QueryRow(r.Context(), 
+						`SELECT (payload->>'value')::float, published_at 
+						 FROM public.kpi_events 
+						 WHERE owner='infra' AND name='cpu_nuernberg' 
+						 ORDER BY id DESC LIMIT 1`).Scan(&dbCPU, &cpuTime)
+
+					_ = qbp.QueryRow(r.Context(), 
+						`SELECT (payload->>'value')::float, published_at 
+						 FROM public.kpi_events 
+						 WHERE owner='infra' AND name='ram_nuernberg' 
+						 ORDER BY id DESC LIMIT 1`).Scan(&dbRAM, &ramTime)
+
+					_ = qbp.QueryRow(r.Context(), 
+						`SELECT (payload->>'value')::float, published_at 
+						 FROM public.kpi_events 
+						 WHERE owner='infra' AND name='disk_nuernberg' 
+						 ORDER BY id DESC LIMIT 1`).Scan(&dbDisk, &diskTime)
+
+					if cpuTime.After(ramTime) {
+						lastUpdated = cpuTime
+					} else {
+						lastUpdated = ramTime
+					}
+					if diskTime.After(lastUpdated) {
+						lastUpdated = diskTime
+					}
+				}
+
+				mem := make(map[string]int64)
+				if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+					for _, line := range strings.Split(string(data), "\n") {
+						parts := strings.SplitN(line, ":", 2)
+						if len(parts) == 2 {
+							key := strings.TrimSpace(parts[0])
+							fields := strings.Fields(parts[1])
+							if len(fields) > 0 {
+								if val, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
+									mem[key] = val
+								}
+							}
+						}
+					}
+				}
+
+				memTotal := float64(mem["MemTotal"]) / 1024 / 1024
+				memAvailable := float64(mem["MemAvailable"]) / 1024 / 1024
+				swapTotal := float64(mem["SwapTotal"]) / 1024 / 1024
+				swapFree := float64(mem["SwapFree"]) / 1024 / 1024
+				swapUsed := swapTotal - swapFree
+				swapPct := 0.0
+				if swapTotal > 0 {
+					swapPct = (swapUsed / swapTotal) * 100
+				}
+
+				commitLimit := mem["CommitLimit"]
+				if commitLimit == 0 {
+					commitLimit = 1
+				}
+				committedRatio := float64(mem["Committed_AS"]) / float64(commitLimit)
+				freezeMarge := (1.0 - committedRatio) * 100
+
+				psi := 0.0
+				if data, err := os.ReadFile("/proc/pressure/memory"); err == nil {
+					for _, line := range strings.Split(string(data), "\n") {
+						if strings.HasPrefix(line, "some") {
+							for _, tok := range strings.Fields(line) {
+								if strings.HasPrefix(tok, "avg10=") {
+									if v, err := strconv.ParseFloat(strings.SplitN(tok, "=", 2)[1], 64); err == nil {
+										psi = v
+									}
+								}
+							}
+						}
+					}
+				}
+
+				load1 := 0.0
+				if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+					fields := strings.Fields(string(data))
+					if len(fields) > 0 {
+						if v, err := strconv.ParseFloat(fields[0], 64); err == nil {
+							load1 = v
+						}
+					}
+				}
+
+				nproc := runtime.NumCPU()
+
+				if !dbConnected || dbCPU == 0 {
+					dbCPU = (load1 / float64(nproc)) * 100
+					if dbCPU > 100 {
+						dbCPU = 100
+					}
+				}
+				if !dbConnected || dbRAM == 0 {
+					if memTotal > 0 {
+						dbRAM = ((memTotal - memAvailable) / memTotal) * 100
+					}
+				}
+
+				stressed := false
+				var reasons []string
+				if load1 > float64(nproc) {
+					stressed = true
+					reasons = append(reasons, fmt.Sprintf("load %.1f > %d", load1, nproc))
+				}
+				if memAvailable < 4.0 {
+					stressed = true
+					reasons = append(reasons, fmt.Sprintf("memavail %.1fG < 4.0G", memAvailable))
+				}
+				if committedRatio > 0.90 {
+					stressed = true
+					reasons = append(reasons, fmt.Sprintf("committed %.2f > 0.90", committedRatio))
+				}
+				if psi > 30.0 {
+					stressed = true
+					reasons = append(reasons, fmt.Sprintf("psi %.1f > 30.0", psi))
+				}
+
+				governorVerdict := "OK"
+				if stressed {
+					governorVerdict = "STRESS-THROTTLE"
+				}
+
+				swapTrend := "stable"
+				if swapUsed > 0 && swapPct > 15 {
+					swapTrend = "moderate-use"
+				}
+
+				cpuHeadroom := 100.0 - dbCPU
+				if cpuHeadroom < 0 {
+					cpuHeadroom = 0
+				}
+
+				secondsAgo := 0
+				liveness := "unhealthy"
+				if !lastUpdated.IsZero() {
+					secondsAgo = int(time.Since(lastUpdated).Seconds())
+					if secondsAgo < 60 {
+						liveness = "healthy"
+					}
+				} else {
+					lastUpdated = time.Now()
+					liveness = "healthy"
+				}
+
+				resp := map[string]any{
+					"cpu_pct":                  dbCPU,
+					"ram_pct":                  dbRAM,
+					"disk_pct":                 dbDisk,
+					"mem_total_gb":             memTotal,
+					"mem_avail_gb":             memAvailable,
+					"swap_total_gb":            swapTotal,
+					"swap_free_gb":             swapFree,
+					"swap_used_gb":             swapUsed,
+					"swap_pct":                 swapPct,
+					"swap_trend":               swapTrend,
+					"psi_mem_some_avg10":       psi,
+					"committed_ratio":          committedRatio,
+					"freeze_marge":             freezeMarge,
+					"load1":                    load1,
+					"nproc":                    nproc,
+					"cpu_headroom_pct":         cpuHeadroom,
+					"governor_verdict":         governorVerdict,
+					"governor_reasons":         strings.Join(reasons, ", "),
+					"last_updated_seconds_ago": secondsAgo,
+					"collector_liveness":       liveness,
+				}
+
+				json.NewEncoder(w).Encode(resp)
 			})
 
 			// P2.2 — Kapazitätsanzeige je Lane
