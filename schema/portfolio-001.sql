@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS portfolio.initiative (
   id              text PRIMARY KEY,
   firma           text NOT NULL CHECK (firma IN ('stayawesome','solartown','quantbot','mariobrain','angeloos')),
   stage           text NOT NULL CHECK (stage IN ('idea','now','soon','watching','done')),
+  stage_locked_by_human boolean DEFAULT false,
   title           text NOT NULL,
   status_dot      text,
   wip_pinned      boolean DEFAULT false,
@@ -28,7 +29,7 @@ CREATE TABLE IF NOT EXISTS portfolio.initiative_link (
 CREATE TABLE IF NOT EXISTS portfolio.initiative_event (
   id              bigserial PRIMARY KEY,
   initiative_id   text NOT NULL REFERENCES portfolio.initiative(id) ON DELETE CASCADE,
-  kind            text NOT NULL CHECK (kind IN ('created','moved','edited','linked','unlinked','activity','stage_proposed','completed')),
+  kind            text NOT NULL CHECK (kind IN ('created','moved','edited','linked','unlinked','activity','stage_proposed','completed','commented','archived','dispatched')),
   source_backend  text NOT NULL CHECK (source_backend IN ('vk','solartown','github','plan_file','master')),
   from_stage      text,
   to_stage        text,

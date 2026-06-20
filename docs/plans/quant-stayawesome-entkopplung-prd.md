@@ -1,7 +1,7 @@
 ---
 title: Quant/Stay-Awesome-Entkopplung auf werkstatt
 slug: quant-stayawesome-entkopplung
-status: draft
+status: review
 layer: prd
 parent_plan: null
 scope: Logische Trennung der QuantBot- und Stay-Awesome-Infrastruktur auf werkstatt — gemeinsame Single-Points entflechten, ohne physischen Umzug.
@@ -200,3 +200,17 @@ bereits sauber auf Daten-Ebene. Was fehlt, ist der lebende Sync:
 ### Asks
 
 See Findings above.
+
+## Reviewer-Verdict — quick (glm-5.1) — 2026-06-12
+
+**Verdict:** `needs-changes`
+
+Der Plan benennt ein handfestes Problem (gemeinsame Single-Points-of-Failure mit belegtem Vorfall) und besitzt eine klare Scope-Abgrenzung inklusive 'bewusst NICHT'-Sektion. Er verletzt jedoch die Plan-Konvention massiv, indem er in den Status-Updates konkrete technische Umsetzungen dokumentiert, ohne dass die zugehörigen Arbeitspakete in der Definition überprüfbare Done-Kriterien besitzen.
+
+**Findings:**
+- [major] **Fehlende Done-Kriterien auf Arbeitspaket-Ebene** — Die Arbeitspakete W1 bis W5 definieren zwar Ziele und Weg, aber kein einziges Paket enthält ein explizites, überprüfbares Done-Kriterium. Die Sektion 'Erfolgs-Kriterien (messbar)' existiert nur auf Plan-Ebene. Da der Status-Update bereits teilweise 'umgesetzt' meldet, muss jedes Arbeitspaket nachträglich ein messbares Gate erhalten (z.B. für W1: 'findmnt /var/lib/docker/volumes zeigt Root-Disk, nicht /dev/sdb').
+- [minor] **Architekturentscheidung W4 wenig обосновet** — Bei W4 (Domain-Zuordnung) lautet die Empfehlung 'vorerst belassen'. Ein Alternativen-Abgleich (z.B. Aufwand für neutrale Domain vs. Aufwand für Dokumentation) fehlt hier im Vergleich zu W2, wo Alternativen explizit genannt und bewertet werden.
+
+**Asks:**
+- [ ] Versehe jedes Arbeitspaket (W1 bis W5) mit mindestens einem konkreten, überprüfbaren Done-Kriterium, das vorab klar definiert, wann das Paket als abgeschlossen gilt.
+- [ ] Da laut Status-Update W2 und W3 bereits als 'umgesetzt' gelten, prüfe und dokumentiere abschließend, ob die in der Erfolgs-Kriterien-Sektion definierten checks für diese Pakete aktuell bestanden werden.

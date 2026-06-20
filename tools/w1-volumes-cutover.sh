@@ -16,7 +16,7 @@ STAGE=/var/lib/docker/.volumes-staging
 
 echo "== Preflight =="
 docker exec quantbot-tsdb psql -U quantbot -d quantbot -Atc \
-  "SELECT count(*) FROM pg_stat_activity WHERE query ILIKE '%compress_chunk%' OR query ILIKE '%SET TABLESPACE%';" \
+  "SELECT count(*) FROM pg_stat_activity WHERE (query ILIKE '%compress_chunk%' OR query ILIKE '%SET TABLESPACE%') AND pid<>pg_backend_pid();" \
   | grep -q '^0$' || { echo "Pipeline noch aktiv — Cease."; exit 1; }
 NEED=$(du -s --exclude="$TSDB_VOL" "$SRC" | awk '{print int($1/1024/1024)+2}')
 AVAIL=$(df --output=avail -BG / | tail -1 | tr -d ' G')

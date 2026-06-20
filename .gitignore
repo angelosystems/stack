@@ -10,6 +10,13 @@
 !tools/
 !cockpit/
 !schema/
+!workspaces/
+workspaces/*
+!workspaces/**/
+!workspaces/**/*.tf
+!workspaces/**/Dockerfile
+!workspaces/**/*.sh
+!workspaces/**/*.md
 
 apps/**
 !apps/**/
@@ -22,6 +29,10 @@ tools/*
 !tools/*.sh
 !tools/portfolio/
 !tools/portfolio/**
+!tools/master-kanban/
+!tools/master-kanban/**
+!tools/secrets-broker/
+!tools/secrets-broker/**
 
 docs/*
 !docs/README.md

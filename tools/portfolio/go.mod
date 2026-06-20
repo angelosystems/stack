@@ -1,6 +1,6 @@
 module github.com/angelosystems/stack/tools/portfolio
 
-go 1.23
+go 1.22
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0

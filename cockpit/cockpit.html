@@ -20,11 +20,12 @@
   .activity-spark { display:inline-block;width:36px;height:8px;background:linear-gradient(90deg,#e5e7eb 30%,#94a3b8 70%,#475569 100%);border-radius:2px;vertical-align:middle; }
   .activity-fresh { background: linear-gradient(90deg,#dcfce7 0%,#22c55e 100%); }
   .activity-stale { background: #f3f4f6; }
+  [x-cloak] { display: none !important; }
 </style>
 </head>
 <body class="bg-slate-100 text-slate-900">
 
-<div x-data="liveKanban()" x-init="init()" class="min-h-screen">
+<div x-data="liveKanban()" x-init="loadFirmaOrder(); init()" @keydown.escape.window="closeDetail(); closeDispatch(); dispatchDrawerOpen = false" class="min-h-screen">
 
   <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
     <h1 class="text-lg font-semibold tracking-tight">master-kanban <span class="text-xs text-emerald-600 ml-1" x-text="apiOk ? '● live' : '○ offline'"></span></h1>
@@ -42,7 +43,7 @@
     </nav>
 
     <div class="flex gap-2 flex-1" x-show="view==='board'">
-      <template x-for="f in firmas" :key="f.id">
+      <template x-for="f in orderedFirmas" :key="f.id">
         <button @click="toggleFirma(f.id)"
           :class="filter[f.id] ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-300'"
           class="px-3 py-1 rounded-full text-sm font-medium hover:opacity-80">
@@ -64,62 +65,200 @@
 
     <!-- ════ BOARD-VIEW (Portfolio, wie gehabt + Plan-Baum pro Karte) ════ -->
     <template x-if="view==='board'">
-      <div class="space-y-6">
-        <template x-for="f in firmas" :key="f.id">
-          <section x-show="filter[f.id]" :class="'lane-stripe-' + f.id" class="bg-white rounded-lg shadow-sm">
+      <div class="space-y-6" x-init="$nextTick(() => initFirmaSort($el))">
+        <!-- 🧓 Sage Steward & Dangling Workspaces Dashboard (P4.1, SC6, R-E) -->
+        <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6 divide-y md:divide-y-0 md:divide-x divide-slate-200">
+            
+            <!-- Sage Liveness Heartbeat -->
+            <div class="space-y-4 pr-0 md:pr-6">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-xl">🧓</span>
+                  <h3 class="font-bold text-slate-800 text-sm tracking-wide uppercase">Sage Steward Liveness</h3>
+                </div>
+                <span x-show="sageStatus.status === 'healthy'" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                  <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  HEALTHY
+                </span>
+                <span x-show="sageStatus.status === 'alarm'" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200 animate-bounce">
+                  <span class="h-2 w-2 rounded-full bg-red-600"></span>
+                  🚨 ALARM / OUTAGE
+                </span>
+              </div>
+              
+              <div class="space-y-1.5 text-xs text-slate-600">
+                <div class="flex justify-between">
+                  <span>Letzter Heartbeat:</span>
+                  <span class="font-mono font-medium" x-text="sageStatus.last_run ? fmtDateTime(sageStatus.last_run) : 'Nie'"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>Status im Backend:</span>
+                  <span class="font-semibold" :class="sageStatus.status === 'alarm' ? 'text-red-600 font-bold' : 'text-emerald-600'" x-text="sageStatus.status"></span>
+                </div>
+                <div x-show="sageStatus.error_message" class="bg-red-50 text-red-700 p-2 rounded border border-red-100 font-mono text-[10px]" x-text="sageStatus.error_message"></div>
+              </div>
+
+              <div class="pt-2 flex items-center gap-2">
+                <button x-show="!sageStatus.outage_simulated" @click="simulateSageOutage(true)" class="text-xs px-3 py-1.5 rounded font-semibold text-white bg-red-500 hover:bg-red-600 transition shadow-sm">
+                  ⚠️ Ausfall simulieren
+                </button>
+                <button x-show="sageStatus.outage_simulated" @click="simulateSageOutage(false)" class="text-xs px-3 py-1.5 rounded font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition shadow-sm">
+                  ✅ Simulation beenden
+                </button>
+                <span class="text-[10px] text-slate-400 font-italic" x-show="sageStatus.outage_simulated">(Lauf blockiert, Status altert)</span>
+              </div>
+            </div>
+
+            <!-- Dangling Workspaces Metric -->
+            <div class="space-y-4 pt-6 md:pt-0 md:pl-6">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-xl">📊</span>
+                  <h3 class="font-bold text-slate-800 text-sm tracking-wide uppercase">Dangling Workspaces (SC6)</h3>
+                </div>
+                <span class="bg-slate-100 text-slate-700 text-xs px-2.5 py-0.5 rounded-full font-bold">
+                  Baseline: 4
+                </span>
+              </div>
+
+              <div class="grid grid-cols-2 gap-4">
+                <div class="bg-slate-50 border border-slate-100 rounded-lg p-3 text-center">
+                  <div class="text-[10px] font-semibold text-slate-500 uppercase">Aktuelle Anzahl</div>
+                  <div class="text-3xl font-black text-slate-800 mt-1" x-text="sageStatus.dangling_count"></div>
+                </div>
+                <div class="bg-slate-50 border border-slate-100 rounded-lg p-3 text-center flex flex-col justify-center">
+                  <div class="text-[10px] font-semibold text-slate-500 uppercase">Trend gegen ~0</div>
+                  <div class="flex items-center justify-center gap-2 mt-1">
+                    <span class="text-xs font-mono font-bold text-slate-400">4</span>
+                    <span class="text-slate-400">➔</span>
+                    <span class="text-lg font-bold" :class="sageStatus.dangling_count === 0 ? 'text-emerald-600' : (sageStatus.dangling_count < 4 ? 'text-amber-600' : 'text-red-500')" x-text="sageStatus.dangling_count"></span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Collapsible Dangling Workspaces List -->
+              <div x-data="{ open: false }">
+                <button @click="open = !open" :disabled="!sageStatus.dangling_count" class="w-full text-left text-xs font-medium text-slate-500 hover:text-slate-700 flex items-center justify-between py-1 border-b border-slate-100 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <span x-text="open ? '▲ Liste ausblenden' : '▼ Liste anzeigen (' + sageStatus.dangling_count + ')'"></span>
+                  <span class="font-mono text-[10px]" x-show="sageStatus.dangling_count">(archived=0, terminal, kein PR, >12h)</span>
+                </button>
+                
+                <div x-show="open && sageStatus.dangling_count" class="mt-2 space-y-2 max-h-48 overflow-y-auto pr-1">
+                  <template x-for="ws in sageStatus.dangling_workspaces" :key="ws.id">
+                    <div class="p-2 bg-slate-50 border border-slate-100 rounded text-[11px] flex items-center justify-between">
+                      <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-1.5 font-semibold text-slate-700">
+                          <span class="font-mono bg-slate-200 px-1 py-0.2 rounded text-[10px]" x-text="ws.id.slice(0, 8)"></span>
+                          <span class="truncate" x-text="ws.name"></span>
+                        </div>
+                        <div class="text-[10px] text-slate-400 mt-0.5">
+                          Erstellt: <span x-text="fmtDateTime(ws.created_at)"></span>
+                        </div>
+                      </div>
+                      <div class="flex items-center gap-2 ml-4">
+                        <span class="px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider uppercase font-mono bg-amber-100 text-amber-800" x-text="ws.ep_status"></span>
+                        <span class="font-mono bg-slate-200 px-1 rounded font-bold text-slate-600" x-text="ws.exit_code !== null ? 'exit ' + ws.exit_code : '—'"></span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <template x-for="f in orderedFirmas" :key="f.id">
+          <section x-show="filter[f.id]" :data-firma="f.id" :class="'lane-stripe-' + f.id" class="bg-white rounded-lg shadow-sm">
             <header class="px-5 py-3 flex items-center justify-between border-b border-slate-200">
               <div class="flex items-center gap-3">
+                <span class="firma-grip cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500 select-none" title="ziehen zum Umsortieren">⠿</span>
                 <span class="text-xl" x-text="f.icon"></span>
                 <h2 class="font-semibold uppercase tracking-wide text-sm" x-text="f.label"></h2>
+                <button @click="pinTop(f.id)" class="text-slate-300 hover:text-sky-600 text-sm leading-none" title="nach oben holen">⤴</button>
                 <span class="text-xs text-slate-400" x-text="(counts[f.id]||0) + ' total'"></span>
+                <span class="text-xs font-medium text-emerald-600 ml-4" x-show="capacity[f.id]" x-text="capacity[f.id] ? ('🟢 ' + capacity[f.id].polecats + ' Polecats frei · ' + capacity[f.id].vkslots + ' vk-Slots') : ''"></span>
               </div>
               <div class="text-xs text-slate-500">
                 now: <span x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span>
                 <span x-show="nowCount(f.id) > f.wip" class="ml-2 text-red-600 font-semibold">WIP überschritten</span>
+                <span class="mx-2">|</span>
+                soon: <span x-text="soonCount(f.id)"></span> / <span x-text="f.wipSoon || 5"></span>
+                <span x-show="soonCount(f.id) > (f.wipSoon || 5)" class="ml-2 text-red-600 font-semibold">WIP soon überschritten</span>
               </div>
             </header>
             <div class="grid grid-cols-5 divide-x divide-slate-200">
               <template x-for="stage in stages" :key="stage">
                 <div class="p-3 min-h-[120px]"
-                  :class="stage === 'now' && nowCount(f.id) > f.wip ? 'col-now-overflow' : ''"
+                  :class="(stage === 'now' && nowCount(f.id) > f.wip) || (stage === 'soon' && soonCount(f.id) > (f.wipSoon || 5)) ? 'col-now-overflow' : ''"
                   :data-firma="f.id" :data-stage="stage"
-                  x-init="$nextTick(() => initSortable($el))">
-                  <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center justify-between">
+                  x-init="$nextTick(() => initSortable($el))">                  <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center justify-between">
                     <span x-text="stageLabel[stage]"></span>
                     <span class="text-slate-400 font-normal" x-text="cardsIn(f.id, stage).length"></span>
                   </div>
                   <template x-for="c in cardsIn(f.id, stage)" :key="c.id">
-                    <article :data-id="c.id"
-                      class="card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm">
-                      <div class="font-medium leading-snug" x-text="c.title"></div>
-                      <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
-                        <span class="text-[10px] text-slate-400" x-text="c.id"></span>
-                        <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
-                        <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
-                        <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
-                        <button x-show="c.plan_count > 0" @click.stop="toggleTree(c.id)"
-                          class="text-[11px] px-1 rounded border border-slate-300 hover:bg-white"
-                          :title="c.plan_count + ' plan-files — Baum auf/zu'">
-                          📄<span class="ml-0.5" x-text="c.plan_count"></span>
-                          <span x-text="expanded[c.id] ? '▾' : '▸'"></span>
-                        </button>
-                        <span class="activity-spark" :class="freshClass(c.last_activity)" :title="'last activity: ' + (c.last_activity || '—')"></span>
-                      </div>
-                      <!-- Plan-Hierarchie: Vision ▸ Phasen ▸ PRDs (P4.1/P4.2) -->
-                      <div x-show="expanded[c.id]" class="mt-2 pt-2 border-t border-slate-200 space-y-0.5" @click.stop>
-                        <template x-for="it in treeOf(c.id)" :key="it.id">
-                          <div class="flex items-center gap-1.5 text-xs" :style="'padding-left:' + (it.depth*14) + 'px'">
-                            <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
-                            <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" :title="'Review-Workbench öffnen'" x-text="it.title"></a>
-                            <span class="px-1 rounded text-[10px]" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
-                            <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500"
-                              :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                    <article :data-id="c.id" @click="if (!isProposal(c)) openDetail(c.id)"
+                      :class="isProposal(c) ? 'no-drag mb-2 bg-amber-50 border border-amber-200 rounded-md p-3 text-sm shadow-sm' : 'card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm'">
+
+                      <template x-if="isProposal(c)">
+                        <div>
+                          <div class="flex items-center justify-between mb-1">
+                            <span class="inline-block px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 uppercase tracking-wide">✨ Vorschlag</span>
+                            <span class="text-[10px] text-slate-400 font-mono" x-text="getProposalData(c).bead_id"></span>
                           </div>
-                        </template>
-                        <div x-show="!treeOf(c.id).length" class="text-[11px] text-slate-400">lade…</div>
-                      </div>
+                          <div class="font-medium leading-snug text-slate-900" x-text="c.title"></div>
+                          <div class="text-xs text-slate-600 italic leading-normal my-1.5" x-text="getProposalData(c).reasoning"></div>
+                          <div class="flex items-center gap-1.5 mt-2">
+                            <button @click.stop="acceptProposal(c)" class="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition-colors">Annehmen</button>
+                            <button @click.stop="rejectProposal(c)" class="px-2 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-sm transition-colors">Verwerfen</button>
+                          </div>
+                        </div>
+                      </template>
+
+                      <template x-if="!isProposal(c)">
+                        <div>
+                          <div class="font-medium leading-snug" x-text="c.title"></div>
+                          <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+                            <span class="text-[10px] text-slate-400" x-text="c.id"></span>
+                            <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
+                            <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
+                            <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
+                            <button x-show="c.plan_count > 0" @click.stop="toggleTree(c.id)"
+                              class="text-[11px] px-1 rounded border border-slate-300 hover:bg-white"
+                              :title="c.plan_count + ' plan-files — Baum auf/zu'">
+                              📄<span class="ml-0.5" x-text="c.plan_count"></span>
+                              <span x-text="expanded[c.id] ? '▾' : '▸'"></span>
+                            </button>
+                            <span class="activity-spark" :class="freshClass(c.last_activity)" :title="'last activity: ' + (c.last_activity || '—')"></span>
+                          </div>
+                          <!-- Plan-Hierarchie: Vision ▸ Phasen ▸ PRDs (P4.1/P4.2) -->
+                          <div x-show="expanded[c.id]" class="mt-2 pt-2 border-t border-slate-200 space-y-0.5" @click.stop>
+                            <template x-for="it in treeOf(c.id)" :key="it.id">
+                              <div class="flex items-center gap-1.5 text-xs" :style="'padding-left:' + (it.depth*14) + 'px'">
+                                <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
+                                <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" :title="'Review-Workbench öffnen'" x-text="it.title"></a>
+                                <span class="px-1 rounded text-[10px]" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
+                                <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500"
+                                  :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                              </div>
+                            </template>
+                            <div x-show="!treeOf(c.id).length" class="text-[11px] text-slate-400">lade…</div>
+                          </div>
+                        </div>
+                      </template>
+
                     </article>
                   </template>
+                  <!-- Karte anlegen (P5): + Neu → Inline-Input, Enter erstellt -->
+                  <input x-show="adding === f.id + '/' + stage" x-model="newTitle"
+                    :data-newcard="f.id + '/' + stage"
+                    @keydown.enter="createCard(f.id, stage)" @keydown.escape.stop="adding = null"
+                    @blur="if (!newTitle.trim()) adding = null"
+                    placeholder="Titel… (Enter)"
+                    class="w-full text-sm border border-slate-300 rounded-md px-2 py-1 mb-1 focus:outline-none focus:ring-2 focus:ring-sky-300">
+                  <button @click="startAdd(f.id, stage)"
+                    class="w-full text-left text-xs text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded px-1.5 py-1">＋ Neu</button>
                 </div>
               </template>
             </div>
@@ -190,12 +329,94 @@
               <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 shrink-0" x-text="b.rig"></span>
               <span class="flex-1 truncate" x-text="b.title"></span>
               <span class="text-[10px] text-slate-400 shrink-0" x-text="ageOf(b.created_at)"></span>
-              <button @click="triage(b, 'hacker')" class="shrink-0 text-xs px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-900">→ Hacker</button>
-              <button @click="triage(b, 'plan')" class="shrink-0 text-xs px-2 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900">→ Plan</button>
+              <button @click="openDispatch(b)" class="shrink-0 text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>
             </li>
           </template>
         </ul>
         <div x-show="!backlogFiltered.length" class="px-5 py-8 text-center text-sm text-slate-400">Backlog leer 🎉</div>
+      </section>
+    </template>
+
+    <!-- ════ UNLINKED-VIEW (Capture-Completeness, L1) ════ -->
+    <template x-if="view==='unlinked'">
+      <section class="bg-white rounded-lg shadow-sm">
+        <header class="px-5 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-3">
+          <div class="flex items-center gap-3">
+            <h2 class="font-semibold uppercase tracking-wide text-sm">⚠ Unlinked — braucht Zuhause</h2>
+            <span class="text-xs text-slate-400">Arbeit-ohne-Zuhause: orphane Beads und unverlinkte vk-Workspaces</span>
+          </div>
+          <!-- Detector status widget (Liveness & Nenner-Ehrlichkeit, SC1a/SC1b/PRD-Must-Fix) -->
+          <div class="text-xs flex items-center gap-2 flex-wrap">
+            <span class="text-slate-500 font-medium">Leak-Detektor:</span>
+            <span class="px-2 py-0.5 rounded-full font-bold uppercase tracking-wider text-[10px]"
+              :class="detectorStatusClass(detectorStatus.status)"
+              x-text="detectorStatus.status || 'unknown'"></span>
+            <span class="text-slate-400">|</span>
+            <span class="text-slate-500">Letzter Lauf:</span>
+            <span class="font-medium text-slate-700" x-text="detectorStatus.last_run ? fmtDateTime(detectorStatus.last_run) : '—'"></span>
+            <span x-show="detectorStatus.unreachable_rigs && detectorStatus.unreachable_rigs.length" class="text-amber-600 font-medium ml-2"
+              :title="'Unerreichbare Rigs: ' + detectorStatus.unreachable_rigs.join(', ')">
+              ⚠️ <span x-text="detectorStatus.unreachable_rigs.length"></span> Rigs offline
+            </span>
+          </div>
+        </header>
+
+        <!-- Main grouping by Company (Stay Awesome, Solartown, etc.) -->
+        <div class="p-5 space-y-6">
+          <template x-for="f in orderedFirmas" :key="f.id">
+            <div x-show="unlinkedItemsByFirma(f.id).length > 0" class="border border-slate-100 rounded-lg p-4 bg-slate-50/50">
+              <h3 class="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
+                <span x-text="f.icon"></span>
+                <span x-text="f.label"></span>
+                <span class="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full font-bold" x-text="unlinkedItemsByFirma(f.id).length"></span>
+              </h3>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                <template x-for="item in unlinkedItemsByFirma(f.id)" :key="item.id">
+                  <div class="bg-white border border-slate-200 rounded-md p-3 text-sm shadow-sm flex flex-col justify-between">
+                    <div>
+                      <div class="flex items-center justify-between gap-2 mb-1">
+                        <span class="font-mono text-xs font-semibold px-2 py-0.5 rounded"
+                          :class="item.kind === 'bead' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'"
+                          x-text="item.kind === 'bead' ? '🐝 bead' : '🔧 vk-workspace'"></span>
+                        <span class="text-[11px] text-slate-400" x-text="fmtRel(item.discovered_at)"></span>
+                      </div>
+                      <h4 class="font-medium text-slate-800 truncate" :title="item.title" x-text="item.title"></h4>
+                      <div class="text-[11px] text-slate-500 mt-1 font-mono break-all" x-text="'ID: ' + item.id"></div>
+                      <div x-show="item.join_key" class="text-[11px] text-slate-500 mt-1">
+                        Join-Key: <code class="bg-slate-100 px-1 py-0.2 rounded text-rose-600 font-mono" x-text="item.join_key"></code>
+                      </div>
+                      <div class="text-[11px] text-slate-500 mt-0.5">
+                        Fehler: 
+                        <span class="font-medium text-rose-600"
+                          x-text="{no_join_key: 'Kein Join-Key (Kein spec_id oder plan:<slug> Label)', no_match: 'Join-Key passt auf keine Initiative', no_link: 'Kein initiative_link verknüpft'}[item.reason] || item.reason"></span>
+                      </div>
+                    </div>
+                    
+                    <!-- Quick action triage helper for beads (PRD steady-state-triage) -->
+                    <div class="mt-3 pt-2 border-t border-slate-100 flex justify-between items-center gap-2">
+                      <button @click="openLinkModal(item)" class="text-xs px-2.5 py-1 rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold border border-emerald-200 flex items-center gap-1">🔗 Zuweisen…</button>
+                      <div class="flex gap-1">
+                        <template x-if="item.kind === 'bead'">
+                          <button @click="openDispatch(item)" class="text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>
+                        </template>
+                        <template x-if="item.kind === 'vk_workspace'">
+                          <a :href="'http://' + location.hostname + ':54682/workspaces/' + item.id" target="_blank" rel="noopener" class="text-xs px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-semibold border border-indigo-200 flex items-center gap-1">Öffnen ↗</a>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <div x-show="unlinkedItems.length === 0" class="py-12 text-center text-slate-400">
+            <span class="text-3xl">🎉</span>
+            <div class="mt-2 font-semibold">Keine unlinked Items!</div>
+            <div class="text-xs mt-1">Alles hat ein ordentliches Zuhause. Jede Arbeit ist rückverfolgbar.</div>
+          </div>
+        </div>
       </section>
     </template>
 
@@ -204,6 +425,353 @@
       SoT: git + solartown_clean — dieses Board ist reine Projektion
     </footer>
   </main>
+
+  <!-- ════ KARTEN-DETAIL: Side-Peek im Notion-Stil (P5) ════ -->
+  <div x-show="detailOpen" x-cloak x-transition.opacity.duration.150ms
+    class="fixed inset-0 bg-slate-900/20 z-30" @click="closeDetail()"></div>
+
+  <aside x-show="detailOpen" x-cloak
+    x-transition:enter="transition ease-out duration-200"
+    x-transition:enter-start="translate-x-full" x-transition:enter-end="translate-x-0"
+    x-transition:leave="transition ease-in duration-150"
+    x-transition:leave-start="translate-x-0" x-transition:leave-end="translate-x-full"
+    :class="detailExpanded ? 'w-[min(1100px,94vw)]' : 'w-[clamp(400px,40vw,560px)]'"
+    class="fixed right-0 top-0 h-full bg-white shadow-2xl z-40 flex flex-col transition-[width] duration-200">
+
+    <!-- Kopfleiste: aus-/einklappen · Link kopieren · schließen -->
+    <div class="flex items-center gap-1 px-3 py-2 border-b border-slate-200 shrink-0">
+      <button @click="detailExpanded = !detailExpanded"
+        class="p-1.5 rounded hover:bg-slate-100 text-slate-500 font-mono text-sm w-8"
+        :title="detailExpanded ? 'einklappen' : 'ausklappen'" x-text="detailExpanded ? '»' : '«'"></button>
+      <button @click="copyDetailLink()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500 text-sm"
+        :title="copied ? 'kopiert' : 'Link kopieren'" x-text="copied ? '✓' : '🔗'"></button>
+      <span class="text-xs text-slate-400 ml-2 font-mono truncate" x-text="detail ? detail.initiative.id : ''"></span>
+      <button @click="toggleDispatchDrawer()" class="ml-auto px-2 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 text-xs font-semibold border border-sky-200 flex items-center gap-1" title="Dispatch auslösen">⚡ Dispatch</button>
+      <button @click="archiveDetail()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500 text-sm" title="archivieren">🗄</button>
+      <button @click="closeDetail()" class="p-1.5 rounded hover:bg-slate-100 text-slate-500" title="schließen (Esc)">✕</button>
+    </div>
+
+    <!-- Inline-Panel for Dispatch (SC4) -->
+    <div x-show="dispatchDrawerOpen" x-cloak class="bg-sky-50 border-b border-slate-200 px-6 py-4 space-y-3 shrink-0">
+      <div class="flex items-center justify-between">
+        <h4 class="font-semibold text-slate-800 text-sm flex items-center gap-1">⚡ Dispatch Initiative</h4>
+        <button @click="dispatchDrawerOpen = false" class="text-slate-400 hover:text-slate-600">✕</button>
+      </div>
+      <div class="grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <label class="block text-slate-500 mb-1 font-semibold uppercase tracking-wider">Vorgeschlagene Lane</label>
+          <div class="bg-white border border-slate-200 rounded px-2.5 py-1.5 font-semibold text-sky-800" x-text="getProposedLaneForDetail() === 'hack' ? 'Hacker-Lane (hack)' : 'Plan-Pipeline (plan)'"></div>
+        </div>
+        <div>
+          <label class="block text-slate-500 mb-1 font-semibold uppercase tracking-wider">Ausgewählte Lane</label>
+          <select x-model="dispatchDrawerLane" class="w-full border border-slate-200 rounded px-2 py-1.5 bg-white text-slate-800 font-semibold focus:ring-2 focus:ring-sky-300">
+            <option value="hack">Hacker-Lane (hack)</option>
+            <option value="plan">Plan-Pipeline (plan)</option>
+            <option value="plan-deep">Plan-Pipeline Deep (plan-deep)</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500 mb-1 font-semibold uppercase tracking-wider">Freitext-Notiz</label>
+        <textarea x-model="dispatchDrawerNote" placeholder="Optionale Notiz eingeben..." class="w-full border border-slate-200 rounded px-2 py-1 text-xs text-slate-800 h-16 resize-none focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"></textarea>
+      </div>
+      <div class="flex justify-end gap-2">
+        <button @click="dispatchDrawerOpen = false" class="text-xs px-2.5 py-1.5 rounded border border-slate-300 hover:bg-slate-100 bg-white">Abbrechen</button>
+        <button @click="submitDispatchDrawer()" class="text-xs px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-semibold">Auslösen</button>
+      </div>
+    </div>
+
+    <div class="overflow-y-auto flex-1 px-6 py-5">
+      <div x-show="!detail" class="text-sm text-slate-400">lade…</div>
+      <template x-if="detail">
+        <div class="space-y-6" :class="detailExpanded ? 'max-w-3xl mx-auto' : ''">
+
+          <!-- Titel (klick = editieren) + Stage-Dropdown -->
+          <div>
+            <div class="flex items-start gap-2">
+              <span class="text-2xl leading-tight" x-text="(firmas.find(f => f.id === detail.initiative.firma) || {icon:'▣'}).icon"></span>
+              <h2 x-show="!editingTitle" @click="startTitleEdit()"
+                class="text-2xl font-semibold leading-tight cursor-text hover:bg-slate-50 rounded px-1 -mx-1"
+                title="klicken zum Bearbeiten" x-text="detail.initiative.title"></h2>
+              <input x-show="editingTitle" x-model="titleDraft" data-title-edit
+                @keydown.enter="saveTitle()" @keydown.escape.stop="editingTitle = false" @blur="saveTitle()"
+                class="text-2xl font-semibold leading-tight w-full border-b-2 border-sky-300 focus:outline-none px-1 -mx-1">
+            </div>
+            <div class="mt-2 flex items-center gap-2 text-xs">
+              <select @change="moveFromDetail($event.target.value)"
+                class="px-2 py-0.5 rounded-full font-medium border-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-300"
+                :class="stageChipCls(detail.initiative.stage)" title="Stage ändern">
+                <option value="idea" :selected="detail.initiative.stage === 'idea'">Idea</option>
+                <option value="now" :selected="detail.initiative.stage === 'now'">Now</option>
+                <option value="soon" :selected="detail.initiative.stage === 'soon'">Soon</option>
+                <option value="watching" :selected="detail.initiative.stage === 'watching'">Watching</option>
+                <option value="done" :selected="detail.initiative.stage === 'done'">Done</option>
+              </select>
+              <span class="text-slate-400" x-text="(firmas.find(f => f.id === detail.initiative.firma) || {label: detail.initiative.firma}).label"></span>
+            </div>
+          </div>
+
+          <!-- 🚀-Zeile: aktueller Deploy-Status (SC5) — nur sichtbar, wenn ein 'deployed'-Event vorliegt -->
+          <section x-show="latestDeploy()" x-cloak
+            class="flex items-center gap-2 flex-wrap text-sm bg-slate-50 border border-slate-200 rounded-md px-3 py-2"
+            :title="latestDeploy() ? 'Deploy-Event ' + fmtDateTime(latestDeploy().at) : ''">
+            <span class="text-base leading-none">🚀</span>
+            <span class="text-slate-600">deployed</span>
+            <code class="text-xs bg-white px-1.5 py-0.5 rounded border border-slate-200 font-mono"
+              x-text="deployShort((latestDeploy()?.payload || {}).sha)"></code>
+            <span class="text-slate-400">→</span>
+            <span class="font-medium" x-text="(latestDeploy()?.payload || {}).env || '—'"></span>
+            <span class="text-slate-300">·</span>
+            <span class="px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide"
+              :class="deployStatusCls((latestDeploy()?.payload || {}).status)"
+              x-text="(latestDeploy()?.payload || {}).status || '—'"></span>
+            <span class="text-slate-300">·</span>
+            <span class="text-xs text-slate-500" x-text="fmtRel(latestDeploy()?.at)"></span>
+          </section>
+
+          <!-- Beschreibung (Notion-Seiteninhalt; speichert bei Blur / ⌘+Enter) -->
+          <section>
+            <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">Beschreibung</h3>
+            <textarea x-model="descDraft" rows="5"
+              placeholder="Beschreibung hinzufügen…"
+              @blur="saveDesc()" @keydown.meta.enter="saveDesc()" @keydown.ctrl.enter="saveDesc()" @keydown.escape.stop
+              class="w-full text-sm leading-relaxed border border-transparent hover:border-slate-200 focus:border-slate-300 rounded-md px-2 py-1.5 -mx-2 resize-y focus:outline-none"></textarea>
+            <div class="text-[10px] text-emerald-600 h-3" x-text="descSaved"></div>
+          </section>
+
+          <!-- Eigenschaften (Notion-Property-Block) -->
+          <dl class="grid grid-cols-[130px_1fr] gap-y-1.5 text-sm">
+            <dt class="text-slate-400">Backend</dt>
+            <dd x-text="detail.initiative.primary_backend || '—'"></dd>
+            <dt class="text-slate-400">Angelegt</dt>
+            <dd x-text="fmtDate(detail.initiative.created_at)"></dd>
+            <dt class="text-slate-400">Aktualisiert</dt>
+            <dd x-text="fmtDate(detail.initiative.updated_at)"></dd>
+            <dt class="text-slate-400">Letzte Aktivität</dt>
+            <dd x-text="fmtRel(detail.initiative.last_activity)"></dd>
+            <dt class="text-slate-400">Umfang</dt>
+            <dd class="flex gap-3">
+              <span x-show="detail.initiative.bead_count">🐝 <span x-text="detail.initiative.bead_count"></span></span>
+              <span x-show="detail.initiative.vk_count">🔧 <span x-text="detail.initiative.vk_count"></span></span>
+              <span x-show="detail.initiative.pr_count">📦 <span x-text="detail.initiative.pr_count"></span></span>
+              <span x-show="detail.initiative.plan_count">📄 <span x-text="detail.initiative.plan_count"></span></span>
+              <span x-show="!detail.initiative.bead_count && !detail.initiative.vk_count && !detail.initiative.pr_count && !detail.initiative.plan_count" class="text-slate-400">—</span>
+            </dd>
+          </dl>
+
+          <!-- Pläne (aus plan_item, verlinkt in die Review-Workbench) -->
+          <section x-show="detail.initiative.plan_count > 0">
+            <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">Pläne</h3>
+            <div class="space-y-1">
+              <template x-for="it in treeOf(detail.initiative.id)" :key="'d-' + it.id">
+                <div class="flex items-center gap-1.5 text-sm" :style="'padding-left:' + (it.depth*16) + 'px'">
+                  <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
+                  <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" title="Review-Workbench öffnen" x-text="it.title"></a>
+                  <span class="px-1 rounded text-[10px] shrink-0" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
+                  <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500 shrink-0"
+                    :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                </div>
+              </template>
+              <div x-show="!treeOf(detail.initiative.id).length" class="text-sm text-slate-400">lade…</div>
+            </div>
+          </section>
+
+          <!-- Verknüpfungen (Beads, VK-Workspaces, PRs) -->
+          <section x-show="detailLinks().length">
+            <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">Verknüpfungen</h3>
+            <div class="space-y-1">
+              <template x-for="(l, li) in detailLinks()" :key="'l-' + li">
+                <div class="flex items-center gap-2 text-sm">
+                  <span x-text="{bead:'🐝', vk_workspace:'🔧', github_pr:'📦'}[l.kind] || '🔗'"></span>
+                  <template x-if="l.kind === 'github_pr'">
+                    <a :href="prUrl(l.ref)" target="_blank" rel="noopener" class="hover:underline text-sky-700 truncate" x-text="l.ref + ' ↗'"></a>
+                  </template>
+                  <template x-if="l.kind === 'vk_workspace'">
+                    <a :href="'http://' + location.hostname + ':54682/workspaces/' + l.ref" target="_blank" rel="noopener" class="hover:underline text-indigo-700 font-mono text-xs truncate" x-text="'vk-workspace/' + l.ref.slice(0,8) + ' ↗'"></a>
+                  </template>
+                  <template x-if="l.kind !== 'github_pr' && l.kind !== 'vk_workspace'">
+                    <span class="font-mono text-xs text-slate-600 truncate" x-text="l.ref"></span>
+                  </template>
+                  <span class="text-[10px] text-slate-400 ml-auto shrink-0" x-text="fmtDate(l.added_at)"></span>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <!-- Kommentare + Historie (initiative_event, neueste zuerst) -->
+          <section>
+            <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">
+              Kommentare &amp; Historie <span class="font-normal text-slate-400" x-text="'(' + detail.events.length + (detail.events.length === 40 ? '+' : '') + ')'"></span>
+            </h3>
+            <div class="flex gap-2 mb-4">
+              <textarea x-model="commentText" rows="2"
+                placeholder="Kommentar hinzufügen… (⌘/Strg+Enter sendet)"
+                @keydown.meta.enter="postComment()" @keydown.ctrl.enter="postComment()"
+                class="flex-1 border border-slate-200 rounded-md px-2.5 py-1.5 text-sm resize-y focus:outline-none focus:ring-2 focus:ring-sky-300"></textarea>
+              <button @click="postComment()" :disabled="!commentText.trim() || commentBusy"
+                class="self-end px-3 py-1.5 rounded-md text-sm font-medium bg-slate-900 text-white disabled:opacity-40 hover:bg-slate-700"
+                x-text="commentBusy ? '…' : 'Senden'"></button>
+            </div>
+            <ol class="space-y-2.5">
+              <template x-for="(e, ei) in detail.events" :key="'e-' + ei">
+                <li class="flex gap-2 text-sm">
+                  <span class="shrink-0 w-5 text-center" x-text="eventIcon(e.kind)"></span>
+                  <div class="flex-1 min-w-0">
+                    <template x-if="e.kind === 'commented'">
+                      <div class="bg-amber-50 border border-amber-100 rounded-md px-2.5 py-1.5 leading-snug break-words whitespace-pre-wrap"
+                        x-text="(e.payload || {}).text"></div>
+                    </template>
+                    <template x-if="e.kind === 'dispatched'">
+                      <div class="leading-snug break-words">
+                        Dispatched in Lane: <span class="font-semibold text-sky-700" x-text="(e.payload || {}).lane || ''"></span>
+                        <template x-if="(e.payload || {}).note">
+                          <span class="text-slate-500 italic" x-text="' — ' + (e.payload || {}).note"></span>
+                        </template>
+                        <div class="mt-1 text-xs">
+                          <!-- If lane is hack/hacker, show deep-link to vk-workspace -->
+                          <template x-if="((e.payload || {}).lane === 'hack' || (e.payload || {}).lane === 'hacker')">
+                            <div>
+                              <!-- Link to vk-Workspace -->
+                              <template x-if="getVkLink(e)">
+                                <a :href="'http://' + location.hostname + ':54682/workspaces/' + getVkLink(e)" target="_blank" class="inline-flex items-center gap-1 hover:underline text-indigo-600 font-mono">
+                                  <span>🔧 vk-Workspace öffnen</span> <span class="text-[10px]" x-text="'(' + getVkLink(e).slice(0, 8) + '…)'"></span> ↗
+                                </a>
+                              </template>
+                              <template x-if="!getVkLink(e)">
+                                <span class="text-slate-400 italic">vk-Workspace wird erstellt…</span>
+                              </template>
+                            </div>
+                          </template>
+                          <!-- If lane is plan/plan-deep, show link to plan file -->
+                          <template x-if="((e.payload || {}).lane === 'plan' || (e.payload || {}).lane === 'plan-deep') && (e.payload || {}).ref">
+                            <a :href="'/review?id=' + getPlanId(e)" class="inline-flex items-center gap-1 hover:underline text-sky-600 font-mono">
+                              <span>📋 Plan öffnen</span> <span class="text-[10px]" x-text="'(' + ((e.payload || {}).ref || '').split('/').pop() + ')'"></span> ↗
+                            </a>
+                          </template>
+                        </div>
+                      </div>
+                    </template>
+                    <template x-if="e.kind !== 'commented' && e.kind !== 'dispatched'">
+                      <div class="leading-snug break-words" x-text="eventText(e)"></div>
+                    </template>
+                    <div class="text-[11px] text-slate-400">
+                      <span x-text="e.source_backend"></span><span x-show="e.actor"> · <span x-text="e.actor"></span></span> · <span x-text="fmtDateTime(e.at)"></span>
+                    </div>
+                  </div>
+                </li>
+              </template>
+            </ol>
+            <div x-show="!detail.events.length" class="text-sm text-slate-400">Noch keine Events.</div>
+          </section>
+
+        </div>
+      </template>
+    </div>
+  </aside>
+
+  <!-- ════ DISPATCH/TRIAGE MODAL (SC4) ════ -->
+  <div x-show="dispatchOpen" x-cloak class="fixed inset-0 bg-slate-900/40 z-50 flex items-center justify-center p-4" @click.self="closeDispatch()">
+    <div class="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden flex flex-col"
+         x-show="dispatchOpen"
+         x-transition:enter="transition ease-out duration-150"
+         x-transition:enter-start="opacity-0 scale-95"
+         x-transition:enter-end="opacity-100 scale-100"
+         x-transition:leave="transition ease-in duration-100"
+         x-transition:leave-start="opacity-100 scale-100"
+         x-transition:leave-end="opacity-0 scale-95"
+         @click.stop>
+      <header class="px-5 py-3 border-b border-slate-200 flex justify-between items-center">
+        <h3 class="font-semibold text-slate-800">Bead Triage / Dispatch</h3>
+        <button @click="closeDispatch()" class="text-slate-400 hover:text-slate-600">✕</button>
+      </header>
+      <main class="px-5 py-4 space-y-4 text-sm text-slate-600">
+        <div>
+          <span class="text-xs font-mono text-slate-400" x-text="dispatchBead ? dispatchBead.id : ''"></span>
+          <h4 class="font-medium text-slate-900 text-base" x-text="dispatchBead ? dispatchBead.title : ''"></h4>
+        </div>
+        
+        <div class="bg-slate-50 rounded p-3 text-xs space-y-1">
+          <div><span class="font-medium">Rig:</span> <span x-text="dispatchBead ? dispatchBead.rig : '—'"></span></div>
+          <div><span class="font-medium">Firma:</span> <span x-text="dispatchBead ? (firmas.find(f => f.id === dispatchBead.firma) || {label: dispatchBead.firma}).label : '—'"></span></div>
+          <div><span class="font-medium">Pläne:</span> <span x-text="dispatchBead ? dispatchBead.plan_count : 0"></span></div>
+          <div><span class="font-medium">lane:plan Signal:</span> <span x-text="dispatchBead ? (dispatchBead.has_lane_plan_signal ? 'Ja' : 'Nein') : '—'"></span></div>
+        </div>
+
+        <div class="space-y-1.5">
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Lane Vorschlag</label>
+          <div class="flex items-center gap-2">
+            <span class="text-xs bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded font-semibold" 
+                  x-text="getProposedLane(dispatchBead) === 'hack' ? 'Hacker-Lane (hack)' : 'Plan-Pipeline (' + getProposedLane(dispatchBead) + ')'"></span>
+          </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Ausgewählte Lane</label>
+          <select x-model="dispatchLane" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white">
+            <option value="hack">hack</option>
+            <option value="plan">plan</option>
+            <option value="plan+deep-tech">plan+deep-tech</option>
+            <option value="plan+deep-business">plan+deep-business</option>
+          </select>
+        </div>
+      </main>
+      <footer class="px-5 py-3 border-t border-slate-200 bg-slate-50 flex justify-end gap-2">
+        <button @click="closeDispatch()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-100 bg-white">Abbrechen</button>
+        <button @click="submitDispatch()" class="text-xs px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-semibold">Triage bestätigen</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ════ LINKING MODAL (Phase 3a) ════ -->
+  <div x-show="linkOpen" x-cloak class="fixed inset-0 bg-slate-900/40 z-50 flex items-center justify-center p-4" @click.self="closeLinkModal()">
+    <div class="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden flex flex-col"
+         x-show="linkOpen"
+         x-transition:enter="transition ease-out duration-150"
+         x-transition:enter-start="opacity-0 scale-95"
+         x-transition:enter-end="opacity-100 scale-100"
+         x-transition:leave="transition ease-in duration-100"
+         x-transition:leave-start="opacity-100 scale-100"
+         x-transition:leave-end="opacity-0 scale-95"
+         @click.stop>
+      <header class="px-5 py-3 border-b border-slate-200 flex justify-between items-center">
+        <h3 class="font-semibold text-slate-800">Element verknüpfen (Zuweisen)</h3>
+        <button @click="closeLinkModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+      </header>
+      <main class="px-5 py-4 space-y-4 text-sm text-slate-600">
+        <div>
+          <span class="text-xs font-mono text-slate-400" x-text="linkItem ? (linkItem.kind === 'bead' ? '🐝 bead' : '🔧 vk-workspace') + ' · ' + linkItem.id : ''"></span>
+          <h4 class="font-medium text-slate-900 text-base" x-text="linkItem ? linkItem.title : ''"></h4>
+        </div>
+        
+        <div class="space-y-1.5">
+          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Initiative auswählen (<span x-text="linkItem ? (firmas.find(f => f.id === linkItem.firma) || {label: linkItem.firma}).label : ''"></span>)</label>
+          <select x-model="linkInitiativeId" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300 bg-white">
+            <option value="">-- Initiative auswählen --</option>
+            <template x-for="c in linkCandidates" :key="c.id">
+              <option :value="c.id" x-text="c.title + ' (' + c.id + ')'"></option>
+            </template>
+          </select>
+        </div>
+      </main>
+      <footer class="px-5 py-3 border-t border-slate-200 bg-slate-50 flex justify-end gap-2">
+        <button @click="closeLinkModal()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-100 bg-white">Abbrechen</button>
+        <button @click="submitLink()" :disabled="!linkInitiativeId" class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold">Verknüpfen</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Toasts Container -->
+  <div class="fixed bottom-5 right-5 z-50 space-y-2">
+    <template x-for="t in toasts" :key="t.id">
+      <div x-transition.duration.300ms
+        :class="t.type === 'error' ? 'bg-red-600 border-red-700 text-white' : 'bg-slate-900 border-slate-950 text-white'"
+        class="flex items-center gap-2.5 px-4 py-3 rounded-lg shadow-lg border text-sm max-w-sm font-medium">
+        <span x-text="t.type === 'error' ? '⚠️' : '✅'"></span>
+        <span x-text="t.message"></span>
+        <button @click="toasts = toasts.filter(x => x.id !== t.id)" class="ml-auto text-white/70 hover:text-white">✕</button>
+      </div>
+    </template>
+  </div>
 </div>
 
 <script>
@@ -216,14 +784,15 @@ function liveKanban() {
       { id: 'board',    label: 'Board' },
       { id: 'pipeline', label: 'Pipeline' },
       { id: 'backlog',  label: 'Backlog' },
+      { id: 'unlinked', label: '⚠ Unlinked — braucht Zuhause' },
     ],
     firmas: [
-      { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 4 },
-      { id: 'solartown',   label: 'Solartown',    icon: '⚡', wip: 6 },
-      { id: 'quantbot',    label: 'QuantBot',     icon: '💰', wip: 4 },
-      { id: 'mariobrain',  label: 'mario-brain',  icon: '🧠', wip: 4 },
-      { id: 'stack',       label: 'Stack (Plattform)', icon: '🧱', wip: 4 },
-      { id: 'angeloos',    label: 'AngeloOS',     icon: '⚙',  wip: 4 },
+      { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 3, wipSoon: 5 },
+      { id: 'solartown',   label: 'Solartown',    icon: '⚡', wip: 3, wipSoon: 5 },
+      { id: 'quantbot',    label: 'QuantBot',     icon: '💰', wip: 3, wipSoon: 5 },
+      { id: 'mariobrain',  label: 'mario-brain',  icon: '🧠', wip: 3, wipSoon: 5 },
+      { id: 'stack',       label: 'Stack (Plattform)', icon: '🧱', wip: 3, wipSoon: 5 },
+      { id: 'angeloos',    label: 'AngeloOS',     icon: '⚙',  wip: 3, wipSoon: 5 },
     ],
     prefixFirma: { sa: 'stayawesome', st: 'solartown', qb: 'quantbot', mb: 'mariobrain', ag: 'stack', sk: 'stack' },
     ghRepos: {
@@ -249,24 +818,357 @@ function liveKanban() {
     expanded: {},
     backlog: [],
     backlogRig: '',
+    unlinkedItems: [],
+    detectorStatus: { status: 'unknown', unreachable_rigs: [] },
+    sageStatus: { status: 'unknown', last_run: null, dangling_count: 0, dangling_baseline: 4, outage_simulated: false, dangling_workspaces: [] },
     lastFetched: '',
 
+    dispatchOpen: false,
+    dispatchBead: null,
+    dispatchLane: 'hack',
+
+    linkOpen: false,
+    linkItem: null,
+    linkInitiativeId: '',
+
+    dispatchDrawerOpen: false,
+    dispatchDrawerLane: 'hack',
+    dispatchDrawerNote: '',
+
+    detail: null,
+    detailOpen: false,
+    detailExpanded: false,
+    copied: false,
+    dragging: false,
+    commentText: '',
+    commentBusy: false,
+    editingTitle: false,
+    titleDraft: '',
+    descDraft: '',
+    descSaved: '',
+    adding: null,
+    newTitle: '',
+
     rollup: {},
+    capacity: {},
+    toasts: [],
+    showToast(message, type = 'success') {
+      const id = Date.now() + Math.random();
+      this.toasts.push({ id, message, type });
+      setTimeout(() => {
+        this.toasts = this.toasts.filter(t => t.id !== id);
+      }, 4000);
+    },
     async init() {
       await this.refresh();
+      await this.loadWipLimits();
       this.loadRollup();
-      setInterval(() => this.refresh(true), 30000);
+      this.loadCapacity();
+      this.loadUnlinked();
+      setInterval(() => { this.refresh(true); this.loadCapacity(); }, 30000);
       // Deep-Link: #<initiative-id> öffnet Karte + Baum
       const h = location.hash.slice(1);
       if (h) this.$nextTick(async () => {
-        await this.toggleTree(h);
         const el = document.querySelector('[data-id="' + h + '"]');
         if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-sky-400'); }
+        await this.openDetail(h);
       });
+    },
+
+    // ── Karten-Detail: Side-Peek (P5) ──
+    async openDetail(id) {
+      if (this.dragging) return; // Klick direkt nach Drag-Drop nicht als Öffnen werten
+      this.dispatchDrawerOpen = false;
+      this.dispatchDrawerLane = 'hack';
+      this.dispatchDrawerNote = '';
+      this.detailOpen = true;
+      this.copied = false;
+      if (!this.detail || this.detail.initiative.id !== id) { this.detail = null; this.commentText = ''; }
+      history.replaceState(null, '', location.pathname + '#' + id);
+      try {
+        const r = await fetch(this.apiBase + '/api/initiative?id=' + encodeURIComponent(id));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail = await r.json();
+        this.descDraft = this.detail.initiative.description || '';
+        this.editingTitle = false;
+        this.dispatchDrawerLane = this.getProposedLaneForDetail();
+        if (this.detail.initiative.plan_count > 0 && !this.plansCache[id]) {
+          const pr = await fetch(this.apiBase + '/api/plans?initiative=' + encodeURIComponent(id));
+          this.plansCache[id] = pr.ok ? await pr.json() : [];
+        }
+      } catch (e) {
+        this.detailOpen = false;
+        this.lastFetched = 'detail miss: ' + e.message;
+      }
+    },
+    closeDetail() {
+      if (!this.detailOpen) return;
+      this.detailOpen = false;
+      this.detailExpanded = false;
+      this.dispatchDrawerOpen = false;
+      history.replaceState(null, '', location.pathname);
+    },
+    copyDetailLink() {
+      if (!this.detail) return;
+      navigator.clipboard.writeText(location.origin + location.pathname + '#' + this.detail.initiative.id);
+      this.copied = true;
+      setTimeout(() => this.copied = false, 1500);
+    },
+    // ── Drawer-Edits: Titel, Beschreibung, Stage, Archiv (P5) ──
+    startTitleEdit() {
+      this.titleDraft = this.detail.initiative.title;
+      this.editingTitle = true;
+      this.$nextTick(() => { const el = document.querySelector('[data-title-edit]'); if (el) el.focus(); });
+    },
+    async saveTitle() {
+      if (!this.editingTitle) return;
+      this.editingTitle = false;
+      const t = this.titleDraft.trim();
+      if (!t || t === this.detail.initiative.title) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/update', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.detail.initiative.id, title: t }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail.initiative.title = t;
+        const c = this.cards.find(x => x.id === this.detail.initiative.id);
+        if (c) c.title = t;
+      } catch (e) { alert('titel miss: ' + e.message); }
+    },
+    async saveDesc() {
+      if (!this.detail) return;
+      const d = this.descDraft.trim();
+      if (d === (this.detail.initiative.description || '')) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/update', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.detail.initiative.id, description: d }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail.initiative.description = d;
+        this.descSaved = 'gespeichert ✓';
+        setTimeout(() => this.descSaved = '', 2000);
+      } catch (e) { alert('beschreibung miss: ' + e.message); }
+    },
+    async moveFromDetail(stage) {
+      const id = this.detail.initiative.id;
+      try {
+        const r = await fetch(this.apiBase + '/api/move', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, stage }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail.initiative.stage = stage;
+        const c = this.cards.find(x => x.id === id);
+        if (c) c.stage = stage;
+      } catch (e) { alert('move miss: ' + e.message); this.refresh(); }
+    },
+    async archiveDetail() {
+      if (!this.detail) return;
+      const id = this.detail.initiative.id;
+      if (!confirm('Karte „' + this.detail.initiative.title + '" archivieren?')) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/archive', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.cards = this.cards.filter(x => x.id !== id);
+        this.closeDetail();
+      } catch (e) { alert('archiv miss: ' + e.message); }
+    },
+    // ── Dispatch Initiative (SC4) ──
+    toggleDispatchDrawer() {
+      if (!this.detail) return;
+      this.dispatchDrawerOpen = !this.dispatchDrawerOpen;
+      if (this.dispatchDrawerOpen) {
+        this.dispatchDrawerLane = this.getProposedLaneForDetail();
+        this.dispatchDrawerNote = '';
+      }
+    },
+    getProposedLaneForDetail() {
+      if (!this.detail || !this.detail.initiative) return 'hack';
+      const init = this.detail.initiative;
+      const isQuantbot = init.firma === 'quantbot' || (init.firma && init.firma.toLowerCase().includes('quantbot'));
+      if (init.plan_count > 0 || isQuantbot) {
+        return 'plan';
+      }
+      return 'hack';
+    },
+    async submitDispatchDrawer() {
+      if (!this.detail || !this.detail.initiative) return;
+      const id = this.detail.initiative.id;
+      const lane = this.dispatchDrawerLane;
+      const note = this.dispatchDrawerNote;
+      try {
+        const r = await fetch(this.apiBase + '/api/dispatch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, lane, note }),
+        });
+        if (!r.ok) {
+          const text = await r.text();
+          throw new Error(text || ('HTTP ' + r.status));
+        }
+        await this.refresh();
+        await this.openDetail(id);
+        this.dispatchDrawerOpen = false;
+        this.showToast('Initiative erfolgreich ausgelöst!');
+      } catch (e) {
+        this.showToast('Dispatch fehlgeschlagen: ' + e.message, 'error');
+      }
+    },
+    // ── Karte anlegen (P5) ──
+    startAdd(firma, stage) {
+      this.adding = firma + '/' + stage;
+      this.newTitle = '';
+      this.$nextTick(() => { const el = document.querySelector('[data-newcard="' + firma + '/' + stage + '"]'); if (el) el.focus(); });
+    },
+    async createCard(firma, stage) {
+      const title = this.newTitle.trim();
+      if (!title) { this.adding = null; return; }
+      try {
+        const r = await fetch(this.apiBase + '/api/create', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ firma, title, stage }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.cards.push(await r.json());
+        this.adding = null;
+        this.newTitle = '';
+      } catch (e) { alert('anlegen miss: ' + e.message); }
+    },
+    async postComment() {
+      const text = this.commentText.trim();
+      if (!text || !this.detail || this.commentBusy) return;
+      this.commentBusy = true;
+      try {
+        const r = await fetch(this.apiBase + '/api/comment', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.detail.initiative.id, text }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.detail.events.unshift(await r.json());
+        this.commentText = '';
+      } catch (e) {
+        alert('kommentar miss: ' + e.message);
+      } finally {
+        this.commentBusy = false;
+      }
+    },
+    detailLinks() { return ((this.detail && this.detail.links) || []).filter(l => l.kind !== 'plan_file'); },
+    prUrl(ref) { const m = ref.match(/^(.+)#(\d+)$/); return m ? 'https://github.com/' + m[1] + '/pull/' + m[2] : '#'; },
+    stageChipCls(s) {
+      return {
+        idea: 'bg-slate-100 text-slate-600', now: 'bg-red-100 text-red-700',
+        soon: 'bg-sky-100 text-sky-700', watching: 'bg-amber-100 text-amber-800',
+        done: 'bg-emerald-100 text-emerald-800',
+      }[s] || 'bg-slate-100 text-slate-600';
+    },
+    eventIcon(k) {
+      return { created: '✨', moved: '➜', edited: '✏️', linked: '🔗', unlinked: '✂️',
+               activity: '⚡', stage_proposed: '💡', completed: '✅', commented: '💬',
+               dispatched: '🚀', deployed: '🚀' }[k] || '•';
+    },
+    // Deploy-Status (SC5): jüngstes 'deployed'-Event auf der Karte
+    latestDeploy() {
+      if (!this.detail || !this.detail.events) return null;
+      return this.detail.events.find(e => e.kind === 'deployed') || null;
+    },
+    deployShort(sha) {
+      if (!sha) return '—';
+      return String(sha).slice(0, 7);
+    },
+    deployStatusCls(s) {
+      if (s === 'healthy') return 'bg-emerald-100 text-emerald-800';
+      if (s === 'rolled-back' || s === 'failed') return 'bg-red-100 text-red-800';
+      return 'bg-slate-100 text-slate-600';
+    },
+    getVkLink(e) {
+      const p = e.payload || {};
+      if (p.ref && p.ref.length === 36) return p.ref;
+      const vkLink = this.detail && this.detail.links && this.detail.links.find(l => l.kind === 'vk_workspace');
+      return vkLink ? vkLink.ref : '';
+    },
+    getPlanId(e) {
+      const p = e.payload || {};
+      const ref = p.ref || '';
+      if (!ref) return '';
+      const parts = ref.split('/');
+      const filename = parts[parts.length - 1];
+      const slug = filename.replace('-prd.md', '');
+      const plan = this.allPlans.find(pl => pl.id === slug || pl.id.endsWith('-' + slug));
+      return plan ? plan.id : slug;
+    },
+    eventText(e) {
+      const p = e.payload || {};
+      const ref = p.title || p.ref || p.slug || '';
+      switch (e.kind) {
+        case 'created': return 'Angelegt' + (ref ? ': ' + ref : '');
+        case 'moved': return 'Verschoben ' + (e.from_stage || '?') + ' → ' + (e.to_stage || '?');
+        case 'linked': return 'Verknüpft: ' + (p.kind ? p.kind + ' ' : '') + (p.ref || ref);
+        case 'unlinked': return 'Verknüpfung entfernt: ' + (p.ref || ref);
+        case 'activity': return 'Aktivität' + (ref ? ': ' + ref : '');
+        case 'completed': return 'Abgeschlossen' + (ref ? ': ' + ref : '');
+        case 'stage_proposed': return 'Stage-Vorschlag: ' + (e.to_stage || p.stage || '?');
+        case 'edited': return 'Bearbeitet' + (ref ? ': ' + ref : '');
+        case 'deployed': {
+          const sha = this.deployShort(p.sha);
+          const env = p.env || '?';
+          const status = p.status || '?';
+          return 'Deployed ' + sha + ' → ' + env + ' · ' + status;
+        }
+        case 'dispatched': {
+          const lane = p.lane || '';
+          let text = 'Dispatched in Lane: ' + lane;
+          if (lane === 'hack' || lane === 'hacker') {
+            const vkRef = this.getVkLink(e);
+            if (vkRef) {
+              text += ' (vk-Workspace: ' + vkRef.slice(0, 8) + '…)';
+            }
+          } else if (p.ref) {
+            text += ' (' + p.ref.split('/').pop() + ')';
+          }
+          return text;
+        }
+        default: return e.kind + (ref ? ': ' + ref : '');
+      }
+    },
+    fmtDate(ts) { return ts ? new Date(ts).toLocaleDateString('de-DE', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '—'; },
+    fmtDateTime(ts) { return ts ? new Date(ts).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : '—'; },
+    fmtRel(ts) {
+      if (!ts) return '—';
+      const m = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
+      if (m < 60) return 'vor ' + m + ' min';
+      if (m < 1440) return 'vor ' + Math.floor(m / 60) + ' h';
+      return 'vor ' + Math.floor(m / 1440) + ' d';
     },
     async loadRollup() {
       const r = await fetch(this.apiBase + '/api/rollup');
       if (r.ok) { const arr = await r.json(); this.rollup = Object.fromEntries(arr.map(x => [x.slug, x])); }
+    },
+    async loadCapacity() {
+      try {
+        const r = await fetch(this.apiBase + '/api/capacity');
+        if (r.ok) this.capacity = await r.json();
+      } catch (e) { console.error('capacity fetch:', e); }
+    },
+    async loadWipLimits() {
+      try {
+        const r = await fetch(this.apiBase + '/api/wip-limits');
+        if (r.ok) {
+          const limits = await r.json();
+          this.firmas.forEach(f => {
+            if (limits[f.id]) {
+              f.wip = limits[f.id].now;
+              f.wipSoon = limits[f.id].soon;
+            }
+          });
+        }
+      } catch (e) {
+        console.warn('Could not load WIP limits:', e);
+      }
     },
 
     async refresh(silent) {
@@ -275,8 +1177,10 @@ function liveKanban() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.cards = await r.json();
         this.apiOk = true;
+        await this.loadSageStatus();
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
+        if (this.view === 'unlinked') await this.loadUnlinked();
         const t = new Date().toLocaleTimeString('de-DE');
         this.lastFetched = (silent ? 'auto-refresh' : 'geladen') + ' ' + t;
       } catch (e) {
@@ -289,6 +1193,58 @@ function liveKanban() {
       this.view = v;
       if (v === 'pipeline') await this.loadAllPlans();
       if (v === 'backlog') await this.loadBacklog();
+      if (v === 'unlinked') await this.loadUnlinked();
+    },
+
+    async loadUnlinked() {
+      try {
+        const r = await fetch(this.apiBase + '/api/unlinked');
+        if (r.ok) {
+          const res = await r.json();
+          this.unlinkedItems = res.items || [];
+          this.detectorStatus = res.detector_status || { status: 'unknown', unreachable_rigs: [] };
+        }
+      } catch (e) {
+        console.error('unlinked fetch error:', e);
+      }
+    },
+    unlinkedItemsByFirma(firmaId) {
+      return this.unlinkedItems.filter(item => item.firma === firmaId);
+    },
+    detectorStatusClass(status) {
+      return {
+        healthy: 'bg-emerald-100 text-emerald-800',
+        warning: 'bg-amber-100 text-amber-800 border border-amber-200',
+        danger: 'bg-red-100 text-red-800 border border-red-200',
+        unknown: 'bg-slate-100 text-slate-500',
+      }[status] || 'bg-slate-100 text-slate-500';
+    },
+    async loadSageStatus() {
+      try {
+        const r = await fetch(this.apiBase + '/api/sage/status');
+        if (r.ok) {
+          this.sageStatus = await r.json();
+        }
+      } catch (e) {
+        console.error('sage status fetch error:', e);
+      }
+    },
+    async simulateSageOutage(simulate) {
+      try {
+        const r = await fetch(this.apiBase + '/api/sage/simulate-outage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ simulate })
+        });
+        if (r.ok) {
+          this.showToast(simulate ? 'Outage simuliert!' : 'Outage Simulation beendet.', 'success');
+          await this.loadSageStatus();
+        } else {
+          this.showToast('Fehler beim Ändern der Simulation', 'error');
+        }
+      } catch (e) {
+        this.showToast('Fehler: ' + e.message, 'error');
+      }
     },
 
     // ── Plan-Baum (P4.1) ──
@@ -361,13 +1317,169 @@ function liveKanban() {
         });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.backlog = this.backlog.filter(x => x.id !== b.id);
-      } catch (e) { alert('triage miss: ' + e.message); }
+        this.showToast('Bead erfolgreich triaged: ' + b.title);
+      } catch (e) {
+        this.showToast('Triage miss: ' + e.message, 'error');
+      }
+    },
+    openDispatch(b) {
+      this.dispatchBead = b;
+      this.dispatchLane = this.getProposedLane(b);
+      this.dispatchOpen = true;
+    },
+    closeDispatch() {
+      this.dispatchOpen = false;
+      this.dispatchBead = null;
+    },
+    getProposedLane(b) {
+      if (!b) return 'hack';
+      const isQuantbot = b.firma === 'quantbot' || (b.firma && b.firma.toLowerCase().includes('quantbot'));
+      const isCrossRig = b.firma === 'cross-rig' || b.rig === 'cross-rig' || (b.firma && b.firma.toLowerCase().includes('cross-rig')) || (b.rig && b.rig.toLowerCase().includes('cross-rig'));
+      
+      if (b.plan_count === 0 && !b.has_lane_plan_signal) {
+        return 'hack';
+      } else if (b.plan_count > 0 || isQuantbot || isCrossRig) {
+        return (isQuantbot || isCrossRig) ? 'plan+deep-tech' : 'plan';
+      }
+      return 'plan';
+    },
+    async submitDispatch() {
+      if (!this.dispatchBead) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/triage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.dispatchBead.id, lane: this.dispatchLane }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.showToast('Bead erfolgreich triaged: ' + this.dispatchBead.title);
+        this.backlog = this.backlog.filter(x => x.id !== this.dispatchBead.id);
+        this.closeDispatch();
+      } catch (e) {
+        this.showToast('Triage miss: ' + e.message, 'error');
+      }
+    },
+
+    openLinkModal(item) {
+      this.linkItem = item;
+      const candidates = this.linkCandidates;
+      const catchAll = candidates.find(c => c.id.endsWith('-catch-all') || c.id.endsWith('-catchall'));
+      this.linkInitiativeId = catchAll ? catchAll.id : '';
+      this.linkOpen = true;
+    },
+    closeLinkModal() {
+      this.linkOpen = false;
+      this.linkItem = null;
+      this.linkInitiativeId = '';
+    },
+    get linkCandidates() {
+      if (!this.linkItem) return [];
+      const items = this.cards.filter(c => c.firma === this.linkItem.firma);
+      return items.sort((a, b) => {
+        const aCatch = a.id.endsWith('-catch-all') || a.id.endsWith('-catchall');
+        const bCatch = b.id.endsWith('-catch-all') || b.id.endsWith('-catchall');
+        if (aCatch && !bCatch) return -1;
+        if (!aCatch && bCatch) return 1;
+        return a.title.localeCompare(b.title);
+      });
+    },
+    async submitLink() {
+      if (!this.linkItem || !this.linkInitiativeId) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            initiative_id: this.linkInitiativeId,
+            kind: this.linkItem.kind,
+            ref: this.linkItem.id
+          }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.showToast('Erfolgreich zugewiesen!');
+        this.unlinkedItems = this.unlinkedItems.filter(x => x.id !== this.linkItem.id);
+        this.closeLinkModal();
+        await this.refresh(true);
+      } catch (e) {
+        this.showToast('Zuweisung misslungen: ' + e.message, 'error');
+      }
     },
 
     // ── Board (unverändert) ──
     toggleFirma(id) { this.filter[id] = !this.filter[id]; },
     cardsIn(firma, stage) { return this.cards.filter(c => c.firma === firma && c.stage === stage); },
     nowCount(firma) { return this.cardsIn(firma, 'now').length; },
+    soonCount(firma) { return this.cardsIn(firma, 'soon').length; },
+    firmaOrder: [],
+    get orderedFirmas() {
+      const idx = id => { const i = this.firmaOrder.indexOf(id); return i === -1 ? 100 : i; };
+      return [...this.firmas].sort((a, b) => idx(a.id) - idx(b.id));
+    },
+    loadFirmaOrder() {
+      try { const s = JSON.parse(localStorage.getItem('mk-firma-order') || '[]'); if (Array.isArray(s) && s.length) this.firmaOrder = s; } catch (e) {}
+    },
+    saveFirmaOrder() { try { localStorage.setItem('mk-firma-order', JSON.stringify(this.firmaOrder)); } catch (e) {} },
+    pinTop(id) {
+      const rest = this.orderedFirmas.map(f => f.id).filter(x => x !== id);
+      this.firmaOrder = [id, ...rest];
+      this.saveFirmaOrder();
+    },
+    initFirmaSort(el) {
+      const self = this;
+      Sortable.create(el, {
+        handle: '.firma-grip',
+        animation: 150,
+        ghostClass: 'opacity-40',
+        draggable: 'section[data-firma]',
+        onEnd() {
+          self.firmaOrder = [...el.querySelectorAll('section[data-firma]')].map(n => n.dataset.firma);
+          self.saveFirmaOrder();
+        },
+      });
+    },
+    isProposal(c) {
+      if (!c.status_dot) return false;
+      try {
+        const data = JSON.parse(c.status_dot);
+        return !!data.proposed;
+      } catch (e) {
+        return false;
+      }
+    },
+    getProposalData(c) {
+      if (!c.status_dot) return {};
+      try {
+        return JSON.parse(c.status_dot);
+      } catch (e) {
+        return {};
+      }
+    },
+    async acceptProposal(c) {
+      try {
+        const r = await fetch(this.apiBase + '/api/proposal/accept', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: c.id }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        await this.refresh();
+      } catch (e) {
+        alert('Accept proposal failed: ' + e.message);
+      }
+    },
+    async rejectProposal(c) {
+      try {
+        const r = await fetch(this.apiBase + '/api/proposal/reject', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: c.id }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        await this.refresh();
+      } catch (e) {
+        alert('Reject proposal failed: ' + e.message);
+      }
+    },
     get counts() { const o = {}; this.firmas.forEach(f => o[f.id] = this.cards.filter(c => c.firma === f.id).length); return o; },
     freshClass(la) {
       if (!la) return 'activity-stale';
@@ -380,7 +1492,11 @@ function liveKanban() {
         group: 'kanban-' + el.dataset.firma,
         animation: 150,
         ghostClass: 'opacity-30',
+        draggable: 'article[data-id]',
+        filter: '.no-drag',
+        onStart() { self.dragging = true; },
         async onEnd(evt) {
+          setTimeout(() => self.dragging = false, 0); // Click-Event nach Drop verpufft
           const id = evt.item.dataset.id;
           const newStage = evt.to.dataset.stage;
           try {
