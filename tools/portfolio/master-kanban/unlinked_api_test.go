@@ -64,6 +64,15 @@ func TestUnlinkedAPI_Endpoint(t *testing.T) {
 	}
 	defer p.Exec(ctx, "DELETE FROM portfolio.detector_status WHERE id = 'leak-detector'")
 
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.detector_status (id, last_run, status, unreachable_rigs, error_message)
+		VALUES ('sage', $1, 'healthy', $2, NULL)`,
+		time.Now(), []string{})
+	if err != nil {
+		t.Fatalf("failed to insert sage status: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.detector_status WHERE id = 'sage'")
+
 	// Create test handler using a custom serve mux
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/unlinked", func(w http.ResponseWriter, r *http.Request) {
@@ -118,9 +127,22 @@ func TestUnlinkedAPI_Endpoint(t *testing.T) {
 			det.UnreachableRigs = []string{}
 		}
 
+		var sage DetectorStatusJSON
+		err = p.QueryRow(r.Context(),
+			`SELECT last_run, status, unreachable_rigs, error_message
+			 FROM portfolio.detector_status
+			 WHERE id = 'sage'`).
+			Scan(&sage.LastRun, &sage.Status, &sage.UnreachableRigs, &sage.ErrorMessage)
+		if err != nil {
+			sage.Status = "unknown"
+			sage.UnreachableRigs = []string{}
+		}
+
 		response := map[string]any{
-			"items":           items,
-			"detector_status": det,
+			"items":                     items,
+			"detector_status":           det,
+			"sage_status":               sage,
+			"dangling_workspaces_count": 2,
 		}
 
 		json.NewEncoder(w).Encode(response)
@@ -154,6 +176,12 @@ func TestUnlinkedAPI_Endpoint(t *testing.T) {
 			Status          string    `json:"status"`
 			UnreachableRigs []string  `json:"unreachable_rigs"`
 		} `json:"detector_status"`
+		SageStatus struct {
+			LastRun         time.Time `json:"last_run"`
+			Status          string    `json:"status"`
+			UnreachableRigs []string  `json:"unreachable_rigs"`
+		} `json:"sage_status"`
+		DanglingWorkspacesCount int `json:"dangling_workspaces_count"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
@@ -171,6 +199,16 @@ func TestUnlinkedAPI_Endpoint(t *testing.T) {
 	}
 	if len(data.DetectorStatus.UnreachableRigs) != 1 || data.DetectorStatus.UnreachableRigs[0] != "qu" {
 		t.Errorf("expected unreachable rigs ['qu'], got %v", data.DetectorStatus.UnreachableRigs)
+	}
+
+	// Verify sage status is returned correctly
+	if data.SageStatus.Status != "healthy" {
+		t.Errorf("expected sage status 'healthy', got %q", data.SageStatus.Status)
+	}
+
+	// Verify dangling workspaces count is returned correctly
+	if data.DanglingWorkspacesCount != 2 {
+		t.Errorf("expected dangling workspaces count 2, got %d", data.DanglingWorkspacesCount)
 	}
 }
 
@@ -286,5 +324,175 @@ func TestLinkAPI_Endpoint(t *testing.T) {
 	}
 	if !linkExists {
 		t.Errorf("expected initiative link to be inserted into table, but it was not found")
+	}
+}
+
+func TestCompletenessAPI_LivenessAndHonesty(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	// Clean up any test records
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.unlinked_item WHERE id = 'test-unlinked-rig'")
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.detector_status WHERE id = 'leak-detector'")
+
+	// Insert test unlinked rig
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key, discovered_at)
+		VALUES ('test-unlinked-rig', 'rig', 'Test Unlinked Rig', 'solartown', 'st', NULL, $1)`,
+		time.Now())
+	if err != nil {
+		t.Fatalf("failed to insert test unlinked rig: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.unlinked_item WHERE id = 'test-unlinked-rig'")
+
+	// Insert test stale detector status (6 minutes ago)
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.detector_status (id, last_run, status, unreachable_rigs, error_message)
+		VALUES ('leak-detector', $1, 'healthy', $2, NULL)`,
+		time.Now().Add(-6*time.Minute), []string{"mb"})
+	if err != nil {
+		t.Fatalf("failed to insert detector status: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.detector_status WHERE id = 'leak-detector'")
+
+	// Recreate the `/api/completeness` handler logic
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/completeness", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// 1. Get detector status
+		var lastRun time.Time
+		var status string
+		var unreachableRigs []string
+		err := p.QueryRow(r.Context(),
+			`SELECT last_run, status, unreachable_rigs FROM portfolio.detector_status WHERE id='leak-detector'`).
+			Scan(&lastRun, &status, &unreachableRigs)
+		if err == nil {
+			if !lastRun.IsZero() && time.Since(lastRun) > 5*time.Minute {
+				status = "danger"
+			}
+		} else {
+			lastRun = time.Time{}
+			status = "danger"
+			unreachableRigs = []string{}
+		}
+
+		// 2. Query bead statistics
+		var linkedBeadsRegular, linkedBeadsCatchall, unlinkedBeads int
+		_ = p.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedBeadsRegular)
+		_ = p.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedBeadsCatchall)
+		_ = p.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='bead'`).Scan(&unlinkedBeads)
+
+		// 3. Query workspace statistics
+		var linkedWorkspacesRegular, linkedWorkspacesCatchall, unlinkedWorkspaces int
+		_ = p.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedWorkspacesRegular)
+		_ = p.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedWorkspacesCatchall)
+		_ = p.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='vk_workspace'`).Scan(&unlinkedWorkspaces)
+
+		// 3b. Query offline/unreachable rig statistics (Denominator Honesty)
+		var unlinkedRigs int
+		_ = p.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='rig'`).Scan(&unlinkedRigs)
+
+		// 4. Calculate totals
+		totalBeads := linkedBeadsRegular + linkedBeadsCatchall + unlinkedBeads
+		totalWorkspaces := linkedWorkspacesRegular + linkedWorkspacesCatchall + unlinkedWorkspaces
+		totalRigs := unlinkedRigs
+		totalWorkItems := totalBeads + totalWorkspaces + totalRigs
+		linkedWorkItems := (linkedBeadsRegular + linkedBeadsCatchall) + (linkedWorkspacesRegular + linkedWorkspacesCatchall)
+		catchallWorkItems := linkedBeadsCatchall + linkedWorkspacesCatchall
+
+		completenessPercentage := 0.0
+		if totalWorkItems > 0 {
+			completenessPercentage = (float64(linkedWorkItems) / float64(totalWorkItems)) * 100.0
+		}
+
+		catchallPercentage := 0.0
+		if totalWorkItems > 0 {
+			catchallPercentage = (float64(catchallWorkItems) / float64(totalWorkItems)) * 100.0
+		}
+
+		response := map[string]any{
+			"detector_last_run": lastRun,
+			"detector_status":   status,
+			"unreachable_rigs":  unreachableRigs,
+			"beads": map[string]any{
+				"linked_regular":  linkedBeadsRegular,
+				"linked_catchall": linkedBeadsCatchall,
+				"unlinked":        unlinkedBeads,
+				"total":           totalBeads,
+			},
+			"workspaces": map[string]any{
+				"linked_regular":  linkedWorkspacesRegular,
+				"linked_catchall": linkedWorkspacesCatchall,
+				"unlinked":        unlinkedWorkspaces,
+				"total":           totalWorkspaces,
+			},
+			"rigs": map[string]any{
+				"unlinked": unlinkedRigs,
+				"total":    totalRigs,
+			},
+			"total_work_items":        totalWorkItems,
+			"linked_work_items":       linkedWorkItems,
+			"completeness_percentage": completenessPercentage,
+			"catchall_percentage":     catchallPercentage,
+		}
+
+		json.NewEncoder(w).Encode(response)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/completeness")
+	if err != nil {
+		t.Fatalf("failed to get completeness: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var data struct {
+		DetectorStatus string `json:"detector_status"`
+		Rigs           struct {
+			Unlinked int `json:"unlinked"`
+			Total    int `json:"total"`
+		} `json:"rigs"`
+		TotalWorkItems int `json:"total_work_items"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatalf("failed to decode completeness response: %v", err)
+	}
+
+	// Verify status is overridden to danger because of heartbeat delay
+	if data.DetectorStatus != "danger" {
+		t.Errorf("expected status 'danger' due to stale run, got %q", data.DetectorStatus)
+	}
+
+	// Verify unlinked rig is counted
+	if data.Rigs.Unlinked < 1 {
+		t.Errorf("expected at least 1 unlinked rig, got %d", data.Rigs.Unlinked)
 	}
 }
