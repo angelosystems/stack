@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -177,5 +180,115 @@ func TestSageSteward_API(t *testing.T) {
 	}
 	if recoveredData["outage_simulated"] != false {
 		t.Errorf("expected outage_simulated to be false after reset")
+	}
+}
+
+func TestGetDanglingWorkspaces(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "sage-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test-vk.sqlite")
+
+	schema := `
+CREATE TABLE workspaces (
+    id                 BLOB PRIMARY KEY,
+    name               TEXT,
+    created_at         TEXT NOT NULL,
+    archived           INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE sessions (
+    id              BLOB PRIMARY KEY,
+    workspace_id    BLOB NOT NULL
+);
+CREATE TABLE execution_processes (
+    id              BLOB PRIMARY KEY,
+    session_id      BLOB NOT NULL,
+    status          TEXT NOT NULL,
+    exit_code       INTEGER,
+    run_reason      TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+CREATE TABLE pull_requests (
+    id TEXT PRIMARY KEY NOT NULL,
+    workspace_id BLOB,
+    pr_status TEXT NOT NULL
+);
+`
+
+	cmd := exec.Command("sqlite3", dbPath, schema)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to initialize sqlite DB schema: %v", err)
+	}
+
+	now := time.Now()
+	olderThan12h := now.Add(-13 * time.Hour).Format("2006-01-02 15:04:05")
+	recent := now.Add(-1 * time.Hour).Format("2006-01-02 15:04:05")
+
+	dataInserts := fmt.Sprintf(`
+-- WS1 (Dangling)
+INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'00000000000000000000000000000001', 'ws1-dangling', '%[1]s', 0);
+INSERT INTO sessions (id, workspace_id) VALUES (x'10000000000000000000000000000001', x'00000000000000000000000000000001');
+INSERT INTO execution_processes (id, session_id, status, exit_code, run_reason, created_at) 
+VALUES (x'20000000000000000000000000000001', x'10000000000000000000000000000001', 'completed', 0, 'codingagent', '%[1]s');
+
+-- WS2 (Not dangling: archived)
+INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'00000000000000000000000000000002', 'ws2-archived', '%[1]s', 1);
+INSERT INTO sessions (id, workspace_id) VALUES (x'10000000000000000000000000000002', x'00000000000000000000000000000002');
+INSERT INTO execution_processes (id, session_id, status, exit_code, run_reason, created_at) 
+VALUES (x'20000000000000000000000000000002', x'10000000000000000000000000000002', 'completed', 0, 'codingagent', '%[1]s');
+
+-- WS3 (Not dangling: has open PR)
+INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'00000000000000000000000000000003', 'ws3-open-pr', '%[1]s', 0);
+INSERT INTO sessions (id, workspace_id) VALUES (x'10000000000000000000000000000003', x'00000000000000000000000000000003');
+INSERT INTO execution_processes (id, session_id, status, exit_code, run_reason, created_at) 
+VALUES (x'20000000000000000000000000000003', x'10000000000000000000000000000003', 'completed', 0, 'codingagent', '%[1]s');
+INSERT INTO pull_requests (id, workspace_id, pr_status) VALUES ('pr3', x'00000000000000000000000000000003', 'open');
+
+-- WS4 (Not dangling: running execution process)
+INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'00000000000000000000000000000004', 'ws4-running-ep', '%[1]s', 0);
+INSERT INTO sessions (id, workspace_id) VALUES (x'10000000000000000000000000000004', x'00000000000000000000000000000004');
+INSERT INTO execution_processes (id, session_id, status, exit_code, run_reason, created_at) 
+VALUES (x'20000000000000000000000000000004', x'10000000000000000000000000000004', 'running', NULL, 'codingagent', '%[1]s');
+
+-- WS5 (Not dangling: too young)
+INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'00000000000000000000000000000005', 'ws5-young', '%[2]s', 0);
+INSERT INTO sessions (id, workspace_id) VALUES (x'10000000000000000000000000000005', x'00000000000000000000000000000005');
+INSERT INTO execution_processes (id, session_id, status, exit_code, run_reason, created_at) 
+VALUES (x'20000000000000000000000000000005', x'10000000000000000000000000000005', 'completed', 0, 'codingagent', '%[2]s');
+`, olderThan12h, recent)
+
+	cmd = exec.Command("sqlite3", dbPath, dataInserts)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to insert test data into sqlite DB: %v", err)
+	}
+
+	origVkDb := os.Getenv("VK_DB")
+	os.Setenv("VK_DB", dbPath)
+	defer os.Setenv("VK_DB", origVkDb)
+
+	dangling, err := getDanglingWorkspaces()
+	if err != nil {
+		t.Fatalf("getDanglingWorkspaces failed: %v", err)
+	}
+
+	if len(dangling) != 1 {
+		t.Errorf("expected 1 dangling workspace, got %d", len(dangling))
+	} else {
+		ws := dangling[0]
+		if ws.ID != "00000000000000000000000000000001" {
+			t.Errorf("expected dangling workspace ID '00000000000000000000000000000001', got %q", ws.ID)
+		}
+		if ws.Name != "ws1-dangling" {
+			t.Errorf("expected name 'ws1-dangling', got %q", ws.Name)
+		}
+		if ws.EPStatus != "completed" {
+			t.Errorf("expected ep_status 'completed', got %q", ws.EPStatus)
+		}
+		if ws.ExitCode == nil || *ws.ExitCode != 0 {
+			t.Errorf("expected exit_code 0, got %v", ws.ExitCode)
+		}
 	}
 }
