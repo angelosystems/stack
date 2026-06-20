@@ -79,3 +79,26 @@ func GetHealCounter(ctx context.Context, p *pgxpool.Pool, beadID string) (int, e
 	}
 	return counter, nil
 }
+
+// ExecuteSageAction attempts to acquire a lease for a bead/workspace and, if successful,
+// executes the provided action function.
+// If the lease acquisition fails (e.g., because a lease is already active),
+// it will not execute the action and will return an error indicating that the action was blocked.
+// This ensures that the heal counter increment and the action execution are coordinated atomically.
+func ExecuteSageAction(ctx context.Context, p *pgxpool.Pool, beadID string, duration time.Duration, lockedBy string, action func() error) error {
+	// 1. Attempt to atomically acquire the lease and increment the heal counter
+	_, _, err := AcquireSageLease(ctx, p, beadID, duration, lockedBy)
+	if err != nil {
+		return fmt.Errorf("failed to acquire lease for action: %w", err)
+	}
+
+	// 2. Execute the action
+	if err := action(); err != nil {
+		// If the action failed, release the lease early so that it can be retried,
+		// but the heal counter increment remains recorded (committed upon AcquireSageLease).
+		_ = ReleaseSageLease(ctx, p, beadID, lockedBy)
+		return fmt.Errorf("sage action failed: %w", err)
+	}
+
+	return nil
+}
