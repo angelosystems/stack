@@ -64,12 +64,13 @@ func TestSageSteward_API(t *testing.T) {
 		dangling, _ := getDanglingWorkspaces()
 
 		resp := map[string]any{
-			"last_run":          lastRun,
-			"status":            status,
-			"error_message":     errMsg,
-			"dangling_count":    len(dangling),
-			"dangling_baseline": 4,
-			"outage_simulated":  sageOutageSimulated,
+			"last_run":            lastRun,
+			"status":              status,
+			"error_message":       errMsg,
+			"dangling_count":      len(dangling),
+			"dangling_baseline":   4,
+			"outage_simulated":    sageOutageSimulated,
+			"dangling_workspaces": dangling,
 		}
 		json.NewEncoder(w).Encode(resp)
 	})
@@ -121,6 +122,15 @@ func TestSageSteward_API(t *testing.T) {
 	}
 	if initialData["outage_simulated"] != false {
 		t.Errorf("expected outage_simulated to be false")
+	}
+	if _, ok := initialData["dangling_count"]; !ok {
+		t.Errorf("expected 'dangling_count' to be present in status response")
+	}
+	if baseline, ok := initialData["dangling_baseline"]; !ok || baseline != float64(4) {
+		t.Errorf("expected 'dangling_baseline' to be 4, got %v", baseline)
+	}
+	if _, ok := initialData["dangling_workspaces"]; !ok {
+		t.Errorf("expected 'dangling_workspaces' to be present in status response")
 	}
 
 	// 3. Test POST /api/sage/simulate-outage - activate simulation
