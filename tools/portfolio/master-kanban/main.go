@@ -3209,6 +3209,7 @@ func cmdSage() *cobra.Command {
 								"workspace_name":   ws.name,
 								"classification":   class,
 								"proposed_action":  action,
+								"action":           action,
 								"dry_run":          true,
 							}
 							payloadBytes, _ := json.Marshal(payloadMap)
