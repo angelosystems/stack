@@ -234,18 +234,15 @@ func TestStewardReport(t *testing.T) {
 		return
 	}
 
-	// Set default test DSN if empty
-	if dsn == "" {
-		dsn = os.Getenv("PORTFOLIO_DSN")
-		if dsn == "" {
-			dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-		}
+	dsnStr := os.Getenv("PORTFOLIO_DSN")
+	if dsnStr == "" {
+		dsnStr = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
 	}
 
 	ctx := context.Background()
-	p, err := pgxpool.New(ctx, dsn)
+	p, err := pgxpool.New(ctx, dsnStr)
 	if err != nil {
-		t.Skip("skipping integration test; db not reachable:", err)
+		t.Skip("skipping steward report test; db not reachable:", err)
 		return
 	}
 	defer p.Close()
