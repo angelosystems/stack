@@ -181,7 +181,7 @@ func TestExecuteSageActionConcurrency(t *testing.T) {
 			<-startChan
 
 			// Attempt to execute Sage Action
-			err := ExecuteSageAction(ctx, p, beadID, 10*time.Second, "concurrent-worker", func() error {
+			err := ExecuteSageActionWithLease(ctx, p, beadID, 10*time.Second, "concurrent-worker", func() error {
 				atomic.AddInt64(&actionExecutions, 1)
 				return nil
 			})
@@ -233,16 +233,21 @@ func TestStewardReport(t *testing.T) {
 		return
 	}
 
-	// Set default test DSN if empty
-	if dsn == "" {
-		dsn = os.Getenv("PORTFOLIO_DSN")
-		if dsn == "" {
-			dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-		}
+	dsnStr := os.Getenv("PORTFOLIO_DSN")
+	if dsnStr == "" {
+		dsnStr = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
 	}
 
-	err := runStewardPhase1()
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsnStr)
 	if err != nil {
-		t.Errorf("expected no error running runStewardPhase1, got: %v", err)
+		t.Skip("skipping steward report test; db not reachable:", err)
+		return
+	}
+	defer p.Close()
+
+	err = runSteward(p, vkDB)
+	if err != nil {
+		t.Errorf("expected no error running runSteward, got: %v", err)
 	}
 }

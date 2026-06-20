@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -419,4 +420,65 @@ func (s *SageDecisionEngine) Escalate(ctx context.Context, initiativeID string, 
 	fmt.Printf("[Sage Advisor-Signal/Mail] ESCALATION: Initiative %s eskaliert! Grund: %s\n", initiativeID, reason)
 
 	return nil
+}
+
+func formatUUID(hexStr string) string {
+	hexStr = strings.ToLower(hexStr)
+	if len(hexStr) != 32 {
+		return hexStr
+	}
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hexStr[0:8],
+		hexStr[8:12],
+		hexStr[12:16],
+		hexStr[16:20],
+		hexStr[20:32])
+}
+
+func hasPartialProgress(sessionHex string) bool {
+	if sessionHex == "" {
+		return false
+	}
+	sessionUUID := formatUUID(sessionHex)
+	if sessionUUID == "" {
+		return false
+	}
+	sessionDir := filepath.Join("/root/.local/share/vibe-kanban/sessions", sessionUUID[:2], sessionUUID)
+
+	// Check if the directory exists
+	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
+		return false
+	}
+
+	// Find the git repository path inside sessionDir
+	var gitRepoPath string
+	err := filepath.Walk(sessionDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && info.Name() == ".git" {
+			gitRepoPath = filepath.Dir(path)
+			return filepath.SkipDir // Stop walking inside .git
+		}
+		return nil
+	})
+	if err != nil || gitRepoPath == "" {
+		return false
+	}
+
+	// Run git log origin/main..HEAD --oneline to see if there are any commits
+	cmd := exec.Command("git", "-C", gitRepoPath, "log", "origin/main..HEAD", "--oneline")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		// Fallback: If origin/main doesn't exist, check git log HEAD -n 5 or similar
+		cmdFallback := exec.Command("git", "-C", gitRepoPath, "log", "-n", "1")
+		if errFb := cmdFallback.Run(); errFb != nil {
+			return false
+		}
+		return true // assume some commits if log -n 1 succeeds and main isn't there
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	return len(lines) > 0 && lines[0] != ""
 }
