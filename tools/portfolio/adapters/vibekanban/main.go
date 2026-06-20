@@ -37,12 +37,12 @@ import (
 )
 
 var (
-	dsn     = envOr("PORTFOLIO_DSN", "postgres://mario@127.0.0.1:5434/mario_brain?sslmode=disable")
-	apiURL  = envOr("PORTFOLIO_API", "http://127.0.0.1:7780")
-	apiKey  = envOr("PORTFOLIO_API_KEY", "dev-secret")
-	vkDB    = envOr("VK_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
-	once    = flag.Bool("once", false, "Dawn-Sync + exit")
-	watch   = flag.Bool("watch", false, "Dawn-Sync + fsnotify, langlaufend")
+	dsn            = envOr("PORTFOLIO_DSN", "postgres://mario@127.0.0.1:5434/mario_brain?sslmode=disable")
+	apiURL         = envOr("PORTFOLIO_API", "http://127.0.0.1:7780")
+	apiKey         = envOr("PORTFOLIO_API_KEY", "dev-secret")
+	vkDB           = envOr("VK_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+	once           = flag.Bool("once", false, "Dawn-Sync + exit")
+	watch          = flag.Bool("watch", false, "Dawn-Sync + fsnotify, langlaufend")
 	Version string = "dev"
 )
 
