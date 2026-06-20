@@ -80,6 +80,10 @@ eskalieren** (Board-Event + advisor-Signal), keine weitere Auto-Heilung. Der
 Zähler liegt am Bead (überlebt Restarts). **Alternative verworfen:** unbegrenzt
 retryen — verworfen, weil genau das die 3 pausierte Deck-Beads erzeugt hat.
 
+#### Heal-Counter-Reset-Semantik (Newman-Note)
+- **Regel:** Wenn ein Workspace-Lauf fehlschlägt, aber *partieller Fortschritt* erzielt wurde (nachweisbar durch mindestens einen neuen Commit im Git-Repository des Workspaces oder einen erfolgreichen bzw. Fortschritt zeigenden Run, der nicht im no-commits-exit1 Zustand stecken bleibt), wird der `heal_counter` auf `0` zurückgesetzt.
+- **Begründung:** Ein paar Commits zeigen, dass der Agent an dem Problem arbeitet und nicht in einem identischen, blockierten Fehlerzustand gefangen ist. Er benötigt daher das volle Heilungs-Budget für den neuen Code-Zustand. Wenn der Lauf hingegen mit `no-commits-exit1` (0 Commits, Exit-Code 1) fehlschlägt, bleibt der Zähler bestehen bzw. wird bei einer Heilung (Re-Dispatch) inkrementiert.
+
 ### L5 — Sichtbarkeit + Sage-Liveness
 Jede Sage-Aktion (heal/close/escalate/archive/merge-nudge) = ein Board-Event
 (`kind=sage_action`) auf der Initiative des Beads. Eskalationen erscheinen in

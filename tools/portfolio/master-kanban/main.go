@@ -3041,9 +3041,10 @@ func getDanglingWorkspaces() ([]DanglingWorkspace, error) {
 }
 
 func cmdSage() *cobra.Command {
-	return &cobra.Command{
+	var runSage bool
+	c := &cobra.Command{
 		Use:   "sage",
-		Short: "vk-Sage — Workspace-Steward Phase 1 Read-only & Log Board-Events",
+		Short: "vk-Sage — Workspace-Steward Phase 3 Diagnose-informed Re-Dispatch + Heal-Counter",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := context.Background()
 			p := connect()
@@ -3115,7 +3116,11 @@ func cmdSage() *cobra.Command {
 				}
 			}
 
-			fmt.Println("=== vk-Sage Dry-Run-Report (Phase 1: Read-only) ===")
+			if runSage {
+				fmt.Println("=== vk-Sage ACTIVE RUN (Phase 3: Diagnose-informed Re-Dispatch + Heal-Counter) ===")
+			} else {
+				fmt.Println("=== vk-Sage Dry-Run-Report (Phase 1: Read-only) ===")
+			}
 			fmt.Printf("Found %d unarchived workspace(s)\n\n", len(workspaces))
 
 			// To ensure deterministic order for output
@@ -3136,6 +3141,16 @@ func cmdSage() *cobra.Command {
 				var action string
 				var beadID string
 
+				if isIb5e {
+					beadID = "st-ib5e"
+				} else if isYozd {
+					beadID = "st-yozd"
+				} else if is1bpf {
+					beadID = "st-1bpf"
+				} else if strings.HasPrefix(ws.name, "sol-") {
+					beadID = strings.TrimPrefix(ws.name, "sol-")
+				}
+
 				if isRituale {
 					class = "broken worktree / Setup-Fail / Workspace ohne Bead"
 					action = "archive"
@@ -3143,15 +3158,8 @@ func cmdSage() *cobra.Command {
 					if isIb5e {
 						class = "no-commits-exit1 + Ziel schon erledigt"
 						action = "close-as-done"
-						beadID = "st-ib5e"
-					} else if isYozd {
+					} else {
 						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
-						beadID = "st-yozd"
-					} else if is1bpf {
-						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
-						beadID = "st-1bpf"
 					}
 				}
 
@@ -3162,13 +3170,23 @@ func cmdSage() *cobra.Command {
 						action = "archive"
 					} else if ws.epStatus == "failed" && ws.exitCode == "1" {
 						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
-						if strings.HasPrefix(ws.name, "sol-") {
-							beadID = strings.TrimPrefix(ws.name, "sol-")
-						}
 					} else {
 						class = fmt.Sprintf("unhandled status: status=%s exit=%s", ws.epStatus, ws.exitCode)
 						action = "none"
+					}
+				}
+
+				// Query heal counter from database to decide between re-dispatch and escalate
+				var healCounter int
+				if class == "no-commits-exit1 + Arbeit echt offen" && beadID != "" {
+					sp, err := solartownPool()
+					if err == nil {
+						_ = sp.QueryRow(ctx, `SELECT COALESCE((metadata->>'heal_counter')::int, 0) FROM beads.issues WHERE id = $1 AND deleted_at IS NULL`, beadID).Scan(&healCounter)
+					}
+					if healCounter < 2 {
+						action = "re-dispatch"
+					} else {
+						action = "escalate"
 					}
 				}
 
@@ -3177,6 +3195,177 @@ func cmdSage() *cobra.Command {
 				fmt.Printf("Bead ID:      %s\n", beadID)
 				fmt.Printf("Class:        %s\n", class)
 				fmt.Printf("Action:       %s\n", action)
+
+				// Heal-Counter-Reset-Semantik (Newman-Note):
+				// Wenn ein Workspace-Lauf fehlschlägt, aber *partieller Fortschritt* erzielt wurde 
+				// (nachweisbar durch mindestens einen neuen Commit im Git-Repository des Workspaces oder 
+				// einen erfolgreichen bzw. Fortschritt zeigenden Run, der nicht im no-commits-exit1 Zustand stecken bleibt), 
+				// wird der `heal_counter` auf `0` zurückgesetzt. 
+				// Ein paar Commits zeigen, dass der Agent an dem Problem arbeitet und nicht in einem identischen, 
+				// blockierten Fehlerzustand gefangen ist. Er benötigt daher das volle Heilungs-Budget für den neuen Code-Zustand. 
+				// Wenn der Lauf hingegen mit `no-commits-exit1` (0 Commits, Exit-Code 1) fehlschlägt, bleibt der Zähler bestehen 
+				// bzw. wird bei einer Heilung (Re-Dispatch) inkrementiert.
+				if beadID != "" && class != "no-commits-exit1 + Arbeit echt offen" && class != "no-commits-exit1 + Ziel schon erledigt" {
+					if ws.epStatus == "completed" || (ws.epStatus == "failed" && ws.exitCode != "1") {
+						if runSage {
+							sp, err := solartownPool()
+							if err == nil {
+								_, err = sp.Exec(ctx, `
+									UPDATE beads.issues 
+									SET metadata = jsonb_set(metadata, '{heal_counter}', '0'::jsonb)
+									WHERE id = $1 AND deleted_at IS NULL
+								`, beadID)
+								if err != nil {
+									fmt.Fprintf(os.Stderr, " -> Error resetting heal counter: %v\n", err)
+								} else {
+									fmt.Printf(" -> Success: Reset heal_counter to 0 for Bead %s due to progress/success\n", beadID)
+								}
+							}
+						} else {
+							fmt.Printf(" -> Proposed: Reset heal_counter to 0 for Bead %s due to progress/success\n", beadID)
+						}
+					}
+				}
+
+				// Execute mutation if runSage is active
+				if runSage {
+					sp, err := solartownPool()
+					if err != nil {
+						fmt.Fprintf(os.Stderr, " -> Error: failed to connect to solartown database: %v\n", err)
+						continue
+					}
+
+					switch action {
+					case "archive":
+						// Archive in SQLite
+						archiveCmd := exec.Command("sqlite3", vkDB, fmt.Sprintf("UPDATE workspaces SET archived = 1 WHERE hex(id) = '%s';", ws.id))
+						if out, err := archiveCmd.CombinedOutput(); err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error archiving workspace %s in SQLite: %v (output: %s)\n", ws.id, err, out)
+						} else {
+							fmt.Printf(" -> Success: Archived Workspace %s in vibe-kanban SQLite database\n", ws.id)
+						}
+
+					case "close-as-done":
+						// Archive in SQLite
+						archiveCmd := exec.Command("sqlite3", vkDB, fmt.Sprintf("UPDATE workspaces SET archived = 1 WHERE hex(id) = '%s';", ws.id))
+						if out, err := archiveCmd.CombinedOutput(); err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error archiving workspace %s in SQLite: %v (output: %s)\n", ws.id, err, out)
+						} else {
+							fmt.Printf(" -> Success: Archived Workspace %s in vibe-kanban SQLite database\n", ws.id)
+						}
+
+						// Close bead in Dolt/Postgres
+						_, err = sp.Exec(ctx, `
+							UPDATE beads.issues 
+							SET status = 'closed', close_reason = 'sage-already-done', closed_at = now()
+							WHERE id = $1 AND deleted_at IS NULL
+						`, beadID)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error closing bead %s: %v\n", beadID, err)
+						} else {
+							fmt.Printf(" -> Success: Closed Bead %s with reason 'sage-already-done'\n", beadID)
+						}
+
+					case "re-dispatch":
+						// 1. Fetch original title and description
+						var originalTitle, originalDesc string
+						err = sp.QueryRow(ctx, `SELECT title, description FROM beads.issues WHERE id = $1 AND deleted_at IS NULL`, beadID).Scan(&originalTitle, &originalDesc)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error fetching bead details for %s: %v\n", beadID, err)
+							continue
+						}
+
+						// 2. Increment the heal counter
+						newHealCounter := healCounter + 1
+
+						// 3. Call GLM-5.1 to diagnose and generate a re-scoped prompt
+						systemPrompt := `Du bist vk-Sage, der Workspace-Steward. Deine Aufgabe ist es, einen gescheiterten Workspace zu analysieren und einen präzisen, geschärften und re-scopeten Prompt (auf Deutsch) zu erstellen, damit der nächste Versuch des Agenten erfolgreich ist.
+Der vorherige Versuch schlug fehl mit der Fehlerklasse: "no-commits-exit1" (Exit-Code 1, keine Commits). Das bedeutet, der Agent hat das Ziel nicht erreicht und konnte keine Änderungen committen.
+
+Bitte erstelle einen konkreten, geschärften, re-scopeten oder fehlerkorrigierten Prompt für den nächsten Versuch.
+Dein neuer Prompt MUSS:
+1. Den ursprünglichen Scope schärfen und präzisieren.
+2. Mögliche Hürden oder Fehlerquellen ansprechen (z.B. fehlende Buttons, unvollständige Implementierung, falsche UI-Elemente).
+3. Klar strukturierte Akzeptanzkriterien vorgeben.
+4. Sich nachweisbar vom ursprünglichen Prompt unterscheiden (kein identischer Retry).
+
+Antworte ausschließlich mit dem neuen, re-scopeten Prompt/Beschreibungstext (auf Deutsch). Verwende keine Einleitung, keine Erklärungen und kein "Hier ist dein Prompt".`
+
+						userMsg := fmt.Sprintf("Bead ID: %s\nTitel: %s\nBeschreibung:\n%s\n\nWorkspace Name: %s", beadID, originalTitle, originalDesc, ws.name)
+						messages := []map[string]string{
+							{"role": "user", "content": userMsg},
+						}
+						fmt.Printf(" -> Calling GLM-5.1 to generate diagnosis-informed prompt for Bead %s...\n", beadID)
+						diagnosis, err := callGlm(systemPrompt, messages)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error calling GLM-5.1: %v\n", err)
+							diagnosis = "Automatische Diagnose fehlgeschlagen. Bitte den Scope manuell prüfen."
+						} else {
+							fmt.Printf(" -> GLM-5.1 Diagnosis: %.100s...\n", diagnosis)
+						}
+
+						// 4. Update the bead description, metadata, and set status to open
+						newDesc := fmt.Sprintf("%s\n\n---\n### 🧓 vk-Sage Diagnosis & Re-scope (Heal Attempt #%d)\n%s", originalDesc, newHealCounter, diagnosis)
+						_, err = sp.Exec(ctx, `
+							UPDATE beads.issues 
+							SET status = 'open', description = $2, metadata = jsonb_set(metadata, '{heal_counter}', $1::jsonb)
+							WHERE id = $3 AND deleted_at IS NULL
+						`, fmt.Sprintf("%d", newHealCounter), newDesc, beadID)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error updating bead %s in database: %v\n", beadID, err)
+							continue
+						}
+						fmt.Printf(" -> Success: Updated Bead %s description and heal_counter to %d\n", beadID, newHealCounter)
+
+						// 5. Delete the vk-paused:no-commits-exit1 label
+						_, err = sp.Exec(ctx, `
+							UPDATE beads.labels 
+							SET deleted_at = now()
+							WHERE issue_id = $1 AND label = 'vk-paused:no-commits-exit1'
+						`, beadID)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error removing pause label from bead %s: %v\n", beadID, err)
+						} else {
+							fmt.Printf(" -> Success: Removed pause label from Bead %s\n", beadID)
+						}
+
+						// 6. Resolve rig for the bead
+						var rig string
+						err = sp.QueryRow(ctx, `SELECT rig FROM beads.issues WHERE id = $1 AND deleted_at IS NULL`, beadID).Scan(&rig)
+						if err != nil {
+							rig = "stack" // fallback
+						}
+
+						// 7. Trigger re-dispatch via gt sling
+						slingCmd := exec.Command("gt", "sling", beadID, rig)
+						if out, err := slingCmd.CombinedOutput(); err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error scheduling bead via gt sling: %v (output: %s)\n", err, out)
+						} else {
+							fmt.Printf(" -> Success: Scheduled Bead %s via gt sling on rig %s\n", beadID, rig)
+						}
+
+						// 8. Archive the old, failed workspace in SQLite so it doesn't get swept again
+						archiveCmd := exec.Command("sqlite3", vkDB, fmt.Sprintf("UPDATE workspaces SET archived = 1 WHERE hex(id) = '%s';", ws.id))
+						if out, err := archiveCmd.CombinedOutput(); err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error archiving old workspace %s in SQLite: %v (output: %s)\n", ws.id, err, out)
+						} else {
+							fmt.Printf(" -> Success: Archived Old Workspace %s in SQLite\n", ws.id)
+						}
+
+					case "escalate":
+						// Mark the bead as blocked with note
+						_, err = sp.Exec(ctx, `
+							UPDATE beads.issues 
+							SET status = 'blocked', notes = notes || E'\nEscalated by vk-Sage: Retry budget exceeded (N>=2).'
+							WHERE id = $1 AND deleted_at IS NULL
+						`, beadID)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error escalating bead %s: %v\n", beadID, err)
+						} else {
+							fmt.Printf(" -> Success: Escalated Bead %s in database (status blocked)\n", beadID)
+						}
+					}
+				}
 
 				// Logging Board Event on the Initiative of the Bead
 				if beadID != "" {
@@ -3200,7 +3389,7 @@ func cmdSage() *cobra.Command {
 						`, initiativeID, ws.id).Scan(&exists)
 						if err != nil {
 							fmt.Fprintf(os.Stderr, " -> Error checking existing events: %v\n", err)
-						} else if exists {
+						} else if exists && !runSage {
 							fmt.Printf(" -> Info: Board-Event (sage_action) already logged for Workspace %s on initiative %s\n", ws.id, initiativeID)
 						} else {
 							// 3. Insert the new sage_action board event
@@ -3209,7 +3398,7 @@ func cmdSage() *cobra.Command {
 								"workspace_name":   ws.name,
 								"classification":   class,
 								"proposed_action":  action,
-								"dry_run":          true,
+								"dry_run":          !runSage,
 							}
 							payloadBytes, _ := json.Marshal(payloadMap)
 
@@ -3229,4 +3418,6 @@ func cmdSage() *cobra.Command {
 			}
 		},
 	}
+	c.Flags().BoolVar(&runSage, "run", false, "Execute real healing actions instead of dry-run")
+	return c
 }
