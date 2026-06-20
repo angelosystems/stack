@@ -1393,6 +1393,12 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
+				// Trigger Sage Sweep on incoming events (edge-trigger)
+				select {
+				case sageSweepChan <- struct{}{}:
+				default:
+				}
+
 				if ev.Kind == "stage_proposed" {
 					var pLoad struct {
 						Stage string `json:"stage"`
@@ -2927,6 +2933,7 @@ Gib deine Antwort EXACTLY als ein valides JSON-Array von Objekten im folgenden F
 }
 
 var sageOutageSimulated bool
+var sageSweepChan = make(chan struct{}, 1)
 
 type DanglingWorkspace struct {
 	ID        string `json:"id"`
