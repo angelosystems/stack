@@ -169,7 +169,7 @@ Ein klar strukturierten Plan mit starkem Problembeleg, bewusst plausibler Scope-
 3. **[Hohpe — MAJOR] Atomarer Claim/Lock vor jeder Aktion.** Ohne per-Bead-Lease/Compare-and-Set handeln zwei Sage-Zyklen (oder Sage+Reactor) doppelt am selben toten Workspace. Heal-Counter-Inkrement **und** Aktion müssen atomar sein.
 
 **NOTES:**
-- **[Crispin/Wiegers] Kalibrierungs-Gate vor Autonomie.** Phase 1 ist read-only — ergänze ein Kriterium: die Sage-Klassifikationen müssen mit dem Mensch-Urteil über die aktuellen 4 Leichen übereinstimmen (≥ Schwelle), **bevor** Phase 2 ihn handeln lässt. Keinen autonomen Mutator mit unbewiesenem Urteil scharfschalten.
+- **[Crispin/Wiegers] Kalibrierungs-Gate vor Autonomie.** Phase 1 ist read-only — ergänze ein Kriterium: die Sage-Klassifikationen müssen mit dem Mensch-Urteil über die aktuellen 4 Leichen übereinstimmen (≥ Schwelle), **bevor** Phase 2 ihn handeln lässt. Keinen autonomen Mutator mit unbewiesenem Urteil scharfschalten. **Bestanden & Dokumentiert am 20.06.2026:** Siehe [vk-Sage Kalibrierung](vk-sage-calibration.md) (100% Übereinstimmung erreicht).
 - **[Cockburn] Live-Geld-Ausnahme.** quantbot/Trading-Path-Beads → Sage **nur eskalieren**, kein autonomes close/re-dispatch (Live-Geld-Konvention „keine Änderungen ohne Permission").
 - **[Hohpe] Subscribable Execution-End-Event verifizieren** (wie Dispatch-PRD A1) — emittiert der vibekanban-adapter wirklich ein abonnierbares Event, oder degradiert „edge-triggered" still zu Poll?
 - **[Newman] Heal-Counter-Reset-Semantik** — setzt partieller Fortschritt (ein paar Commits, dann Fehler) den Zähler zurück oder nicht? Definieren, sonst verhungern harte Tasks oder Zombies bleiben.
