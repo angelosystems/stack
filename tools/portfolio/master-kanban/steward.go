@@ -74,8 +74,7 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 		return fmt.Errorf("failed to query vibe-kanban SQLite DB: %w", err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(out.String()), "
-")
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) == 0 || lines[0] == "" {
 		fmt.Println("No workspaces found in Vibe Kanban SQLite.")
 		return nil
@@ -115,12 +114,9 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 
 	// 3. Dry-Run classification, reporting, and board event emission
 	var reportBuilder strings.Builder
-	reportBuilder.WriteString("============================================================
-")
-	reportBuilder.WriteString("              vk-Sage Dry-Run-Report
-")
-	reportBuilder.WriteString("============================================================
-")
+	reportBuilder.WriteString("============================================================\n")
+	reportBuilder.WriteString("              vk-Sage Dry-Run-Report\n")
+	reportBuilder.WriteString("============================================================\n")
 
 	corpseCount := 0
 
@@ -197,15 +193,10 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 		}
 
 		// Append to stdout report
-		reportBuilder.WriteString(fmt.Sprintf("%d. Workspace: %s (%s)
-", corpseCount, ws.id[:8], ws.name))
-		reportBuilder.WriteString(fmt.Sprintf("   Bead:      %s
-", beadDisplay))
-		reportBuilder.WriteString(fmt.Sprintf("   Klasse:    %s
-", sageClass))
-		reportBuilder.WriteString(fmt.Sprintf("   Aktion:    %s
-
-", proposedAction))
+		reportBuilder.WriteString(fmt.Sprintf("%d. Workspace: %s (%s)\n", corpseCount, ws.id[:8], ws.name))
+		reportBuilder.WriteString(fmt.Sprintf("   Bead:      %s\n", beadDisplay))
+		reportBuilder.WriteString(fmt.Sprintf("   Klasse:    %s\n", sageClass))
+		reportBuilder.WriteString(fmt.Sprintf("   Aktion:    %s\n\n", proposedAction))
 
 		// 4. Log Board-Event on the Initiative if a bead is associated
 		if beadID != "" {
@@ -251,19 +242,16 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 						VALUES ($1, 'sage_action', 'vk', $2::jsonb, 'vk-sage')
 					`, initiativeID, string(payloadBytes))
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error writing event for workspace %s: %v
-", ws.id, err)
+						fmt.Fprintf(os.Stderr, "Error writing event for workspace %s: %v\n", ws.id, err)
 					} else {
-						fmt.Printf("✓ Emitted sage_action event on initiative %s for workspace %s (%s)
-", initiativeID, ws.id[:8], sageClass)
+						fmt.Printf("✓ Emitted sage_action event on initiative %s for workspace %s (%s)\n", initiativeID, ws.id[:8], sageClass)
 					}
 				}
 			}
 		}
 	}
 
-	reportBuilder.WriteString("============================================================
-")
+	reportBuilder.WriteString("============================================================\n")
 
 	// Print report to stdout
 	fmt.Print(reportBuilder.String())
