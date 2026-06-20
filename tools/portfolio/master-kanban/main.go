@@ -3041,9 +3041,10 @@ func getDanglingWorkspaces() ([]DanglingWorkspace, error) {
 }
 
 func cmdSage() *cobra.Command {
-	return &cobra.Command{
+	var dryRun bool
+	c := &cobra.Command{
 		Use:   "sage",
-		Short: "vk-Sage — Workspace-Steward Phase 1 Read-only & Log Board-Events",
+		Short: "vk-Sage — Workspace-Steward Phase 3: Diagnose-informiertes Re-Dispatch & Heal-Counter (SC2/SC3)",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := context.Background()
 			p := connect()
@@ -3051,14 +3052,15 @@ func cmdSage() *cobra.Command {
 
 			vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
 
-			// Query workspaces from SQLite (similar to TestSageCalibration_Gate)
+			// Query workspaces from SQLite including session ID (s.id)
 			query := `
 				SELECT 
 					hex(w.id),
 					w.name,
 					hex(w.task_id),
 					ep.status,
-					ep.exit_code
+					ep.exit_code,
+					hex(s.id)
 				FROM workspaces w
 				LEFT JOIN sessions s ON s.workspace_id = w.id
 				LEFT JOIN execution_processes ep ON ep.session_id = s.id
@@ -3081,12 +3083,13 @@ func cmdSage() *cobra.Command {
 			}
 
 			type wsInfo struct {
-				id       string
-				name     string
-				hasTask  bool
-				taskHex  string
-				epStatus string
-				exitCode string
+				id        string
+				name      string
+				hasTask   bool
+				taskHex   string
+				epStatus  string
+				exitCode  string
+				sessionID string
 			}
 
 			workspaces := make(map[string]*wsInfo)
@@ -3101,21 +3104,31 @@ func cmdSage() *cobra.Command {
 				hasTask := taskHex != ""
 				epStatus := parts[3]
 				exitCode := parts[4]
+				var sessionID string
+				if len(parts) >= 6 {
+					sessionID = parts[5]
+				}
 
 				// Store the first occurrence (most recent)
 				if _, ok := workspaces[id]; !ok {
 					workspaces[id] = &wsInfo{
-						id:       id,
-						name:     name,
-						hasTask:  hasTask,
-						taskHex:  taskHex,
-						epStatus: epStatus,
-						exitCode: exitCode,
+						id:        id,
+						name:      name,
+						hasTask:   hasTask,
+						taskHex:   taskHex,
+						epStatus:  epStatus,
+						exitCode:  exitCode,
+						sessionID: sessionID,
 					}
 				}
 			}
 
-			fmt.Println("=== vk-Sage Dry-Run-Report (Phase 1: Read-only) ===")
+			fmt.Println("=== vk-Sage Workspace-Steward (Phase 3) ===")
+			if dryRun {
+				fmt.Println("Running in DRY-RUN mode (no mutations will be performed)")
+			} else {
+				fmt.Println("Running in ACTIVE healing mode (mutations will be performed)")
+			}
 			fmt.Printf("Found %d unarchived workspace(s)\n\n", len(workspaces))
 
 			// To ensure deterministic order for output
@@ -3146,11 +3159,11 @@ func cmdSage() *cobra.Command {
 						beadID = "st-ib5e"
 					} else if isYozd {
 						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
+						action = "re-dispatch" // changed from escalate to re-dispatch for Phase 3!
 						beadID = "st-yozd"
 					} else if is1bpf {
 						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
+						action = "re-dispatch" // changed from escalate to re-dispatch for Phase 3!
 						beadID = "st-1bpf"
 					}
 				}
@@ -3162,7 +3175,7 @@ func cmdSage() *cobra.Command {
 						action = "archive"
 					} else if ws.epStatus == "failed" && ws.exitCode == "1" {
 						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
+						action = "re-dispatch" // changed from escalate to re-dispatch for Phase 3!
 						if strings.HasPrefix(ws.name, "sol-") {
 							beadID = strings.TrimPrefix(ws.name, "sol-")
 						}
@@ -3172,56 +3185,148 @@ func cmdSage() *cobra.Command {
 					}
 				}
 
+				// Look up initiative ID for the Bead
+				var initiativeID string
+				if beadID != "" {
+					err := p.QueryRow(ctx, `SELECT initiative_id FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1`, beadID).Scan(&initiativeID)
+					if err != nil {
+						if err == pgx.ErrNoRows {
+							// If no link exists, we fallback to initiativeID = beadID if it exists in portfolio.initiative
+							var exists bool
+							_ = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id = $1)`, beadID).Scan(&exists)
+							if exists {
+								initiativeID = beadID
+							}
+						}
+					}
+				}
+
+				// Persistent Heal-Counter and Newman-Note Reset Logic
+				currentHealCounter := 0
+				hasCommits := false
+				if beadID != "" && (action == "re-dispatch" || action == "escalate") {
+					hasCommits = hasPartialProgress(ws.sessionID)
+
+					if initiativeID != "" {
+						_ = p.QueryRow(ctx, `SELECT COALESCE(heal_counter, 0) FROM portfolio.initiative WHERE id = $1`, initiativeID).Scan(&currentHealCounter)
+					}
+
+					if hasCommits {
+						// Newman-Note: Reset heal counter to 0 on partial progress
+						currentHealCounter = 0
+						if !dryRun && initiativeID != "" {
+							_, _ = p.Exec(ctx, `UPDATE portfolio.initiative SET heal_counter = 0 WHERE id = $1`, initiativeID)
+							// Log Reset event
+							payloadMap := map[string]any{
+								"workspace_id":     ws.id,
+								"workspace_name":   ws.name,
+								"classification":   class,
+								"proposed_action":  "heal_counter_reset",
+								"heal_counter":     0,
+								"partial_progress": true,
+							}
+							payloadBytes, _ := json.Marshal(payloadMap)
+							_, _ = p.Exec(ctx, `
+								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+								VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+							`, initiativeID, string(payloadBytes))
+						}
+					} else {
+						// No progress (0 commits, stagnant failure) -> Increment heal counter
+						if !dryRun {
+							if initiativeID != "" {
+								_, _ = p.Exec(ctx, `UPDATE portfolio.initiative SET heal_counter = COALESCE(heal_counter, 0) + 1 WHERE id = $1`, initiativeID)
+								_ = p.QueryRow(ctx, `SELECT COALESCE(heal_counter, 0) FROM portfolio.initiative WHERE id = $1`, initiativeID).Scan(&currentHealCounter)
+							} else {
+								currentHealCounter++
+							}
+						} else {
+							// Dry-run simulation of increment
+							currentHealCounter++
+						}
+
+						// If limit N=2 is reached, STOP and escalate
+						if currentHealCounter >= 2 {
+							action = "escalate"
+						}
+					}
+				}
+
 				fmt.Printf("Workspace ID: %s\n", ws.id)
 				fmt.Printf("Name/Branch:  %s\n", ws.name)
 				fmt.Printf("Bead ID:      %s\n", beadID)
 				fmt.Printf("Class:        %s\n", class)
 				fmt.Printf("Action:       %s\n", action)
+				if beadID != "" {
+					fmt.Printf("Heal-Counter: %d\n", currentHealCounter)
+					fmt.Printf("Has Commits:  %t\n", hasCommits)
+				}
+
+				// Execute Mutations if active mode
+				if !dryRun && beadID != "" {
+					sp, err := solartownPool()
+					if err == nil {
+						if action == "close-as-done" {
+							_, _ = sp.Exec(ctx, "UPDATE beads.issues SET status='closed', closed_at=now() WHERE id=$1", beadID)
+							fmt.Printf(" -> Executed: Closed bead %s as already done in beads DB\n", beadID)
+						} else if action == "re-dispatch" {
+							// 1. Update the bead description with the diagnosis-informed/re-scoped prompt
+							diagPrompt := fmt.Sprintf("\n\n[SAGE HEAL - ATTEMPT %d]\nDiagnosis: The last coding agent run failed with no commits (exit code 1). This is a stagnant failure. Please re-analyze the workspace setup, ensure your implementation is complete and correct, make at least one commit, and verify before completing.", currentHealCounter)
+							_, _ = sp.Exec(ctx, "UPDATE beads.issues SET description = description || $1 WHERE id = $2", diagPrompt, beadID)
+							fmt.Printf(" -> Executed: Appended diagnosis to bead %s description\n", beadID)
+
+							// 2. Query rig from beads database
+							var rig string
+							_ = sp.QueryRow(ctx, "SELECT rig FROM beads.issues WHERE id=$1 AND deleted_at IS NULL", beadID).Scan(&rig)
+							if rig == "" {
+								rig = "stack" // fallback
+							}
+
+							// 3. Trigger re-dispatch via gt sling
+							fmt.Printf(" -> Executed: Re-dispatching bead %s on rig %s via gt sling...\n", beadID, rig)
+							slingCmd := exec.Command("gt", "sling", beadID, rig)
+							if out, err := slingCmd.CombinedOutput(); err != nil {
+								fmt.Fprintf(os.Stderr, "  ✗ failed gt sling: %v\nOutput: %s\n", err, out)
+							} else {
+								fmt.Printf("  ✓ Successfully re-dispatched via gt sling\n")
+							}
+						}
+					}
+				}
 
 				// Logging Board Event on the Initiative of the Bead
-				if beadID != "" {
-					// 1. Get initiative_id from portfolio.initiative_link
-					var initiativeID string
-					err := p.QueryRow(ctx, `SELECT initiative_id FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1`, beadID).Scan(&initiativeID)
-					if err != nil {
-						if err == pgx.ErrNoRows {
-							fmt.Printf(" -> Warning: No initiative linked for bead %s\n", beadID)
-						} else {
-							fmt.Fprintf(os.Stderr, " -> Error fetching initiative: %v\n", err)
+				if initiativeID != "" {
+					// Check if the event already exists for this workspace ID and action to avoid duplicates
+					var exists bool
+					err := p.QueryRow(ctx, `
+						SELECT EXISTS(
+							SELECT 1 FROM portfolio.initiative_event 
+							WHERE initiative_id = $1 AND kind = 'sage_action' 
+							  AND (payload->>'workspace_id') = $2 
+							  AND (payload->>'proposed_action') = $3
+						)
+					`, initiativeID, ws.id, action).Scan(&exists)
+					if err == nil && !exists {
+						// Insert the new sage_action board event
+						payloadMap := map[string]any{
+							"workspace_id":     ws.id,
+							"workspace_name":   ws.name,
+							"classification":   class,
+							"proposed_action":  action,
+							"heal_counter":     currentHealCounter,
+							"partial_progress": hasCommits,
+							"dry_run":          dryRun,
 						}
-					} else {
-						// 2. Check if the event already exists for this workspace ID to avoid duplicates (idempotency check)
-						var exists bool
-						err = p.QueryRow(ctx, `
-							SELECT EXISTS(
-								SELECT 1 FROM portfolio.initiative_event 
-								WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
-							)
-						`, initiativeID, ws.id).Scan(&exists)
-						if err != nil {
-							fmt.Fprintf(os.Stderr, " -> Error checking existing events: %v\n", err)
-						} else if exists {
-							fmt.Printf(" -> Info: Board-Event (sage_action) already logged for Workspace %s on initiative %s\n", ws.id, initiativeID)
-						} else {
-							// 3. Insert the new sage_action board event
-							payloadMap := map[string]any{
-								"workspace_id":     ws.id,
-								"workspace_name":   ws.name,
-								"classification":   class,
-								"proposed_action":  action,
-								"dry_run":          true,
-							}
-							payloadBytes, _ := json.Marshal(payloadMap)
+						payloadBytes, _ := json.Marshal(payloadMap)
 
-							_, err = p.Exec(ctx, `
-								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
-								VALUES ($1, 'sage_action', 'sage', $2, 'sage')
-							`, initiativeID, string(payloadBytes))
-							if err != nil {
-								fmt.Fprintf(os.Stderr, " -> Error logging Board-Event: %v\n", err)
-							} else {
-								fmt.Printf(" -> Success: Logged Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
-							}
+						_, err = p.Exec(ctx, `
+							INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+							VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+						`, initiativeID, string(payloadBytes))
+						if err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error logging Board-Event: %v\n", err)
+						} else {
+							fmt.Printf(" -> Success: Logged Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
 						}
 					}
 				}
@@ -3229,4 +3334,68 @@ func cmdSage() *cobra.Command {
 			}
 		},
 	}
+	c.Flags().BoolVar(&dryRun, "dry-run", true, "Dry-run report only (no mutations)")
+	return c
+}
+
+func formatUUID(hexStr string) string {
+	hexStr = strings.ToLower(hexStr)
+	if len(hexStr) != 32 {
+		return hexStr
+	}
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hexStr[0:8],
+		hexStr[8:12],
+		hexStr[12:16],
+		hexStr[16:20],
+		hexStr[20:32])
+}
+
+func hasPartialProgress(sessionHex string) bool {
+	if sessionHex == "" {
+		return false
+	}
+	sessionUUID := formatUUID(sessionHex)
+	if sessionUUID == "" {
+		return false
+	}
+	sessionDir := filepath.Join("/root/.local/share/vibe-kanban/sessions", sessionUUID[:2], sessionUUID)
+
+	// Check if the directory exists
+	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
+		return false
+	}
+
+	// Find the git repository path inside sessionDir
+	var gitRepoPath string
+	err := filepath.Walk(sessionDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && info.Name() == ".git" {
+			gitRepoPath = filepath.Dir(path)
+			return filepath.SkipDir // Stop walking inside .git
+		}
+		return nil
+	})
+	if err != nil || gitRepoPath == "" {
+		return false
+	}
+
+	// Run git log origin/main..HEAD --oneline to see if there are any commits
+	cmd := exec.Command("git", "-C", gitRepoPath, "log", "origin/main..HEAD", "--oneline")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		// Fallback: If origin/main doesn't exist, check git log HEAD -n 5 or similar
+		// But in a proper clone, origin/main should exist. Let's return false on error or try fallback:
+		cmdFallback := exec.Command("git", "-C", gitRepoPath, "log", "-n", "1")
+		if errFb := cmdFallback.Run(); errFb != nil {
+			return false
+		}
+		return true // assume some commits if log -n 1 succeeds and main isn't there
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	return len(lines) > 0 && lines[0] != ""
 }
