@@ -61,3 +61,21 @@ If the bead is unlinked, it is tracked in `portfolio.unlinked_item` as part of t
 ## 2. Verification and Reproducibility
 
 An end-to-end integration test is maintained in `tools/portfolio/master-kanban/identity_join_key_spike_test.go` to guarantee that this multi-space join-key remains stable and functional. It dynamically finds running workspaces on the host or spins up a temporary real background process to verify the complete pipeline under real runtime conditions.
+
+---
+
+## 3. Resolving R3/R4 with the Join Key
+
+The Three-Space Identity Join Key is a foundational mechanism for implementing the **R3 (WIP-Limits & Pull-Regel)** and **R4 (Live Capacity indicator)** features defined in the Deck Operationalisierung PRD:
+
+### R3: WIP-Limits & Pull-Regel
+- **The Problem**: To enforce WIP limits per company/Firma lane (e.g., `now` stage max 3 cards) and dynamically pull the top card from `soon` to `now` when an active slot opens up, the system must know which initiatives are actively running on the host.
+- **The Solution**: The system reads the active process tree (PIDs), uses the Join Key to resolve each PID to its parent Initiative Card, and determines the set of actively executing Initiatives. This ensures that the WIP limit is calculated from the ground truth of running processes, allowing accurate automated "pull" transitions without risking double-dispatch or desynchronized state.
+
+### R4: Kapazitätsanzeige (Live Capacity)
+- **The Problem**: The header of each company lane must display live capacity info (e.g. `🟢 N Polecats frei · M vk-Slots`) representing how many execution slots are currently available. 
+- **The Solution**: To calculate `M` (available vibe-kanban slots = pool limit - active processes), the system must determine how many processes are running for each Provider/Firma. 
+  1. The Join Key resolves `/proc/<PID>/cgroup` to find the **Slice** and **Provider/Firma** (Space 1).
+  2. It maps the PID to the **Workspace Name/Bead ID** (Space 2 & 3).
+  3. By aggregating these active processes, the system dynamically counts how many slots are occupied per company. The UI can subtract this count from the pool limit to display real-time, stateless, and self-healing capacity metrics (e.g., if a workspace process crashes or is killed on the host, the capacity automatically increases).
+
