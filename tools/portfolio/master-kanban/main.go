@@ -1726,6 +1726,86 @@ func cmdServe() *cobra.Command {
 			// Start background listeners
 			startStageChangeListener(p)
 			startProposalAgentListener(p)
+			startSageSteward(p)
+
+			// GET /api/sage/status
+			http.HandleFunc("/api/sage/status", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				var lastRun time.Time
+				var status string
+				var errMsg *string
+				err := p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.sage_status WHERE id = 'sage-steward'`).
+					Scan(&lastRun, &status, &errMsg)
+				if err != nil {
+					lastRun = time.Now()
+					status = "unknown"
+				}
+
+				// If last run is older than 30 seconds, it's an alarm!
+				if time.Since(lastRun) > 30*time.Second {
+					status = "alarm"
+				}
+
+				dangling, err := getDanglingWorkspaces()
+				if err != nil {
+					dangling = []DanglingWorkspace{}
+				}
+
+				resp := map[string]any{
+					"last_run":          lastRun,
+					"status":            status,
+					"error_message":     errMsg,
+					"dangling_count":    len(dangling),
+					"dangling_baseline": 4,
+					"outage_simulated":  sageOutageSimulated,
+					"dangling_workspaces": dangling,
+				}
+				json.NewEncoder(w).Encode(resp)
+			})
+
+			// POST /api/sage/simulate-outage
+			http.HandleFunc("/api/sage/simulate-outage", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+
+				var body struct {
+					Simulate bool `json:"simulate"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				if body.Simulate {
+					sageOutageSimulated = true
+					// Back-date last_run to 10 minutes ago to trigger alarm instantly
+					_, _ = p.Exec(r.Context(),
+						`UPDATE portfolio.sage_status 
+						 SET last_run = now() - interval '10 minutes', status = 'alarm' 
+						 WHERE id = 'sage-steward'`)
+				} else {
+					sageOutageSimulated = false
+					// Restore healthy status
+					_, _ = p.Exec(r.Context(),
+						`UPDATE portfolio.sage_status 
+						 SET last_run = now(), status = 'healthy', error_message = NULL 
+						 WHERE id = 'sage-steward'`)
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
 
 			// Bootup Catchup — both Pull-Regel and Proposal-Agent
 			firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
@@ -2845,3 +2925,118 @@ Gib deine Antwort EXACTLY als ein valides JSON-Array von Objekten im folgenden F
 	}
 	fmt.Printf("proposal-agent: successfully generated and stored %d proposals for %s\n", stored, firma)
 }
+
+var sageOutageSimulated bool
+
+type DanglingWorkspace struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+	EPStatus  string `json:"ep_status"`
+	ExitCode  *int   `json:"exit_code"`
+}
+
+func startSageSteward(p *pgxpool.Pool) {
+	// Initialize status in db on startup
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+		 VALUES ('sage-steward', now(), 'healthy', NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    error_message = EXCLUDED.error_message`)
+
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			if sageOutageSimulated {
+				fmt.Println("Sage Steward: Heartbeat skipped (outage simulated)")
+				continue
+			}
+
+			_, err := p.Exec(context.Background(),
+				`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+				 VALUES ('sage-steward', now(), 'healthy', NULL)
+				 ON CONFLICT (id) DO UPDATE SET
+				    last_run = EXCLUDED.last_run,
+				    status = EXCLUDED.status,
+				    error_message = EXCLUDED.error_message`)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to update sage steward status: %v\n", err)
+			}
+		}
+	}()
+}
+
+func getDanglingWorkspaces() ([]DanglingWorkspace, error) {
+	vkDB := envOr("VK_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
+		return []DanglingWorkspace{}, nil
+	}
+
+	query := `
+		SELECT 
+			hex(w.id) as ws_id,
+			COALESCE(w.name, ''),
+			w.created_at,
+			COALESCE(ep.status, ''),
+			ep.exit_code
+		FROM workspaces w
+		LEFT JOIN sessions s ON s.workspace_id = w.id
+		LEFT JOIN (
+			SELECT session_id, status, exit_code, max(created_at)
+			FROM execution_processes
+			WHERE run_reason = 'codingagent'
+			GROUP BY session_id
+		) ep ON ep.session_id = s.id
+		WHERE w.archived = 0
+		  AND ep.status IN ('completed', 'failed', 'killed')
+		  AND NOT EXISTS (
+			  SELECT 1 FROM pull_requests pr 
+			  WHERE pr.workspace_id = w.id AND pr.pr_status = 'open'
+		  )
+		  AND (strftime('%s', 'now') - strftime('%s', w.created_at)) > 43200
+		ORDER BY w.created_at DESC;
+	`
+
+	cmd := exec.Command("sqlite3", "-readonly", "-separator", "\x1f", vkDB, query)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("sqlite query workspaces: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var result []DanglingWorkspace
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\x1f")
+		if len(parts) < 5 {
+			continue
+		}
+
+		wsID := parts[0]
+		name := parts[1]
+		createdAt := parts[2]
+		epStatus := parts[3]
+		var exitCode *int
+		if parts[4] != "" && parts[4] != "null" {
+			var val int
+			if _, err := fmt.Sscanf(parts[4], "%d", &val); err == nil {
+				exitCode = &val
+			}
+		}
+
+		result = append(result, DanglingWorkspace{
+			ID:        wsID,
+			Name:      name,
+			CreatedAt: createdAt,
+			EPStatus:  epStatus,
+			ExitCode:  exitCode,
+		})
+	}
+
+	return result, nil
+}
+

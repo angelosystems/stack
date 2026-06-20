@@ -66,6 +66,109 @@
     <!-- ════ BOARD-VIEW (Portfolio, wie gehabt + Plan-Baum pro Karte) ════ -->
     <template x-if="view==='board'">
       <div class="space-y-6" x-init="$nextTick(() => initFirmaSort($el))">
+        <!-- 🧓 Sage Steward & Dangling Workspaces Dashboard (P4.1, SC6, R-E) -->
+        <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6 divide-y md:divide-y-0 md:divide-x divide-slate-200">
+            
+            <!-- Sage Liveness Heartbeat -->
+            <div class="space-y-4 pr-0 md:pr-6">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-xl">🧓</span>
+                  <h3 class="font-bold text-slate-800 text-sm tracking-wide uppercase">Sage Steward Liveness</h3>
+                </div>
+                <span x-show="sageStatus.status === 'healthy'" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                  <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  HEALTHY
+                </span>
+                <span x-show="sageStatus.status === 'alarm'" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200 animate-bounce">
+                  <span class="h-2 w-2 rounded-full bg-red-600"></span>
+                  🚨 ALARM / OUTAGE
+                </span>
+              </div>
+              
+              <div class="space-y-1.5 text-xs text-slate-600">
+                <div class="flex justify-between">
+                  <span>Letzter Heartbeat:</span>
+                  <span class="font-mono font-medium" x-text="sageStatus.last_run ? fmtDateTime(sageStatus.last_run) : 'Nie'"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>Status im Backend:</span>
+                  <span class="font-semibold" :class="sageStatus.status === 'alarm' ? 'text-red-600 font-bold' : 'text-emerald-600'" x-text="sageStatus.status"></span>
+                </div>
+                <div x-show="sageStatus.error_message" class="bg-red-50 text-red-700 p-2 rounded border border-red-100 font-mono text-[10px]" x-text="sageStatus.error_message"></div>
+              </div>
+
+              <div class="pt-2 flex items-center gap-2">
+                <button x-show="!sageStatus.outage_simulated" @click="simulateSageOutage(true)" class="text-xs px-3 py-1.5 rounded font-semibold text-white bg-red-500 hover:bg-red-600 transition shadow-sm">
+                  ⚠️ Ausfall simulieren
+                </button>
+                <button x-show="sageStatus.outage_simulated" @click="simulateSageOutage(false)" class="text-xs px-3 py-1.5 rounded font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition shadow-sm">
+                  ✅ Simulation beenden
+                </button>
+                <span class="text-[10px] text-slate-400 font-italic" x-show="sageStatus.outage_simulated">(Lauf blockiert, Status altert)</span>
+              </div>
+            </div>
+
+            <!-- Dangling Workspaces Metric -->
+            <div class="space-y-4 pt-6 md:pt-0 md:pl-6">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-xl">📊</span>
+                  <h3 class="font-bold text-slate-800 text-sm tracking-wide uppercase">Dangling Workspaces (SC6)</h3>
+                </div>
+                <span class="bg-slate-100 text-slate-700 text-xs px-2.5 py-0.5 rounded-full font-bold">
+                  Baseline: 4
+                </span>
+              </div>
+
+              <div class="grid grid-cols-2 gap-4">
+                <div class="bg-slate-50 border border-slate-100 rounded-lg p-3 text-center">
+                  <div class="text-[10px] font-semibold text-slate-500 uppercase">Aktuelle Anzahl</div>
+                  <div class="text-3xl font-black text-slate-800 mt-1" x-text="sageStatus.dangling_count"></div>
+                </div>
+                <div class="bg-slate-50 border border-slate-100 rounded-lg p-3 text-center flex flex-col justify-center">
+                  <div class="text-[10px] font-semibold text-slate-500 uppercase">Trend gegen ~0</div>
+                  <div class="flex items-center justify-center gap-2 mt-1">
+                    <span class="text-xs font-mono font-bold text-slate-400">4</span>
+                    <span class="text-slate-400">➔</span>
+                    <span class="text-lg font-bold" :class="sageStatus.dangling_count === 0 ? 'text-emerald-600' : (sageStatus.dangling_count < 4 ? 'text-amber-600' : 'text-red-500')" x-text="sageStatus.dangling_count"></span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Collapsible Dangling Workspaces List -->
+              <div x-data="{ open: false }">
+                <button @click="open = !open" :disabled="!sageStatus.dangling_count" class="w-full text-left text-xs font-medium text-slate-500 hover:text-slate-700 flex items-center justify-between py-1 border-b border-slate-100 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <span x-text="open ? '▲ Liste ausblenden' : '▼ Liste anzeigen (' + sageStatus.dangling_count + ')'"></span>
+                  <span class="font-mono text-[10px]" x-show="sageStatus.dangling_count">(archived=0, terminal, kein PR, >12h)</span>
+                </button>
+                
+                <div x-show="open && sageStatus.dangling_count" class="mt-2 space-y-2 max-h-48 overflow-y-auto pr-1">
+                  <template x-for="ws in sageStatus.dangling_workspaces" :key="ws.id">
+                    <div class="p-2 bg-slate-50 border border-slate-100 rounded text-[11px] flex items-center justify-between">
+                      <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-1.5 font-semibold text-slate-700">
+                          <span class="font-mono bg-slate-200 px-1 py-0.2 rounded text-[10px]" x-text="ws.id.slice(0, 8)"></span>
+                          <span class="truncate" x-text="ws.name"></span>
+                        </div>
+                        <div class="text-[10px] text-slate-400 mt-0.5">
+                          Erstellt: <span x-text="fmtDateTime(ws.created_at)"></span>
+                        </div>
+                      </div>
+                      <div class="flex items-center gap-2 ml-4">
+                        <span class="px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider uppercase font-mono bg-amber-100 text-amber-800" x-text="ws.ep_status"></span>
+                        <span class="font-mono bg-slate-200 px-1 rounded font-bold text-slate-600" x-text="ws.exit_code !== null ? 'exit ' + ws.exit_code : '—'"></span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
         <template x-for="f in orderedFirmas" :key="f.id">
           <section x-show="filter[f.id]" :data-firma="f.id" :class="'lane-stripe-' + f.id" class="bg-white rounded-lg shadow-sm">
             <header class="px-5 py-3 flex items-center justify-between border-b border-slate-200">
@@ -717,6 +820,7 @@ function liveKanban() {
     backlogRig: '',
     unlinkedItems: [],
     detectorStatus: { status: 'unknown', unreachable_rigs: [] },
+    sageStatus: { status: 'unknown', last_run: null, dangling_count: 0, dangling_baseline: 4, outage_simulated: false, dangling_workspaces: [] },
     lastFetched: '',
 
     dispatchOpen: false,
@@ -1073,6 +1177,7 @@ function liveKanban() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.cards = await r.json();
         this.apiOk = true;
+        await this.loadSageStatus();
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
         if (this.view === 'unlinked') await this.loadUnlinked();
@@ -1113,6 +1218,33 @@ function liveKanban() {
         danger: 'bg-red-100 text-red-800 border border-red-200',
         unknown: 'bg-slate-100 text-slate-500',
       }[status] || 'bg-slate-100 text-slate-500';
+    },
+    async loadSageStatus() {
+      try {
+        const r = await fetch(this.apiBase + '/api/sage/status');
+        if (r.ok) {
+          this.sageStatus = await r.json();
+        }
+      } catch (e) {
+        console.error('sage status fetch error:', e);
+      }
+    },
+    async simulateSageOutage(simulate) {
+      try {
+        const r = await fetch(this.apiBase + '/api/sage/simulate-outage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ simulate })
+        });
+        if (r.ok) {
+          this.showToast(simulate ? 'Outage simuliert!' : 'Outage Simulation beendet.', 'success');
+          await this.loadSageStatus();
+        } else {
+          this.showToast('Fehler beim Ändern der Simulation', 'error');
+        }
+      } catch (e) {
+        this.showToast('Fehler: ' + e.message, 'error');
+      }
     },
 
     // ── Plan-Baum (P4.1) ──
