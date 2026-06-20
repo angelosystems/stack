@@ -47,7 +47,7 @@ func TestHasPartialProgress_WithRepo(t *testing.T) {
 
 	sessionID := "1234567890abcdef1234567890abcdef"
 	sessionUUID := formatUUID(sessionID)
-	
+
 	// Create structured sessions/<prefix>/<uuid> directory
 	prefix := sessionUUID[:2]
 	sessionPath := filepath.Join(tmpDir, prefix, sessionUUID)
