@@ -199,9 +199,9 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 		reportBuilder.WriteString(fmt.Sprintf("   Klasse:    %s\n", sageClass))
 		reportBuilder.WriteString(fmt.Sprintf("   Aktion:    %s\n\n", proposedAction))
 
-		// 4. Log Board-Event on the Initiative if a bead is associated
+		// 4. Log Board-Event on the Initiative (using a fallback if no bead/initiative is associated)
+		var initiativeID string
 		if beadID != "" {
-			var initiativeID string
 			// Look up initiative linked to this bead
 			err := p.QueryRow(ctx, `
 				SELECT initiative_id FROM portfolio.initiative_link 
@@ -214,40 +214,42 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 					SELECT id FROM portfolio.initiative WHERE id = $1
 				`, beadID).Scan(&initiativeID)
 			}
+		}
 
-			if initiativeID != "" {
-				// Check for idempotence: does an identical sage_action event already exist for this workspace?
-				var exists bool
-				err = p.QueryRow(ctx, `
-					SELECT EXISTS (
-						SELECT 1 FROM portfolio.initiative_event 
-						WHERE initiative_id = $1 AND kind = 'sage_action' 
-						  AND payload->>'workspace_id' = $2
-						  AND payload->>'classification' = $3
-					)
-				`, initiativeID, ws.id, sageClass).Scan(&exists)
+		if initiativeID == "" {
+			initiativeID = "sk-vk-sage-workspace-steward"
+		}
 
-				if err == nil && !exists {
-					payloadMap := map[string]any{
-						"workspace_id":    ws.id,
-						"workspace_name":  ws.name,
-						"bead_id":         beadID,
-						"classification":  sageClass,
-						"proposed_action": proposedAction,
-						"failed_count":    failedCount,
-					}
-					payloadBytes, _ := json.Marshal(payloadMap)
+		// Check for idempotence: does an identical sage_action event already exist for this workspace?
+		var exists bool
+		err := p.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM portfolio.initiative_event 
+				WHERE initiative_id = $1 AND kind = 'sage_action' 
+				  AND payload->>'workspace_id' = $2
+				  AND payload->>'classification' = $3
+			)
+		`, initiativeID, ws.id, sageClass).Scan(&exists)
 
-					_, err = p.Exec(ctx, `
-						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
-						VALUES ($1, 'sage_action', 'vk', $2::jsonb, 'vk-sage')
-					`, initiativeID, string(payloadBytes))
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error writing event for workspace %s: %v\n", ws.id, err)
-					} else {
-						fmt.Printf("✓ Emitted sage_action event on initiative %s for workspace %s (%s)\n", initiativeID, ws.id[:8], sageClass)
-					}
-				}
+		if err == nil && !exists {
+			payloadMap := map[string]any{
+				"workspace_id":    ws.id,
+				"workspace_name":  ws.name,
+				"bead_id":         beadID,
+				"classification":  sageClass,
+				"proposed_action": proposedAction,
+				"failed_count":    failedCount,
+			}
+			payloadBytes, _ := json.Marshal(payloadMap)
+
+			_, err := p.Exec(ctx, `
+				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				VALUES ($1, 'sage_action', 'vk', $2::jsonb, 'vk-sage')
+			`, initiativeID, string(payloadBytes))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing event for workspace %s: %v\n", ws.id, err)
+			} else {
+				fmt.Printf("✓ Emitted sage_action event on initiative %s for workspace %s (%s)\n", initiativeID, ws.id[:8], sageClass)
 			}
 		}
 	}
