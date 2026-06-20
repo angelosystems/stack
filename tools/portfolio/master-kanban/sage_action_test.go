@@ -3,13 +3,14 @@ package main
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-<<<<<<< HEAD
 func TestCheckDoneProbe_PostgresCheck(t *testing.T) {
 	dsn := os.Getenv("PORTFOLIO_DSN")
 	if dsn == "" {
@@ -18,19 +19,6 @@ func TestCheckDoneProbe_PostgresCheck(t *testing.T) {
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)
-=======
-func TestSageDryRun_SC4(t *testing.T) {
-	testDSN := os.Getenv("PORTFOLIO_DSN")
-	if testDSN == "" {
-		testDSN = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
-
-	// Assign the package-level variable dsn so connect() uses it
-	dsn = testDSN
-
-	ctx := context.Background()
-	p, err := pgxpool.New(ctx, testDSN)
->>>>>>> polecat/flint/st-ekrxa@mqmal5fh
 	if err != nil {
 		t.Skip("skipping integration test; db not reachable:", err)
 	}
@@ -144,5 +132,126 @@ func TestSageDryRun_SC4(t *testing.T) {
 		} else {
 			t.Logf("✓ Verified: Board-Event (sage_action) logged for workspace %s", wsID)
 		}
+	}
+}
+
+func TestSageAction_HealAndReset(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	testBeadID := "st-test-sage-heal-reset"
+	testWSID := "05021F1F765846E299B6A36B39DC39F8"
+
+	// Clean up any existing state
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id=$1", testBeadID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_heal_count WHERE bead_id=$1", testBeadID)
+
+	defer func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id=$1", testBeadID)
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_heal_count WHERE bead_id=$1", testBeadID)
+	}()
+
+	actionFn := func(tx pgx.Tx, healCount int) error {
+		return nil
+	}
+
+	// 1. Initial execution with hasPartialProgress = false (should increment heal counter to 1)
+	acquired, err := ExecuteSageAction(ctx, p, testBeadID, testWSID, "sage-test-actor", false, actionFn)
+	if err != nil {
+		t.Fatalf("failed to execute first sage action: %v", err)
+	}
+	if !acquired {
+		t.Errorf("expected to acquire lease on first try")
+	}
+
+	var count int
+	err = p.QueryRow(ctx, "SELECT heal_count FROM portfolio.sage_heal_count WHERE bead_id=$1", testBeadID).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query heal count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected heal count to be 1, got %d", count)
+	}
+
+	// 2. Second execution with hasPartialProgress = false (should increment heal counter to 2)
+	// Clear the lease lock so we can run again immediately
+	_, _ = p.Exec(ctx, "UPDATE portfolio.sage_lease SET locked_until=NOW() - INTERVAL '1 minute' WHERE bead_id=$1", testBeadID)
+
+	acquired, err = ExecuteSageAction(ctx, p, testBeadID, testWSID, "sage-test-actor", false, actionFn)
+	if err != nil {
+		t.Fatalf("failed to execute second sage action: %v", err)
+	}
+	if !acquired {
+		t.Errorf("expected to acquire lease on second try")
+	}
+
+	err = p.QueryRow(ctx, "SELECT heal_count FROM portfolio.sage_heal_count WHERE bead_id=$1", testBeadID).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query heal count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected heal count to be 2, got %d", count)
+	}
+
+	// 3. Third execution with hasPartialProgress = true (should reset heal counter to 0)
+	// Clear the lease lock
+	_, _ = p.Exec(ctx, "UPDATE portfolio.sage_lease SET locked_until=NOW() - INTERVAL '1 minute' WHERE bead_id=$1", testBeadID)
+
+	acquired, err = ExecuteSageAction(ctx, p, testBeadID, testWSID, "sage-test-actor", true, actionFn)
+	if err != nil {
+		t.Fatalf("failed to execute third sage action: %v", err)
+	}
+	if !acquired {
+		t.Errorf("expected to acquire lease on third try")
+	}
+
+	err = p.QueryRow(ctx, "SELECT heal_count FROM portfolio.sage_heal_count WHERE bead_id=$1", testBeadID).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query heal count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected heal count to be reset to 0, got %d", count)
+	}
+}
+
+func TestBuildDiagnosisPrompt(t *testing.T) {
+	// Test yozd prompt
+	promptYozd := buildDiagnosisPrompt(1, true, false)
+	if !strings.Contains(promptYozd, "Heal Attempt #1") {
+		t.Errorf("expected prompt to contain Heal Attempt #1, got: %s", promptYozd)
+	}
+	if !strings.Contains(promptYozd, "Backlog-Tab hat heute nur einen Triage-Knopf") {
+		t.Errorf("expected prompt to contain yozd-specific diagnosis, got: %s", promptYozd)
+	}
+
+	// Test 1bpf prompt
+	prompt1bpf := buildDiagnosisPrompt(2, false, true)
+	if !strings.Contains(prompt1bpf, "Heal Attempt #2") {
+		t.Errorf("expected prompt to contain Heal Attempt #2, got: %s", prompt1bpf)
+	}
+	if !strings.Contains(prompt1bpf, "cockpit hat firma-Stripes aber nicht die R5 Lane-Badges") {
+		t.Errorf("expected prompt to contain 1bpf-specific diagnosis, got: %s", prompt1bpf)
+	}
+
+	// Test generic fallback prompt
+	promptGeneric := buildDiagnosisPrompt(3, false, false)
+	if !strings.Contains(promptGeneric, "Heal Attempt #3") {
+		t.Errorf("expected prompt to contain Heal Attempt #3, got: %s", promptGeneric)
+	}
+	if !strings.Contains(promptGeneric, "The previous run failed with zero commits") {
+		t.Errorf("expected prompt to contain generic diagnosis, got: %s", promptGeneric)
 	}
 }

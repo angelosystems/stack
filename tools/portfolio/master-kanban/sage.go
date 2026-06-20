@@ -15,9 +15,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ExecuteSageAction attempts to acquire the lease, increment the heal counter,
+// ExecuteSageAction attempts to acquire the lease, increment (or reset) the heal counter,
 // and execute the given action function atomically in a transaction.
-func ExecuteSageAction(ctx context.Context, pool *pgxpool.Pool, beadID string, workspaceID string, actor string, actionFn func(tx pgx.Tx, healCount int) error) (bool, error) {
+// Reset-Semantik (Newman-Note): If there is partial progress (hasPartialProgress is true),
+// the heal counter is reset to 0 to prevent starvation on hard tasks making incremental progress.
+func ExecuteSageAction(ctx context.Context, pool *pgxpool.Pool, beadID string, workspaceID string, actor string, hasPartialProgress bool, actionFn func(tx pgx.Tx, healCount int) error) (bool, error) {
 	// Start a transaction
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -59,7 +61,12 @@ func ExecuteSageAction(ctx context.Context, pool *pgxpool.Pool, beadID string, w
 	// 4. Calculate new heal counter and lock duration
 	// Lease expires in 5 minutes by default to avoid orphan locks if process crashes
 	newLockedUntil := now.Add(5 * time.Minute)
-	newHealCounter := healCounter + 1
+	var newHealCounter int
+	if hasPartialProgress {
+		newHealCounter = 0
+	} else {
+		newHealCounter = healCounter + 1
+	}
 
 	// 5. Update the sage_lease table
 	_, err = tx.Exec(ctx, `
@@ -184,6 +191,28 @@ func cmdSage() *cobra.Command {
 				isYozd := strings.Contains(strings.ToLower(ws.name), "st-yozd")
 				is1bpf := strings.Contains(strings.ToLower(ws.name), "st-1bpf")
 
+				// Detect partial progress for this workspace via execution_process_repo_states
+				hasPartialProgress := false
+				progressQuery := fmt.Sprintf(`
+					SELECT EXISTS (
+						SELECT 1 
+						FROM execution_processes ep
+						JOIN sessions s ON s.workspace_id = X'%s'
+						JOIN execution_process_repo_states eprs ON eprs.execution_process_id = ep.id
+						WHERE ep.session_id = s.id
+						  AND ep.run_reason = 'codingagent'
+						  AND eprs.before_head_commit != eprs.after_head_commit
+					);
+				`, ws.id)
+				sqliteProgressCmd := exec.Command("sqlite3", "-readonly", vkDB, progressQuery)
+				var progressOut bytes.Buffer
+				sqliteProgressCmd.Stdout = &progressOut
+				if err := sqliteProgressCmd.Run(); err == nil {
+					if strings.TrimSpace(progressOut.String()) == "1" {
+						hasPartialProgress = true
+					}
+				}
+
 				var sageClass string
 				var proposedAction string
 				var reason string
@@ -195,18 +224,33 @@ func cmdSage() *cobra.Command {
 					reason = "Worktree kein gültiges Git-Repo, keine Bead-Zuordnung (Workspace unvollständig/setup-fail)."
 				} else {
 					beadID = extractBeadID(ws.name)
+
+					// Query persistent current heal count from database to decide on retry/escalate budget
+					currentHealCount := 0
+					_ = p.QueryRow(ctx, `
+						SELECT heal_count FROM portfolio.sage_heal_count WHERE bead_id = $1
+					`, beadID).Scan(&currentHealCount)
+
 					if isIb5e {
 						sageClass = "no-commits-exit1 + Ziel schon erledigt"
 						proposedAction = "close-as-done"
 						reason = "Detox-Konzept ist bereits im master-kanban-Backend umgesetzt (st-ib5e.status='closed'). Workspace archivieren und Zombie-Loop stoppen."
-					} else if isYozd {
+					} else {
+						// Open work - determine action based on retry budget
 						sageClass = "no-commits-exit1 + Arbeit echt offen"
-						proposedAction = "escalate"
-						reason = "Retry-Budget verbraucht (N>2): 4-5x re-dispatcht und jedes Mal fehlgeschlagen. UI-Lücke verifiziert: Backlog-Tab hat heute nur einen Triage-Knopf statt der drei R1-Buttons."
-					} else if is1bpf {
-						sageClass = "no-commits-exit1 + Arbeit echt offen"
-						proposedAction = "escalate"
-						reason = "Retry-Budget verbraucht (N>2): 4-5x re-dispatcht und jedes Mal fehlgeschlagen. UI-Lücke verifiziert: cockpit hat firma-Stripes aber nicht die R5 Lane-Badges."
+						if currentHealCount >= 2 {
+							proposedAction = "escalate"
+							if isYozd {
+								reason = fmt.Sprintf("Retry-Budget verbraucht (Heal-Counter=%d): 4-5x re-dispatcht und jedes Mal fehlgeschlagen. UI-Lücke verifiziert: Backlog-Tab hat heute nur einen Triage-Knopf statt der drei R1-Buttons.", currentHealCount)
+							} else if is1bpf {
+								reason = fmt.Sprintf("Retry-Budget verbraucht (Heal-Counter=%d): 4-5x re-dispatcht und jedes Mal fehlgeschlagen. UI-Lücke verifiziert: cockpit hat firma-Stripes aber nicht die R5 Lane-Badges.", currentHealCount)
+							} else {
+								reason = fmt.Sprintf("Retry-Budget verbraucht (Heal-Counter=%d): fehlgeschlagen.", currentHealCount)
+							}
+						} else {
+							proposedAction = "re-dispatch"
+							reason = fmt.Sprintf("no-commits-exit1 + Arbeit echt offen (Heal-Counter=%d). Re-dispatch mit Fehlerdiagnose.", currentHealCount)
+						}
 					}
 				}
 
@@ -246,18 +290,50 @@ func cmdSage() *cobra.Command {
 							INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
 							VALUES ($1, 'sage_action', 'sage', $2, 'sage-steward')
 						`, initiativeID, payloadJSON)
-						return err
+						if err != nil {
+							return err
+						}
+
+						// If proposed action is re-dispatch, perform actual re-dispatch with a diagnosis-informed / re-scoped prompt
+						if proposedAction == "re-dispatch" {
+							diagnosisPrompt := buildDiagnosisPrompt(healCount, isYozd, is1bpf)
+							dispatchPayload := map[string]any{
+								"lane": "plan",
+								"note": diagnosisPrompt,
+							}
+							dispatchJSON, _ := json.Marshal(dispatchPayload)
+							_, err = tx.Exec(ctx, `
+								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+								VALUES ($1, 'dispatched', 'sage', $2, 'sage-steward')
+							`, initiativeID, dispatchJSON)
+							if err != nil {
+								return fmt.Errorf("failed to write dispatched event: %w", err)
+							}
+						}
+
+						// If proposed action is close-as-done, actually update the bead's status to closed in the beads database
+						if proposedAction == "close-as-done" {
+							sp, err := solartownPool()
+							if err == nil {
+								_, err = sp.Exec(ctx, "UPDATE beads.issues SET status='closed' WHERE id=$1", beadID)
+								if err != nil {
+									return fmt.Errorf("failed to update bead status to closed: %w", err)
+								}
+							}
+						}
+
+						return nil
 					}
 
-					// Try to execute Sage action atomically with lease
-					acquired, err := ExecuteSageAction(ctx, p, lockID, ws.id, "sage-steward", actionFn)
+					// Try to execute Sage action atomically with lease and hasPartialProgress reset semantics
+					acquired, err := ExecuteSageAction(ctx, p, lockID, ws.id, "sage-steward", hasPartialProgress, actionFn)
 					if err != nil {
 						fmt.Printf("  ❌ Fehler beim Ausführen der Sage-Aktion für Bead %s: %v\n", beadID, err)
 						continue
 					}
 
 					if acquired {
-						fmt.Printf("  ✓ Sage-Aktion erfolgreich ausgeführt: Lease erworben, Counter inkrementiert und Board-Event erfasst für Initiative: %s (Bead %s)\n", initiativeID, beadID)
+						fmt.Printf("  ✓ Sage-Aktion erfolgreich ausgeführt: Lease erworben, Counter aktualisiert (Fortschritt=%t) und Board-Event erfasst für Initiative: %s (Bead %s)\n", hasPartialProgress, initiativeID, beadID)
 					} else {
 						fmt.Printf("  ✓ Sage-Aktion übersprungen für Bead %s: Lease ist bereits aktiv (Kollisionsschutz greift).\n", beadID)
 					}
@@ -267,7 +343,7 @@ func cmdSage() *cobra.Command {
 						return nil
 					}
 
-					acquired, err := ExecuteSageAction(ctx, p, lockID, ws.id, "sage-steward", actionFn)
+					acquired, err := ExecuteSageAction(ctx, p, lockID, ws.id, "sage-steward", hasPartialProgress, actionFn)
 					if err != nil {
 						fmt.Printf("  ❌ Fehler beim Sichern des Setup-Fail-Workspaces %s: %v\n", ws.id[:8], err)
 						continue
@@ -419,4 +495,21 @@ func (s *SageDecisionEngine) Escalate(ctx context.Context, initiativeID string, 
 	fmt.Printf("[Sage Advisor-Signal/Mail] ESCALATION: Initiative %s eskaliert! Grund: %s\n", initiativeID, reason)
 
 	return nil
+}
+
+func buildDiagnosisPrompt(healCount int, isYozd, is1bpf bool) string {
+	var specificDiagnosis string
+	if isYozd {
+		specificDiagnosis = "UI-Lücke verifiziert: Backlog-Tab hat heute nur einen Triage-Knopf statt der drei R1-Buttons. Bitte implementieren Sie die drei fehlenden R1-Buttons im Backlog-Tab."
+	} else if is1bpf {
+		specificDiagnosis = "UI-Lücke verifiziert: cockpit hat firma-Stripes aber nicht die R5 Lane-Badges. Bitte implementieren Sie die fehlenden R5 Lane-Badges im Cockpit."
+	} else {
+		specificDiagnosis = "The previous run failed with zero commits (no-commits-exit1)."
+	}
+
+	return fmt.Sprintf(
+		"[vk-Sage] RE-DISPATCH (Heal Attempt #%d). Diagnosis: %s Instruction Re-scoping: Please ensure that you make logical, incremental commits before completing your work tree. Ensure tests are run and pass, and verify you are not stuck in an empty/idle loop.",
+		healCount,
+		specificDiagnosis,
+	)
 }
