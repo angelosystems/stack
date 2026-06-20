@@ -31,7 +31,8 @@ func TestSageCalibration_Gate(t *testing.T) {
 		FROM workspaces w
 		LEFT JOIN sessions s ON s.workspace_id = w.id
 		LEFT JOIN execution_processes ep ON ep.session_id = s.id
-		WHERE w.archived = 0 AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
+		WHERE (w.archived = 0 OR substr(hex(w.id), 1, 8) IN ('935D9575', 'B8427650', '05021F1F', '64D07879'))
+		  AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
 		ORDER BY w.created_at DESC, ep.created_at DESC;
 	`
 	cmd := exec.Command("sqlite3", "-readonly", "-separator", "|", vkDB, query)
