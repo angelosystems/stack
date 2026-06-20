@@ -148,7 +148,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdParseTranscripts())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -2074,6 +2074,17 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 
 		var canonicalRef, filePath string
 		if body.Lane == "plan" || body.Lane == "plan-deep" {
+			// Check capacity governor for 429 stress admission criterion
+			throttled, reason, err := IsProviderStressThrottled(r.Context(), "anthropic")
+			if err != nil {
+				http.Error(w, "stress check failed: "+err.Error(), 500)
+				return
+			}
+			if throttled {
+				http.Error(w, "Admission stress: "+reason, http.StatusTooManyRequests)
+				return
+			}
+
 			// Resolve target repository
 			repo, err := resolveTargetRepo(p, body.Id)
 			if err != nil {

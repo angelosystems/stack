@@ -141,3 +141,84 @@ func TestSageLeaseConcurrency(t *testing.T) {
 	// Clean up
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", beadID)
 }
+
+func TestExecuteSageActionConcurrency(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	beadID := "st-test-execute-concurrent-bead"
+
+	// 1. Clean up potential old test state
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", beadID)
+
+	// 2. Spawn 50 concurrent goroutines calling ExecuteSageAction on the same beadID
+	const numWorkers = 50
+	var successCount int64
+	var failureCount int64
+	var actionExecutions int64
+
+	var wg sync.WaitGroup
+	startChan := make(chan struct{})
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			// Wait for the starting gun
+			<-startChan
+
+			// Attempt to execute Sage Action
+			err := ExecuteSageAction(ctx, p, beadID, 10*time.Second, "concurrent-worker", func() error {
+				atomic.AddInt64(&actionExecutions, 1)
+				return nil
+			})
+			if err == nil {
+				atomic.AddInt64(&successCount, 1)
+			} else {
+				atomic.AddInt64(&failureCount, 1)
+			}
+		}(i)
+	}
+
+	// Trigger all goroutines simultaneously
+	close(startChan)
+	wg.Wait()
+
+	// 3. Exactly one worker must succeed, and all others must fail
+	if successCount != 1 {
+		t.Errorf("expected exactly 1 successful ExecuteSageAction execution, got %d", successCount)
+	}
+	if failureCount != numWorkers-1 {
+		t.Errorf("expected exactly %d failed executions, got %d", numWorkers-1, failureCount)
+	}
+
+	// 4. The action itself must have been executed exactly once
+	if actionExecutions != 1 {
+		t.Errorf("expected exactly 1 action execution, got %d", actionExecutions)
+	}
+
+	// 5. Final heal counter should be exactly 1
+	counter, err := GetHealCounter(ctx, p, beadID)
+	if err != nil {
+		t.Fatalf("failed to query heal counter: %v", err)
+	}
+	if counter != 1 {
+		t.Errorf("expected final heal counter to be 1, got %d", counter)
+	}
+
+	// Clean up
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", beadID)
+}
