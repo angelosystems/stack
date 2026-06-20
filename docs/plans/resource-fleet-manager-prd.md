@@ -72,7 +72,7 @@ Die Analyse des realen Mission-Control-Codes unter `/opt/missioncontrol/mission-
 
 Basierend auf der realen Implementierung wird **Push** als die kanonische Collector-Topologie für Solartown / Mission-Control festgelegt:
 
-*   **Entscheidung**: Der Collector (`infra-collector` / `angelo-infra-collector`) fungiert as aktiver **Publisher** und pusht System-KPIs direkt in denselben Store (PostgreSQL-Datenbank), den auch das Master-Kanban-Backend und nachgelagerte Tools lesen.
+*   **Entscheidung**: Der Collector (`infra-collector` / `angelo-infra-collector`) fungiert als aktiver **Publisher** und pusht System-KPIs direkt in denselben Store (PostgreSQL-Datenbank), den auch das Master-Kanban-Backend und nachgelagerte Tools lesen.
 *   **Begründung**:
     *   **Kompatibilität**: Die Infrastruktur besitzt mit `fabric.NewPublisher` bereits ein mächtiges Push-SDK. Eine Pull-Architektur würde das Hinzufügen von HTTP-Servern auf jedem Host, Port-Freigaben und Service-Discovery-Mechanismen erzwingen, was unnötige Komplexität erzeugt.
     *   **Netzwerk & Firewalls**: Push-Verbindungen erfordern nur ausgehende Verbindungen vom Host zum zentralen Postgres-Port (54330/5434), wodurch das Sicherheitskonzept einfach und robust bleibt.
@@ -113,7 +113,7 @@ Um die Effizienz der Host-Ressourcen zu wahren und Race-Conditions oder Messabwe
 1.  **Kanonischer Datensatz-Owner**:
     Der lokale `infra-collector` (oder `angelo-infra-collector`) ist der **exklusive, kanonische Owner** der Host-Ressourcen-Metriken.
 2.  **Kein Doppel-Read von `/proc`**:
-    Andere System-Komponenten — insbesondere der **Kapazitäts-Governor** (im Reactor-Sweep) and das **Cockpit (UI-Tab)** — dürfen `/proc/stat`, `/proc/meminfo` oder Speicherstatistiken **niemals selbst auslesen**. Alle Konsumenten müssen die vom Collector im zentralen Store hinterlegten Daten abfragen.
+    Andere System-Komponenten — insbesondere der **Kapazitäts-Governor** (im Reactor-Sweep) und das **Cockpit (UI-Tab)** — dürfen `/proc/stat`, `/proc/meminfo` oder Speicherstatistiken **niemals selbst auslesen**. Alle Konsumenten müssen die vom Collector im zentralen Store hinterlegten Daten abfragen.
 3.  **Konsumtion durch den Governor**:
     Der Kapazitäts-Governor liest das für seine Berechnungen nötige Speicherbudget (`MemAvailable` etc.) und CPU-Auslastung ausschließlich über SQL-Queries aus der zentralen Postgres-Datenbank (`kpi_events` oder äquivalente KPI-Tabellen).
 4.  **Konsumtion durch das Cockpit (Tab)**:
