@@ -148,7 +148,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdSteward())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -161,6 +161,47 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func countDanglingWorkspaces() (int, error) {
+	vkDB := envOr("VK_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
+		return 0, nil
+	}
+
+	query := `
+SELECT COUNT(*) FROM workspaces w
+WHERE w.archived = 0
+  AND w.id NOT IN (
+    SELECT s.workspace_id FROM sessions s
+    JOIN execution_processes e ON e.session_id = s.id
+    WHERE e.status = 'running'
+  )
+  AND w.id NOT IN (
+    SELECT pr.workspace_id FROM pull_requests pr
+    WHERE pr.pr_status = 'open'
+  )
+  AND w.created_at < datetime('now', '-24 hours');
+`
+
+	cmd := exec.Command("sqlite3", "-readonly", vkDB, query)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite3 failed: %w, output: %s", err, string(out))
+	}
+
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return 0, nil
+	}
+
+	var count int
+	_, err = fmt.Sscanf(trimmed, "%d", &count)
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
 }
 
 // actorFrom — SSO-User aus oauth2-proxy (nginx snippets/oauth2-require.conf)
@@ -1175,10 +1216,14 @@ func cmdServe() *cobra.Command {
 				err := p.QueryRow(r.Context(),
 					`SELECT last_run, status, unreachable_rigs FROM portfolio.detector_status WHERE id='leak-detector'`).
 					Scan(&lastRun, &status, &unreachableRigs)
-				if err != nil {
-					// Fallback if not run yet
+				if err == nil {
+					if !lastRun.IsZero() && time.Since(lastRun) > 5*time.Minute {
+						status = "danger"
+					}
+				} else {
+					// Fallback if not run yet or error
 					lastRun = time.Time{}
-					status = "unknown"
+					status = "danger"
 					unreachableRigs = []string{}
 				}
 
@@ -1200,10 +1245,16 @@ func cmdServe() *cobra.Command {
 				_ = p.QueryRow(r.Context(),
 					`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='vk_workspace'`).Scan(&unlinkedWorkspaces)
 
-				// 4. Calculate totals
+				// 3b. Query offline/unreachable rig statistics (Denominator Honesty)
+				var unlinkedRigs int
+				_ = p.QueryRow(r.Context(),
+					`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='rig'`).Scan(&unlinkedRigs)
+
+				// 4. Calculate totals (including offline/skipped rigs in denominator for honesty)
 				totalBeads := linkedBeadsRegular + linkedBeadsCatchall + unlinkedBeads
 				totalWorkspaces := linkedWorkspacesRegular + linkedWorkspacesCatchall + unlinkedWorkspaces
-				totalWorkItems := totalBeads + totalWorkspaces
+				totalRigs := unlinkedRigs
+				totalWorkItems := totalBeads + totalWorkspaces + totalRigs
 				linkedWorkItems := (linkedBeadsRegular + linkedBeadsCatchall) + (linkedWorkspacesRegular + linkedWorkspacesCatchall)
 				catchallWorkItems := linkedBeadsCatchall + linkedWorkspacesCatchall
 
@@ -1232,6 +1283,10 @@ func cmdServe() *cobra.Command {
 						"linked_catchall": linkedWorkspacesCatchall,
 						"unlinked":        unlinkedWorkspaces,
 						"total":           totalWorkspaces,
+					},
+					"rigs": map[string]any{
+						"unlinked": unlinkedRigs,
+						"total":    totalRigs,
 					},
 					"total_work_items":        totalWorkItems,
 					"linked_work_items":       linkedWorkItems,
@@ -1558,15 +1613,42 @@ func cmdServe() *cobra.Command {
 					 FROM portfolio.detector_status
 					 WHERE id = 'leak-detector'`).
 					Scan(&det.LastRun, &det.Status, &det.UnreachableRigs, &det.ErrorMessage)
-				if err != nil {
+				if err == nil {
+					if !det.LastRun.IsZero() && time.Since(det.LastRun) > 5*time.Minute {
+						det.Status = "danger"
+					}
+				} else {
 					// It's possible the status hasn't been written yet or table is empty.
-					det.Status = "unknown"
+					det.Status = "danger"
 					det.UnreachableRigs = []string{}
 				}
 
+				var sage DetectorStatusJSON
+				err = p.QueryRow(r.Context(),
+					`SELECT last_run, status, unreachable_rigs, error_message
+					 FROM portfolio.detector_status
+					 WHERE id = 'sage'`).
+					Scan(&sage.LastRun, &sage.Status, &sage.UnreachableRigs, &sage.ErrorMessage)
+				if err == nil {
+					if !sage.LastRun.IsZero() && time.Since(sage.LastRun) > 5*time.Minute {
+						sage.Status = "danger"
+					}
+				} else {
+					// Fallback if sage status is not in database yet or is missing.
+					sage.Status = "danger"
+					sage.UnreachableRigs = []string{}
+				}
+
+				danglingCount, err := countDanglingWorkspaces()
+				if err != nil {
+					danglingCount = 0
+				}
+
 				response := map[string]any{
-					"items":           items,
-					"detector_status": det,
+					"items":                     items,
+					"detector_status":           det,
+					"sage_status":               sage,
+					"dangling_workspaces_count": danglingCount,
 				}
 
 				json.NewEncoder(w).Encode(response)
@@ -2106,6 +2188,17 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 
 		var canonicalRef, filePath string
 		if body.Lane == "plan" || body.Lane == "plan-deep" {
+			// Check capacity governor for 429 stress admission criterion
+			throttled, reason, err := IsProviderStressThrottled(r.Context(), "anthropic")
+			if err != nil {
+				http.Error(w, "stress check failed: "+err.Error(), 500)
+				return
+			}
+			if throttled {
+				http.Error(w, "Admission stress: "+reason, http.StatusTooManyRequests)
+				return
+			}
+
 			// Resolve target repository
 			repo, err := resolveTargetRepo(p, body.Id)
 			if err != nil {
