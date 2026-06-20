@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -108,7 +110,7 @@ func TestSageLeaseConcurrency(t *testing.T) {
 			<-startChan
 
 			// Attempt to acquire the lease
-			_, _, err := AcquireSageLease(ctx, p, beadID, 10*time.Second, "concurrent-worker")
+			_, _, err := AcquireSageLease(ctx, p, beadID, 10*time.Second, fmt.Sprintf("concurrent-worker-%d", workerID))
 			if err == nil {
 				atomic.AddInt64(&successCount, 1)
 			} else {
@@ -181,11 +183,11 @@ func TestExecuteSageActionConcurrency(t *testing.T) {
 			<-startChan
 
 			// Attempt to execute Sage Action
-			err := ExecuteSageAction(ctx, p, beadID, 10*time.Second, "concurrent-worker", func() error {
+			acquired, err := ExecuteSageAction(ctx, p, beadID, "dummy-workspace", fmt.Sprintf("concurrent-worker-%d", workerID), func(tx pgx.Tx, healCount int) error {
 				atomic.AddInt64(&actionExecutions, 1)
 				return nil
 			})
-			if err == nil {
+			if err == nil && acquired {
 				atomic.AddInt64(&successCount, 1)
 			} else {
 				atomic.AddInt64(&failureCount, 1)
@@ -233,16 +235,20 @@ func TestStewardReport(t *testing.T) {
 		return
 	}
 
-	// Set default test DSN if empty
-	if dsn == "" {
-		dsn = os.Getenv("PORTFOLIO_DSN")
-		if dsn == "" {
-			dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-		}
+	testDsn := os.Getenv("PORTFOLIO_DSN")
+	if testDsn == "" {
+		testDsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
 	}
 
-	err := runStewardPhase1()
+	p, err := pgxpool.New(context.Background(), testDsn)
 	if err != nil {
-		t.Errorf("expected no error running runStewardPhase1, got: %v", err)
+		t.Skip("skipping integration test; db not reachable:", err)
+		return
+	}
+	defer p.Close()
+
+	err = runSteward(p, vkDB)
+	if err != nil {
+		t.Errorf("expected no error running runSteward, got: %v", err)
 	}
 }
