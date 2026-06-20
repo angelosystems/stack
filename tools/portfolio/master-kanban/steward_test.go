@@ -253,64 +253,6 @@ func TestStewardReport(t *testing.T) {
 	}
 }
 
-func AcquireSageLease(ctx context.Context, p *pgxpool.Pool, beadID string, duration time.Duration, lockedBy string) (int, time.Time, error) {
-	lockedUntil := time.Now().Add(duration)
-
-	_, _ = p.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS portfolio.sage_lease (
-			bead_id       text PRIMARY KEY,
-			locked_until  timestamptz NOT NULL,
-			locked_by     text NOT NULL,
-			heal_counter  integer DEFAULT 0 NOT NULL,
-			updated_at    timestamptz DEFAULT now() NOT NULL
-		)
-	`)
-
-	var healCounter int
-	var actualUntil time.Time
-	var actualBy string
-
-	query := `
-		INSERT INTO portfolio.sage_lease (bead_id, locked_until, locked_by, heal_counter, updated_at)
-		VALUES ($1, $2, $3, 1, now())
-		ON CONFLICT (bead_id) DO UPDATE
-		SET
-			heal_counter = portfolio.sage_lease.heal_counter + 1,
-			locked_until = EXCLUDED.locked_until,
-			locked_by = EXCLUDED.locked_by,
-			updated_at = now()
-		WHERE portfolio.sage_lease.locked_until < now()
-		RETURNING heal_counter, locked_until, locked_by
-	`
-
-	err := p.QueryRow(ctx, query, beadID, lockedUntil, lockedBy).Scan(&healCounter, &actualUntil, &actualBy)
-	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("lease acquisition failed for bead %s (active lease exists)", beadID)
-	}
-
-	return healCounter, actualUntil, nil
-}
-
-func ReleaseSageLease(ctx context.Context, p *pgxpool.Pool, beadID string, lockedBy string) error {
-	_, err := p.Exec(ctx, `
-		UPDATE portfolio.sage_lease
-		SET locked_until = now()
-		WHERE bead_id = $1 AND locked_by = $2
-	`, beadID, lockedBy)
-	return err
-}
-
-func GetHealCounter(ctx context.Context, p *pgxpool.Pool, beadID string) (int, error) {
-	var counter int
-	err := p.QueryRow(ctx, `
-		SELECT heal_counter FROM portfolio.sage_lease WHERE bead_id = $1
-	`, beadID).Scan(&counter)
-	if err != nil {
-		return 0, nil
-	}
-	return counter, nil
-}
-
 func testExecuteSageAction(ctx context.Context, p *pgxpool.Pool, beadID string, duration time.Duration, lockedBy string, action func() error) error {
 	_, _, err := AcquireSageLease(ctx, p, beadID, duration, lockedBy)
 	if err != nil {
