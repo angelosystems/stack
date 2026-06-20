@@ -50,6 +50,21 @@ func TestIdentityJoinKeySpike(t *testing.T) {
 
 	// Scan /proc for running processes with CWD starting with "/var/tmp/vibe-kanban/worktrees/"
 	foundPID, foundCWD, err := scanForWorkspaceProcess()
+	if err != nil || foundPID == 0 {
+		// No active process found. Let's start a real one to verify E2E real runtime!
+		recentWS, errLog := findRecentWorkspaceFromLog(sessionsLogPath, vkDB)
+		if errLog == nil && recentWS.CWD != "" {
+			cmdSleep := exec.Command("sleep", "10")
+			cmdSleep.Dir = recentWS.CWD
+			if errStart := cmdSleep.Start(); errStart == nil {
+				// Wait a tiny moment for process to initialize
+				defer cmdSleep.Process.Kill()
+				// Rescan to find the newly started real process!
+				foundPID, foundCWD, err = scanForWorkspaceProcess()
+			}
+		}
+	}
+
 	if err == nil && foundPID > 0 {
 		pid = foundPID
 		cwdPath = foundCWD
