@@ -340,7 +340,35 @@ func cmdSage() *cobra.Command {
 				} else {
 					// No bead associated (e.g. rituale). Lock on lockID (ws.id) to avoid duplicates.
 					actionFn := func(tx pgx.Tx, healCount int) error {
-						return nil
+						// Build payload
+						payloadMap := map[string]any{
+							"workspace_id":    ws.id,
+							"workspace_name":  ws.name,
+							"bead_id":         "",
+							"classification":  sageClass,
+							"proposed_action": proposedAction,
+							"reason":          reason,
+							"heal_count":      healCount,
+						}
+						payloadJSON, _ := json.Marshal(payloadMap)
+
+						// Log under sk-catch-all, st-catch-all, or any existing %-catch-all initiative
+						var catchAllID string
+						err := tx.QueryRow(ctx, `
+							SELECT id FROM portfolio.initiative 
+							WHERE id = 'sk-catch-all' OR id = 'st-catch-all' OR id LIKE '%-catch-all'
+							LIMIT 1
+						`).Scan(&catchAllID)
+						if err != nil {
+							catchAllID = "sk-catch-all" // Fallback literal
+						}
+
+						// Insert sage_action event
+						_, err = tx.Exec(ctx, `
+							INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+							VALUES ($1, 'sage_action', 'sage', $2, 'sage-steward')
+						`, catchAllID, payloadJSON)
+						return err
 					}
 
 					acquired, err := ExecuteSageAction(ctx, p, lockID, ws.id, "sage-steward", hasPartialProgress, actionFn)
