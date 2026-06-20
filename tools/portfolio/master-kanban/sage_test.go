@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +123,12 @@ func TestSageSteward_API(t *testing.T) {
 	if initialData["outage_simulated"] != false {
 		t.Errorf("expected outage_simulated to be false")
 	}
+	if initialData["dangling_count"] == nil {
+		t.Errorf("expected response to contain 'dangling_count'")
+	}
+	if initialData["dangling_baseline"] != 4.0 {
+		t.Errorf("expected dangling_baseline to be 4, got %v", initialData["dangling_baseline"])
+	}
 
 	// 3. Test POST /api/sage/simulate-outage - activate simulation
 	postBody, _ := json.Marshal(map[string]any{"simulate": true})
@@ -177,5 +186,135 @@ func TestSageSteward_API(t *testing.T) {
 	}
 	if recoveredData["outage_simulated"] != false {
 		t.Errorf("expected outage_simulated to be false after reset")
+	}
+}
+
+func TestGetDanglingWorkspaces(t *testing.T) {
+	// Create a temporary file for sqlite DB
+	tmpFile, err := os.CreateTemp("", "test-dangling-*.sqlite")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	tmpFilePath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpFilePath)
+
+	// Set VK_DB to point to this temp DB
+	oldVkDB := os.Getenv("VK_DB")
+	os.Setenv("VK_DB", tmpFilePath)
+	defer func() {
+		if oldVkDB != "" {
+			os.Setenv("VK_DB", oldVkDB)
+		} else {
+			os.Unsetenv("VK_DB")
+		}
+	}()
+
+	// Initialize the schema inside sqlite3 using command execution
+	initSchema := `
+		CREATE TABLE workspaces (
+			id BLOB PRIMARY KEY,
+			name TEXT,
+			created_at TEXT,
+			archived INTEGER DEFAULT 0
+		);
+		CREATE TABLE sessions (
+			id BLOB PRIMARY KEY,
+			workspace_id BLOB
+		);
+		CREATE TABLE execution_processes (
+			session_id BLOB,
+			status TEXT,
+			exit_code INTEGER,
+			run_reason TEXT,
+			created_at TEXT
+		);
+		CREATE TABLE pull_requests (
+			workspace_id BLOB,
+			pr_status TEXT
+		);
+	`
+	cmdInit := exec.Command("sqlite3", tmpFilePath, initSchema)
+	if err := cmdInit.Run(); err != nil {
+		t.Fatalf("failed to initialize sqlite schema: %v", err)
+	}
+
+	// Insert mock data
+	// 1. A dangling workspace:
+	// - archived = 0
+	// - created_at = 20 hours ago
+	// - EP status = 'failed' (terminal)
+	// - run_reason = 'codingagent'
+	// - no open PR
+	tAgo := time.Now().Add(-20 * time.Hour).Format("2006-01-02 15:04:05")
+	tNow := time.Now().Format("2006-01-02 15:04:05")
+
+	wsDanglingID := "AABBCCDDEEFF00112233445566778899"
+	insertData := fmt.Sprintf(`
+		INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'%s', 'dangling-ws', '%s', 0);
+		INSERT INTO sessions (id, workspace_id) VALUES (x'11111111111111111111111111111111', x'%s');
+		INSERT INTO execution_processes (session_id, status, exit_code, run_reason, created_at) VALUES (x'11111111111111111111111111111111', 'failed', 1, 'codingagent', '%s');
+	`, wsDanglingID, tAgo, wsDanglingID, tAgo)
+
+	// 2. A non-dangling workspace (active / running):
+	// - archived = 0
+	// - created_at = 1 hour ago (too young)
+	wsActiveID := "112233445566778899AABBCCDDEEFF00"
+	insertData += fmt.Sprintf(`
+		INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'%s', 'active-ws', '%s', 0);
+		INSERT INTO sessions (id, workspace_id) VALUES (x'22222222222222222222222222222222', x'%s');
+		INSERT INTO execution_processes (session_id, status, exit_code, run_reason, created_at) VALUES (x'22222222222222222222222222222222', 'inprogress', NULL, 'codingagent', '%s');
+	`, wsActiveID, tNow, wsActiveID, tNow)
+
+	// 3. An archived workspace
+	// - archived = 1
+	// - created_at = 20 hours ago
+	wsArchivedID := "2233445566778899AABBCCDDEEFF0011"
+	insertData += fmt.Sprintf(`
+		INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'%s', 'archived-ws', '%s', 1);
+		INSERT INTO sessions (id, workspace_id) VALUES (x'33333333333333333333333333333333', x'%s');
+		INSERT INTO execution_processes (session_id, status, exit_code, run_reason, created_at) VALUES (x'33333333333333333333333333333333', 'completed', 0, 'codingagent', '%s');
+	`, wsArchivedID, tAgo, wsArchivedID, tAgo)
+
+	// 4. A workspace with an open PR
+	// - archived = 0
+	// - created_at = 20 hours ago
+	// - open PR
+	wsWithPRID := "33445566778899AABBCCDDEEFF001122"
+	insertData += fmt.Sprintf(`
+		INSERT INTO workspaces (id, name, created_at, archived) VALUES (x'%s', 'pr-ws', '%s', 0);
+		INSERT INTO sessions (id, workspace_id) VALUES (x'44444444444444444444444444444444', x'%s');
+		INSERT INTO execution_processes (session_id, status, exit_code, run_reason, created_at) VALUES (x'44444444444444444444444444444444', 'completed', 0, 'codingagent', '%s');
+		INSERT INTO pull_requests (workspace_id, pr_status) VALUES (x'%s', 'open');
+	`, wsWithPRID, tAgo, wsWithPRID, tAgo, wsWithPRID)
+
+	cmdInsert := exec.Command("sqlite3", tmpFilePath, insertData)
+	if err := cmdInsert.Run(); err != nil {
+		t.Fatalf("failed to insert test data: %v", err)
+	}
+
+	// Call the function under test
+	dangling, err := getDanglingWorkspaces()
+	if err != nil {
+		t.Fatalf("getDanglingWorkspaces failed: %v", err)
+	}
+
+	// Verify results
+	if len(dangling) != 1 {
+		t.Errorf("expected exactly 1 dangling workspace, got %d", len(dangling))
+	} else {
+		ws := dangling[0]
+		if strings.ToLower(ws.ID) != strings.ToLower(wsDanglingID) {
+			t.Errorf("expected dangling workspace ID to be %s (case-insensitive), got %s", wsDanglingID, ws.ID)
+		}
+		if ws.Name != "dangling-ws" {
+			t.Errorf("expected dangling workspace Name to be 'dangling-ws', got %s", ws.Name)
+		}
+		if ws.EPStatus != "failed" {
+			t.Errorf("expected EPStatus to be 'failed', got %s", ws.EPStatus)
+		}
+		if ws.ExitCode == nil || *ws.ExitCode != 1 {
+			t.Errorf("expected ExitCode to be 1, got %v", ws.ExitCode)
+		}
 	}
 }

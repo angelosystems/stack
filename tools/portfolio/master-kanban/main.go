@@ -3041,13 +3041,16 @@ func getDanglingWorkspaces() ([]DanglingWorkspace, error) {
 }
 
 func cmdSage() *cobra.Command {
-	return &cobra.Command{
+	var dryRun bool
+	cmd := &cobra.Command{
 		Use:   "sage",
-		Short: "vk-Sage — Workspace-Steward Phase 1 Read-only & Log Board-Events",
+		Short: "vk-Sage — Workspace-Steward Phase 3 Active Healing, Re-dispatch & Escalation",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := context.Background()
 			p := connect()
 			defer p.Close()
+
+			var err error
 
 			vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
 
@@ -3115,7 +3118,11 @@ func cmdSage() *cobra.Command {
 				}
 			}
 
-			fmt.Println("=== vk-Sage Dry-Run-Report (Phase 1: Read-only) ===")
+			if dryRun {
+				fmt.Println("=== vk-Sage Dry-Run-Report (Phase 1/3: Read-only) ===")
+			} else {
+				fmt.Println("=== vk-Sage Workspace-Steward (Phase 3: Active Healing) ===")
+			}
 			fmt.Printf("Found %d unarchived workspace(s)\n\n", len(workspaces))
 
 			// To ensure deterministic order for output
@@ -3146,11 +3153,11 @@ func cmdSage() *cobra.Command {
 						beadID = "st-ib5e"
 					} else if isYozd {
 						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
+						action = "heal"
 						beadID = "st-yozd"
 					} else if is1bpf {
 						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
+						action = "heal"
 						beadID = "st-1bpf"
 					}
 				}
@@ -3162,7 +3169,7 @@ func cmdSage() *cobra.Command {
 						action = "archive"
 					} else if ws.epStatus == "failed" && ws.exitCode == "1" {
 						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
+						action = "heal"
 						if strings.HasPrefix(ws.name, "sol-") {
 							beadID = strings.TrimPrefix(ws.name, "sol-")
 						}
@@ -3172,11 +3179,59 @@ func cmdSage() *cobra.Command {
 					}
 				}
 
+				var currentHealCount int = 0
+				if beadID != "" {
+					// Fetch or initialize heal count from portfolio.sage_heals
+					err = p.QueryRow(ctx, `SELECT heal_count FROM portfolio.sage_heals WHERE bead_id = $1`, beadID).Scan(&currentHealCount)
+					if err != nil {
+						if err == pgx.ErrNoRows {
+							currentHealCount = 0
+							// Initialize entry in database if not dry-run
+							if !dryRun {
+								_, _ = p.Exec(ctx, `INSERT INTO portfolio.sage_heals (bead_id, heal_count, last_healed_at) VALUES ($1, 0, now()) ON CONFLICT (bead_id) DO NOTHING`, beadID)
+							}
+						} else {
+							fmt.Fprintf(os.Stderr, "Error fetching heal count: %v\n", err)
+						}
+					}
+
+					// Update action based on retry budget
+					if action == "heal" {
+						if currentHealCount < 2 {
+							action = "heal"
+						} else {
+							action = "escalate"
+						}
+					}
+
+					// Reset-Semantik: If we have a failure, but it is NOT a no-commits-exit1 (i.e. we made partial progress!),
+					// we reset the heal count to 0!
+					isFailureButNotNoCommitsExit1 := (ws.epStatus == "failed" || ws.epStatus == "killed") && !(ws.epStatus == "failed" && ws.exitCode == "1")
+					if isFailureButNotNoCommitsExit1 {
+						if currentHealCount > 0 {
+							if !dryRun {
+								_, err = p.Exec(ctx, `UPDATE portfolio.sage_heals SET heal_count = 0, last_healed_at = now() WHERE bead_id = $1`, beadID)
+								if err != nil {
+									fmt.Fprintf(os.Stderr, "Error resetting heal count: %v\n", err)
+								} else {
+									fmt.Printf(" -> Info: Reset heal_count to 0 for bead %s due to partial progress (non-no-commits-exit1 failure status)\n", beadID)
+								}
+							} else {
+								fmt.Printf(" -> [Dry-Run] Would reset heal_count to 0 for bead %s due to partial progress (non-no-commits-exit1 failure status)\n", beadID)
+							}
+							currentHealCount = 0
+						}
+					}
+				}
+
 				fmt.Printf("Workspace ID: %s\n", ws.id)
 				fmt.Printf("Name/Branch:  %s\n", ws.name)
 				fmt.Printf("Bead ID:      %s\n", beadID)
 				fmt.Printf("Class:        %s\n", class)
 				fmt.Printf("Action:       %s\n", action)
+				if beadID != "" {
+					fmt.Printf("Heal Count:   %d / 2\n", currentHealCount)
+				}
 
 				// Logging Board Event on the Initiative of the Bead
 				if beadID != "" {
@@ -3209,18 +3264,102 @@ func cmdSage() *cobra.Command {
 								"workspace_name":   ws.name,
 								"classification":   class,
 								"proposed_action":  action,
-								"dry_run":          true,
+								"dry_run":          dryRun,
 							}
 							payloadBytes, _ := json.Marshal(payloadMap)
 
-							_, err = p.Exec(ctx, `
-								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
-								VALUES ($1, 'sage_action', 'sage', $2, 'sage')
-							`, initiativeID, string(payloadBytes))
-							if err != nil {
-								fmt.Fprintf(os.Stderr, " -> Error logging Board-Event: %v\n", err)
+							if !dryRun {
+								_, err = p.Exec(ctx, `
+									INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+									VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+								`, initiativeID, string(payloadBytes))
+								if err != nil {
+									fmt.Fprintf(os.Stderr, " -> Error logging Board-Event: %v\n", err)
+								} else {
+									fmt.Printf(" -> Success: Logged Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
+								}
+
+								// Handle mutative actions if not in dry-run
+								if action == "heal" {
+									// Increment heal count and re-dispatch
+									var beadTitle, beadDesc string
+									_ = p.QueryRow(ctx, `SELECT title, COALESCE(description, '') FROM portfolio.initiative WHERE id = $1`, initiativeID).Scan(&beadTitle, &beadDesc)
+
+									// Generate diagnose-informed / re-scoped prompt with GLM-5.1
+									systemPrompt := "Du bist der vk-Sage, ein intelligenter Workspace-Steward. Deine Aufgabe ist es, für einen hängenden Workspace mit dem Status 'no-commits-exit1' eine präzise Diagnose zu erstellen und einen angepassten, geschärften Prompt (Re-Scoped Prompt) für den nächsten Versuch des Coding-Agenten zu formulieren. Der neue Prompt MUSS sich deutlich von einem einfachen Retry unterscheiden, konkrete, konstruktive Hinweise zur Fehlerbehebung im Code enthalten, und alternative Lösungswege aufzeigen, damit der Agent nicht wieder mit 0 Commits fehlschlägt. Halte den Prompt auf Deutsch."
+									userMessage := fmt.Sprintf("Bead ID: %s\nWorkspace Name: %s\nBead-Titel: %s\nBeschreibung: %s\nFehler: no-commits-exit1 (0 Commits, Exit-Code 1)\n\nBitte erstelle die Diagnose und den re-scopeten Prompt für den nächsten Heilversuch (Heal Attempt #%d).", beadID, ws.name, beadTitle, beadDesc, currentHealCount+1)
+									messages := []map[string]string{
+										{"role": "user", "content": userMessage},
+									}
+
+									fmt.Println(" -> Calling GLM to generate diagnosis-informed re-scoped prompt...")
+									reScopedPrompt, err := callGlm(systemPrompt, messages)
+									if err != nil {
+										fmt.Fprintf(os.Stderr, " -> Error calling GLM: %v, using fallback prompt\n", err)
+										reScopedPrompt = fmt.Sprintf("DIAGNOSE: Letzter Versuch ist mit no-commits-exit1 fehlgeschlagen. Re-scoped Anweisung: Bitte analysiere das Ziel %s genauer und nimm notwendige Anpassungen vor.", beadTitle)
+									}
+
+									// Increment heal_count
+									_, err = p.Exec(ctx, `UPDATE portfolio.sage_heals SET heal_count = heal_count + 1, last_healed_at = now() WHERE bead_id = $1`, beadID)
+									if err != nil {
+										fmt.Fprintf(os.Stderr, " -> Error incrementing heal count: %v\n", err)
+									} else {
+										fmt.Printf(" -> Success: Incremented heal_count for bead %s to %d\n", beadID, currentHealCount+1)
+									}
+
+									// Log the 'dispatched' event
+									dispatchPayload := map[string]any{
+										"lane": "heal",
+										"note": fmt.Sprintf("vk-Sage Re-Dispatch (Heal Attempt #%d)\n\n%s", currentHealCount+1, reScopedPrompt),
+									}
+									dispatchPayloadBytes, _ := json.Marshal(dispatchPayload)
+									_, err = p.Exec(ctx, `
+										INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+										VALUES ($1, 'dispatched', 'sage', $2, 'sage')
+									`, initiativeID, string(dispatchPayloadBytes))
+									if err != nil {
+										fmt.Fprintf(os.Stderr, " -> Error logging dispatched event: %v\n", err)
+									} else {
+										fmt.Printf(" -> Success: Re-dispatched bead %s with diagnosis-informed prompt\n", beadID)
+									}
+
+								} else if action == "escalate" {
+									// Increment heal_count to reflect escalation attempt
+									_, _ = p.Exec(ctx, `UPDATE portfolio.sage_heals SET heal_count = heal_count + 1, last_healed_at = now() WHERE bead_id = $1`, beadID)
+
+									escalatePayload := map[string]any{
+										"reason": "Retry budget exceeded (> 2 unsuccessful heal attempts)",
+										"note":   fmt.Sprintf("The workspace for bead %s failed with no-commits-exit1 multiple times. The heal retry budget is exhausted. Manual intervention required.", beadID),
+									}
+									escalatePayloadBytes, _ := json.Marshal(escalatePayload)
+									_, err = p.Exec(ctx, `
+										INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+										VALUES ($1, 'escalated', 'sage', $2, 'sage')
+									`, initiativeID, string(escalatePayloadBytes))
+									if err != nil {
+										fmt.Fprintf(os.Stderr, " -> Error logging escalated event: %v\n", err)
+									} else {
+										fmt.Printf(" -> Success: Escalated bead %s (retry budget exceeded)\n", beadID)
+									}
+								} else if action == "close-as-done" {
+									// Update bead status to closed
+									_, err = p.Exec(ctx, `UPDATE portfolio.initiative SET stage = 'closed', closed_at = now() WHERE id = $1`, initiativeID)
+									if err != nil {
+										fmt.Fprintf(os.Stderr, " -> Error closing bead: %v\n", err)
+									} else {
+										fmt.Printf(" -> Success: Closed bead %s (close-as-done)\n", beadID)
+									}
+								}
 							} else {
-								fmt.Printf(" -> Success: Logged Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
+								_, err = p.Exec(ctx, `
+									INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+									VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+								`, initiativeID, string(payloadBytes))
+								if err != nil {
+									fmt.Fprintf(os.Stderr, " -> Error logging Dry-Run Board-Event: %v\n", err)
+								} else {
+									fmt.Printf(" -> Success: Logged Dry-Run Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
+								}
 							}
 						}
 					}
@@ -3229,4 +3368,6 @@ func cmdSage() *cobra.Command {
 			}
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Enable dry-run mode (no database updates or GLM prompt generation)")
+	return cmd
 }
