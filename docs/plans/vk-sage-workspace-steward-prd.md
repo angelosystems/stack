@@ -171,6 +171,73 @@ Ein klar strukturierten Plan mit starkem Problembeleg, bewusst plausibler Scope-
 **NOTES:**
 - **[Crispin/Wiegers] Kalibrierungs-Gate vor Autonomie.** Phase 1 ist read-only — ergänze ein Kriterium: die Sage-Klassifikationen müssen mit dem Mensch-Urteil über die aktuellen 4 pausierten Workspaces übereinstimmen (≥ Schwelle), **bevor** Phase 2 ihn handeln lässt. Keinen autonomen Mutator mit unbewiesenem Urteil scharfschalten. **Bestanden & Dokumentiert am 20.06.2026:** Siehe [vk-Sage Kalibrierung](vk-sage-calibration.md) (100% Übereinstimmung erreicht).
 - **[Cockburn] Live-Geld-Ausnahme.** quantbot/Trading-Path-Beads → Sage **nur eskalieren**, kein autonomes close/re-dispatch (Live-Geld-Konvention „keine Änderungen ohne Permission").
-- **[Hohpe] Subscribable Execution-End-Event verifizieren** (wie Dispatch-PRD A1) — emittiert der vibekanban-adapter wirklich ein abonnierbares Event, oder degradiert „edge-triggered" still zu Poll?
+- **[Hohpe] Subscribable Execution-End-Event verifizieren** (wie Dispatch-PRD A1) — emittiert der vibekanban-adapter wirklich ein abonnierbares Event, oder degradiert „edge-triggered" still zu Poll? **Verifiziert am 20.06.2026:** Der Adapter emittiert *keine* abonnierbaren `failed`/`killed` Events (er emittiert nur `completed` bei `status == 'done'`, restliche Status wie `cancelled` werden auf ein generisches `activity` Event gemappt). Zudem ist der Trigger-Mechanismus nicht echt edge-triggered auf Datensatzelementen, sondern degradiert intern zu einem `fsnotify`-getriggerten Sweep/Poll über alle registrierten Links mit sequentiellen `sqlite3`-Shell-outs. Der Fallback (Sweep) ist daher der primäre Pfad für den Sage (siehe [Anhang: Verifizierungsbericht](#anhang-verifizierungsbericht-subscribable-execution-end-event)).
 - **[Newman] Heal-Counter-Reset-Semantik** — setzt partieller Fortschritt (ein paar Commits, dann Fehler) den Zähler zurück oder nicht? Definieren, sonst verhungern harte Tasks oder pausierten Beads bleiben.
 - **[Crispin] Den Sage testen braucht eine Sandbox** (fake gescheiterter Bead/Workspace) — an die Staging-vk-Instanz koppeln, den autonomen Mutator nicht gegen prod-Beads testen.
+
+## Anhang: Verifizierungsbericht (Subscribable Execution-End-Event)
+
+### 1. Analyse der Implementierung des `vibekanban`-Adapters
+
+Der Adapter (`tools/portfolio/adapters/vibekanban/main.go`) läuft wie folgt ab:
+- **Dateisystem-Trigger (`fsnotify`)**: Der Adapter registriert einen Watcher auf dem Verzeichnis, in dem die SQLite-Datenbank liegt (`/root/.local/share/vibe-kanban/`). Sobald eine Änderung an einer Datei mit dem Präfix `db.v2.sqlite` (z. B. durch das Schreiben der WAL- oder SHM-Temporärdateien) stattfindet, wird ein 2-Sekunden-Debounce-Timer gestartet/zurückgesetzt:
+  ```go
+  if !strings.HasPrefix(filepath.Base(ev.Name), filepath.Base(vkDB)) {
+      continue
+  }
+  timer.Reset(2 * time.Second)
+  ```
+- **Poll-and-Sweep bei Triggerung**: Sobald der Timer abläuft, führt der Adapter ein vollständiges **Sweep**-Verfahren über alle gelinkten Initiativen durch (`scan(pool)`):
+  - Es werden **alle** Verknüpfungen vom Typ `vk_workspace` aus Postgres geladen:
+    ```sql
+    SELECT initiative_id, ref FROM portfolio.initiative_link WHERE kind='vk_workspace'
+    ```
+  - Für **jeden** einzelnen Link führt der Adapter ein synchrones Shell-out aus, um mittels `sqlite3 -readonly` den aktuellen Zustand aus der SQLite-Datenbank abzufragen:
+    ```go
+    sqlite3 -readonly -separator \x1f <db_path> "SELECT status, title FROM tasks WHERE hex(id)='<ref>';"
+    ```
+  - Es handelt sich somit **nicht** um einen kontinuierlichen Edge-Trigger-Stream auf Datenbanksatz-Ebene (wie z. B. über ein SQLite-Trigger-Log oder Change-Data-Capture), sondern um ein **Dateisystem-Trigger-induziertes Polling** über alle registrierten Tasks.
+
+### 2. Einschränkungen bei Event-Mapping und Status-Typen
+
+Die SQLite-Tabelle `tasks` besitzt folgendes Tabellenschema:
+```sql
+CREATE TABLE tasks (
+    id          BLOB PRIMARY KEY,
+    project_id  BLOB NOT NULL,
+    title       TEXT NOT NULL,
+    description TEXT,
+    status      TEXT NOT NULL DEFAULT 'todo'
+                   CHECK (status IN ('todo','inprogress','done','cancelled','inreview')),
+    ...
+);
+```
+Der Adapter vergleicht den aktuellen Status mit dem letzten Status in Postgres und mappt Änderungen wie folgt:
+```go
+kind := "activity"
+if status == "done" {
+    kind = "completed"
+}
+```
+- **Keine separaten `failed`- oder `killed`-Events**: Der Adapter emittiert als finales Ende-Event ausschließlich `completed` (wenn `status == 'done'`).
+- Alle anderen Zustände (`'todo'`, `'inprogress'`, `'inreview'` sowie `'cancelled'`) werden einheitlich auf das Event-Kind `"activity"` gemappt.
+- Ein dediziertes `failed`- oder `killed`-Event existiert im Adapter nicht. Zudem bietet das `status`-Schema von `vibe-kanban` keine feingranularen Fehler- oder Abbruchstatus außer `'cancelled'`.
+
+### 3. Konsequenzen & Architektur-Einschränkungen (Hohpe-Note)
+
+- **State Conflation (Zustands-Verluste)**: Da das fsnotify-Event entprellt (Debounce von 2 Sekunden) und danach ein synchroner Sweep gefahren wird, gehen schnelle Zwischenzustände verloren. Wechselt ein Task innerhalb von 2 Sekunden von `todo` -> `inprogress` -> `done`, wird ausschließlich das finale `completed`-Event erzeugt.
+- **Skalierungsproblem (N+1 Shell-outs)**: Da bei jedem Trigger für jeden verknüpften Task ein eigener `sqlite3`-Subprozess gestartet wird, skaliert das Verfahren bei einer steigenden Anzahl von aktiven Links extrem schlecht und belastet die CPU.
+- **Fehlende Signal-Präzision**: Ein übergeordneter Orchestrator (Sage / Steward) kann nicht sauber zwischen regulärer Aktivität, Fehlern, Abbrüchen oder Beendigungen unterscheiden, da `"activity"` als Catch-all-Typ verwendet wird.
+
+### 4. Ziel-Spezifikation: Fallback (Sweep) als primärer Pfad
+
+Da eine zuverlässige, edge-getriggerte Event-Subscription auf feingranulare `completed`/`failed`/`killed`-Events aufgrund der Limitierungen des SQLite-Backends und des Adapters nicht existiert, wird der **Fallback (Sweep) explizit als primärer Integrationspfad** für den Sage / Steward etabliert.
+
+**Primärer Pfad: Zustand-Reconciliation (Sweep) durch den Sage**
+Der Sage / Steward darf sich nicht auf den Empfang eines ereignisgesteuerten Event-Streams verlassen. Stattdessen wird die Zustandssynchronisation primär über ein **Reconciliation-Sweep-Verfahren** gelöst:
+1. **Periodische Statusabfrage (Periodic Sweep)**: Der Sage fragt in definierten Intervallen (z. B. alle 60 Sekunden) oder bei Ablauf bestimmter Timeouts den aktuellen Zustand der Workspace-Tasks direkt über die API bzw. das Backend ab.
+2. **Zustandserkennung im Sweep**:
+   - Wenn ein Task im Sweep den Status `'done'` aufweist, interpretiert der Sage dies als **Erfolgreiches Ende** (`completed`).
+   - Wenn ein Task im Sweep den Status `'cancelled'` aufweist, interpretiert der Sage dies als **Abbruch / Beendigung von außen** (`killed`).
+   - Läuft ein Task über ein definiertes Timeout-Limit hinaus, ohne den Status `'done'` oder `'cancelled'` zu erreichen, deklariert der Sage die Execution als **Fehlgeschlagen** (`failed`) und leitet eigenständig Kompensationsmaßnahmen ein.
+3. **Idempotente Verarbeitung**: Sämtliche Aktionen, die der Sage aufgrund von Zustandsänderungen triggert, müssen idempotent ausgelegt sein, um Doppelausführungen durch verzögerte Sweeps oder Dateisystem-Trigger-Races zu verhindern.
