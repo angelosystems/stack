@@ -3368,50 +3368,50 @@ Antworte ausschließlich mit dem neuen, re-scopeten Prompt/Beschreibungstext (au
 				}
 
 				// Logging Board Event on the Initiative of the Bead
+				var initiativeID string
 				if beadID != "" {
 					// 1. Get initiative_id from portfolio.initiative_link
-					var initiativeID string
 					err := p.QueryRow(ctx, `SELECT initiative_id FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1`, beadID).Scan(&initiativeID)
-					if err != nil {
-						if err == pgx.ErrNoRows {
-							fmt.Printf(" -> Warning: No initiative linked for bead %s\n", beadID)
-						} else {
-							fmt.Fprintf(os.Stderr, " -> Error fetching initiative: %v\n", err)
-						}
-					} else {
-						// 2. Check if the event already exists for this workspace ID to avoid duplicates (idempotency check)
-						var exists bool
-						err = p.QueryRow(ctx, `
-							SELECT EXISTS(
-								SELECT 1 FROM portfolio.initiative_event 
-								WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
-							)
-						`, initiativeID, ws.id).Scan(&exists)
-						if err != nil {
-							fmt.Fprintf(os.Stderr, " -> Error checking existing events: %v\n", err)
-						} else if exists && !runSage {
-							fmt.Printf(" -> Info: Board-Event (sage_action) already logged for Workspace %s on initiative %s\n", ws.id, initiativeID)
-						} else {
-							// 3. Insert the new sage_action board event
-							payloadMap := map[string]any{
-								"workspace_id":     ws.id,
-								"workspace_name":   ws.name,
-								"classification":   class,
-								"proposed_action":  action,
-								"dry_run":          !runSage,
-							}
-							payloadBytes, _ := json.Marshal(payloadMap)
+					if err != nil && err != pgx.ErrNoRows {
+						fmt.Fprintf(os.Stderr, " -> Error fetching initiative: %v\n", err)
+					}
+				}
 
-							_, err = p.Exec(ctx, `
-								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
-								VALUES ($1, 'sage_action', 'sage', $2, 'sage')
-							`, initiativeID, string(payloadBytes))
-							if err != nil {
-								fmt.Fprintf(os.Stderr, " -> Error logging Board-Event: %v\n", err)
-							} else {
-								fmt.Printf(" -> Success: Logged Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
-							}
-						}
+				if initiativeID == "" {
+					initiativeID = "sk-vk-sage-workspace-steward"
+				}
+
+				// 2. Check if the event already exists for this workspace ID to avoid duplicates (idempotency check)
+				var exists bool
+				err := p.QueryRow(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM portfolio.initiative_event 
+						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
+					)
+				`, initiativeID, ws.id).Scan(&exists)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, " -> Error checking existing events: %v\n", err)
+				} else if exists && !runSage {
+					fmt.Printf(" -> Info: Board-Event (sage_action) already logged for Workspace %s on initiative %s\n", ws.id, initiativeID)
+				} else {
+					// 3. Insert the new sage_action board event
+					payloadMap := map[string]any{
+						"workspace_id":     ws.id,
+						"workspace_name":   ws.name,
+						"classification":   class,
+						"proposed_action":  action,
+						"dry_run":          !runSage,
+					}
+					payloadBytes, _ := json.Marshal(payloadMap)
+
+					_, err = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+					`, initiativeID, string(payloadBytes))
+					if err != nil {
+						fmt.Fprintf(os.Stderr, " -> Error logging Board-Event: %v\n", err)
+					} else {
+						fmt.Printf(" -> Success: Logged Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
 					}
 				}
 				fmt.Println()

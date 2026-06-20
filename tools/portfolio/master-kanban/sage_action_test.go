@@ -28,11 +28,12 @@ func TestSageDryRun_SC4(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
-	// 1. Clean up any existing sage_action events for the 3 target workspaces
+	// 1. Clean up any existing sage_action events for the 4 target workspaces
 	targetWSIDs := []string{
 		"05021F1F765846E299B6A36B39DC39F8", // sol-st-yozd
 		"64D07879DB694345BFA59E9D321AAC08", // sol-st-1bpf
 		"B842765043A04994B61AACF51E019956", // sol-st-ib5e
+		"935D9575FDF54F9C816381B9A97DD481", // v3s34-rituale
 	}
 
 	for _, wsID := range targetWSIDs {
