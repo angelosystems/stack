@@ -32,9 +32,9 @@ import (
 )
 
 var (
-	dsn     = envOr("PORTFOLIO_DSN", "postgres://coder_adapter@127.0.0.1:5434/mario_brain?sslmode=disable")
-	secret  = envOr("CODER_WEBHOOK_SECRET", "")
-	listen  = flag.String("listen", ":7785", "HTTP listen address")
+	dsn            = envOr("PORTFOLIO_DSN", "postgres://coder_adapter@127.0.0.1:5434/mario_brain?sslmode=disable")
+	secret         = envOr("CODER_WEBHOOK_SECRET", "")
+	listen         = flag.String("listen", ":7785", "HTTP listen address")
 	Version string = "dev"
 )
 
