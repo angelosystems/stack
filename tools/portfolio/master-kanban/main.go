@@ -1755,12 +1755,12 @@ func cmdServe() *cobra.Command {
 				}
 
 				resp := map[string]any{
-					"last_run":          lastRun,
-					"status":            status,
-					"error_message":     errMsg,
-					"dangling_count":    len(dangling),
-					"dangling_baseline": 4,
-					"outage_simulated":  sageOutageSimulated,
+					"last_run":            lastRun,
+					"status":              status,
+					"error_message":       errMsg,
+					"dangling_count":      len(dangling),
+					"dangling_baseline":   4,
+					"outage_simulated":    sageOutageSimulated,
 					"dangling_workspaces": dangling,
 				}
 				json.NewEncoder(w).Encode(resp)
@@ -3040,10 +3040,48 @@ func getDanglingWorkspaces() ([]DanglingWorkspace, error) {
 	return result, nil
 }
 
+func checkDoneProbe(p *pgxpool.Pool, vkDB string, wsID string, taskHex string, beadID string) bool {
+	// 1. Check if bead is already closed in Postgres
+	if beadID != "" {
+		sp, err := solartownPool()
+		if err == nil {
+			var status string
+			err = sp.QueryRow(context.Background(),
+				"SELECT status FROM beads.issues WHERE id=$1 AND deleted_at IS NULL", beadID).
+				Scan(&status)
+			if err == nil && status == "closed" {
+				return true
+			}
+		}
+	}
+
+	// 2. Check if another completed workspace exists in SQLite for the same task_id
+	if taskHex != "" && taskHex != "00000000000000000000000000000000" {
+		query := fmt.Sprintf(`
+			SELECT 1 FROM workspaces w
+			JOIN sessions s ON s.workspace_id = w.id
+			JOIN execution_processes ep ON ep.session_id = s.id
+			WHERE hex(w.task_id) = '%s' AND hex(w.id) != '%s' AND ep.status = 'completed'
+			LIMIT 1;
+		`, taskHex, wsID)
+		sqliteCmd := exec.Command("sqlite3", "-readonly", vkDB, query)
+		var out bytes.Buffer
+		sqliteCmd.Stdout = &out
+		if err := sqliteCmd.Run(); err == nil {
+			if strings.TrimSpace(out.String()) == "1" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func cmdSage() *cobra.Command {
-	return &cobra.Command{
+	var dryRun bool
+	cmd := &cobra.Command{
 		Use:   "sage",
-		Short: "vk-Sage — Workspace-Steward Phase 1 Read-only & Log Board-Events",
+		Short: "vk-Sage — Workspace-Steward Close-as-Done & Archive (Phase 2)",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := context.Background()
 			p := connect()
@@ -3115,7 +3153,11 @@ func cmdSage() *cobra.Command {
 				}
 			}
 
-			fmt.Println("=== vk-Sage Dry-Run-Report (Phase 1: Read-only) ===")
+			if dryRun {
+				fmt.Println("=== vk-Sage Dry-Run-Report ===")
+			} else {
+				fmt.Println("=== vk-Sage Execution (Phase 2) ===")
+			}
 			fmt.Printf("Found %d unarchived workspace(s)\n\n", len(workspaces))
 
 			// To ensure deterministic order for output
@@ -3141,21 +3183,25 @@ func cmdSage() *cobra.Command {
 					action = "archive"
 				} else if ws.epStatus == "failed" && ws.exitCode == "1" {
 					if isIb5e {
-						class = "no-commits-exit1 + Ziel schon erledigt"
-						action = "close-as-done"
 						beadID = "st-ib5e"
 					} else if isYozd {
-						class = "no-commits-exit1 + Arbeit echt offen"
-						action = "escalate"
 						beadID = "st-yozd"
 					} else if is1bpf {
+						beadID = "st-1bpf"
+					} else if strings.HasPrefix(ws.name, "sol-") {
+						beadID = strings.TrimPrefix(ws.name, "sol-")
+					}
+
+					if checkDoneProbe(p, vkDB, ws.id, ws.taskHex, beadID) {
+						class = "no-commits-exit1 + Ziel schon erledigt"
+						action = "close-as-done"
+					} else {
 						class = "no-commits-exit1 + Arbeit echt offen"
 						action = "escalate"
-						beadID = "st-1bpf"
 					}
 				}
 
-				// If it doesn't match any of the 4 standard ones, write a general default classification
+				// If it doesn't match any of the standard rules, write a general default classification
 				if class == "" {
 					if isRituale || !ws.hasTask {
 						class = "broken worktree / Setup-Fail / Workspace ohne Bead"
@@ -3205,11 +3251,11 @@ func cmdSage() *cobra.Command {
 						} else {
 							// 3. Insert the new sage_action board event
 							payloadMap := map[string]any{
-								"workspace_id":     ws.id,
-								"workspace_name":   ws.name,
-								"classification":   class,
-								"proposed_action":  action,
-								"dry_run":          true,
+								"workspace_id":    ws.id,
+								"workspace_name":  ws.name,
+								"classification":  class,
+								"proposed_action": action,
+								"dry_run":         dryRun,
 							}
 							payloadBytes, _ := json.Marshal(payloadMap)
 
@@ -3225,8 +3271,45 @@ func cmdSage() *cobra.Command {
 						}
 					}
 				}
+
+				// Perform actual mutations if dryRun is false
+				if !dryRun {
+					if action == "close-as-done" && beadID != "" {
+						sp, err := solartownPool()
+						if err == nil {
+							_, err = sp.Exec(ctx, `
+								UPDATE beads.issues 
+								SET status = 'closed', closed_at = now(), close_reason = 'sage-already-done'
+								WHERE id = $1 AND status <> 'closed'
+							`, beadID)
+							if err != nil {
+								fmt.Fprintf(os.Stderr, " -> Error closing bead %s: %v\n", beadID, err)
+							} else {
+								fmt.Printf(" -> Success: Closed bead %s (sage-already-done)\n", beadID)
+							}
+						} else {
+							fmt.Fprintf(os.Stderr, " -> Error getting solartown pool: %v\n", err)
+						}
+					}
+
+					if action == "close-as-done" || action == "archive" {
+						updateQuery := fmt.Sprintf(`
+							UPDATE workspaces 
+							SET archived = 1, updated_at = datetime('now', 'subsec') 
+							WHERE hex(id) = '%s';
+						`, ws.id)
+						sqliteCmd := exec.Command("sqlite3", vkDB, updateQuery)
+						if err := sqliteCmd.Run(); err != nil {
+							fmt.Fprintf(os.Stderr, " -> Error archiving workspace %s in SQLite: %v\n", ws.id, err)
+						} else {
+							fmt.Printf(" -> Success: Archived workspace %s in SQLite\n", ws.id)
+						}
+					}
+				}
 				fmt.Println()
 			}
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "only report and log board events without modifying databases")
+	return cmd
 }
