@@ -80,15 +80,17 @@
               <div class="text-xs text-slate-500">
                 now: <span x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span>
                 <span x-show="nowCount(f.id) > f.wip" class="ml-2 text-red-600 font-semibold">WIP überschritten</span>
+                <span class="mx-2">|</span>
+                soon: <span x-text="soonCount(f.id)"></span> / <span x-text="f.wipSoon || 5"></span>
+                <span x-show="soonCount(f.id) > (f.wipSoon || 5)" class="ml-2 text-red-600 font-semibold">WIP soon überschritten</span>
               </div>
             </header>
             <div class="grid grid-cols-5 divide-x divide-slate-200">
               <template x-for="stage in stages" :key="stage">
                 <div class="p-3 min-h-[120px]"
-                  :class="stage === 'now' && nowCount(f.id) > f.wip ? 'col-now-overflow' : ''"
+                  :class="(stage === 'now' && nowCount(f.id) > f.wip) || (stage === 'soon' && soonCount(f.id) > (f.wipSoon || 5)) ? 'col-now-overflow' : ''"
                   :data-firma="f.id" :data-stage="stage"
-                  x-init="$nextTick(() => initSortable($el))">
-                  <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center justify-between">
+                  x-init="$nextTick(() => initSortable($el))">                  <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center justify-between">
                     <span x-text="stageLabel[stage]"></span>
                     <span class="text-slate-400 font-normal" x-text="cardsIn(f.id, stage).length"></span>
                   </div>
@@ -661,12 +663,12 @@ function liveKanban() {
       { id: 'unlinked', label: '⚠ Unlinked — braucht Zuhause' },
     ],
     firmas: [
-      { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 4 },
-      { id: 'solartown',   label: 'Solartown',    icon: '⚡', wip: 6 },
-      { id: 'quantbot',    label: 'QuantBot',     icon: '💰', wip: 4 },
-      { id: 'mariobrain',  label: 'mario-brain',  icon: '🧠', wip: 4 },
-      { id: 'stack',       label: 'Stack (Plattform)', icon: '🧱', wip: 4 },
-      { id: 'angeloos',    label: 'AngeloOS',     icon: '⚙',  wip: 4 },
+      { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 3, wipSoon: 5 },
+      { id: 'solartown',   label: 'Solartown',    icon: '⚡', wip: 3, wipSoon: 5 },
+      { id: 'quantbot',    label: 'QuantBot',     icon: '💰', wip: 3, wipSoon: 5 },
+      { id: 'mariobrain',  label: 'mario-brain',  icon: '🧠', wip: 3, wipSoon: 5 },
+      { id: 'stack',       label: 'Stack (Plattform)', icon: '🧱', wip: 3, wipSoon: 5 },
+      { id: 'angeloos',    label: 'AngeloOS',     icon: '⚙',  wip: 3, wipSoon: 5 },
     ],
     prefixFirma: { sa: 'stayawesome', st: 'solartown', qb: 'quantbot', mb: 'mariobrain', ag: 'stack', sk: 'stack' },
     ghRepos: {
@@ -734,6 +736,7 @@ function liveKanban() {
     },
     async init() {
       await this.refresh();
+      await this.loadWipLimits();
       this.loadRollup();
       this.loadCapacity();
       this.loadUnlinked();
@@ -1026,6 +1029,22 @@ function liveKanban() {
         if (r.ok) this.capacity = await r.json();
       } catch (e) { console.error('capacity fetch:', e); }
     },
+    async loadWipLimits() {
+      try {
+        const r = await fetch(this.apiBase + '/api/wip-limits');
+        if (r.ok) {
+          const limits = await r.json();
+          this.firmas.forEach(f => {
+            if (limits[f.id]) {
+              f.wip = limits[f.id].now;
+              f.wipSoon = limits[f.id].soon;
+            }
+          });
+        }
+      } catch (e) {
+        console.warn('Could not load WIP limits:', e);
+      }
+    },
 
     async refresh(silent) {
       try {
@@ -1237,6 +1256,7 @@ function liveKanban() {
     toggleFirma(id) { this.filter[id] = !this.filter[id]; },
     cardsIn(firma, stage) { return this.cards.filter(c => c.firma === firma && c.stage === stage); },
     nowCount(firma) { return this.cardsIn(firma, 'now').length; },
+    soonCount(firma) { return this.cardsIn(firma, 'soon').length; },
     firmaOrder: [],
     get orderedFirmas() {
       const idx = id => { const i = this.firmaOrder.indexOf(id); return i === -1 ? 100 : i; };
