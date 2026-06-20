@@ -24,11 +24,11 @@ references:
 vk archiviert oder heilt ruhende Workspaces nicht. Belegt 2026-06-19:
 
 - **Rituale-Workspace**: Worktree ist *kein gültiges git-Repo*, 0 PR / 0 Merge,
-  Execution `killed`, hängt seit ~7 Tagen `archived=0`.
+  Execution unsauber beendet, hängt seit ~7 Tagen `archived=0`.
 - **3 pausierte Deck-Beads** (`st-yozd`/`st-1bpf`/`st-ib5e`): `vk-paused:no-commits-exit1`,
   **4-5× über Tage re-dispatcht und jedes Mal wieder gescheitert** — nie
   erfolgreich, nie aufgeräumt.
-- Unter den „aktiven" Workspaces: 31 completed + **14 failed + 2 killed**
+- Unter den „aktiven" Workspaces: 31 completed + **14 mit Miss + 2 abgebrochen**
   Executions, real laufend nur 2.
 
 Folge: Ruhende Workspaces hängen als „aktiv", verzerren die Agenten-Auslastung,
@@ -55,9 +55,9 @@ oder eskalieren — mit Retry-Budget, edge-getriggert, jede Aktion sichtbar.
 ## Lösung
 
 ### L1 — Detektion (edge + sweep)
-Subscribe auf das Execution-End-Event (`completed/failed/killed` — der
+Subscribe auf das Execution-End-Event (jeder terminale Execution-Ausgang — der
 `vibekanban`-adapter sieht es ohnehin) + ein periodischer Sweep nur für
-`running`-aber-stuck (kein Update seit > T). Kein Dauer-Poll.
+`running`-aber-pausiert (kein Update seit > T). Kein Dauer-Poll.
 
 ### L2 — Diagnose (das Sage-Hirn)
 Für einen ruhenden Workspace mit Bead: GLM-5.1 liest **Bead-Ziel + Outcome**
@@ -69,7 +69,7 @@ Workspace-Lifecycle.
 ```
 no-commits-exit1 + Ziel schon erledigt   →  Bead „already done" schließen + archivieren   [stoppt den Loop]
 no-commits-exit1 + Arbeit echt offen      →  re-dispatch mit diagnose-geschärftem/re-scopetem Prompt
-broken worktree / Setup-Fail (rituale)    →  archivieren + frisch re-dispatchen (oder schließen falls obsolet)
+broken worktree / Setup-Miss (rituale)    →  archivieren + frisch re-dispatchen (oder schließen falls obsolet)
 echter Blocker (Dep / Entscheidung)       →  eskalieren (advisor-mail + Board-Event), NICHT retry
 PR da, aber unmerged                       →  Merge anstoßen (Refinery-Nudge)
 ```
@@ -140,7 +140,7 @@ still.
 
 ---
 
-> Architektur-Hebel (Agent-Daemon + Diagnose-LLM + Dispatch/Refinery-Kopplung)
+> Architektur-Hebel (Agent-Angelo + Diagnose-LLM + Dispatch/Refinery-Kopplung)
 > → Plan-Pipeline. Deep-Tech verpflichtend (Heil-Entscheidungen mutieren echten
 > Compute + können loopen). Kein Bead vor Quick-Verdict.
 
@@ -173,4 +173,4 @@ Ein klar strukturierten Plan mit starkem Problembeleg, bewusst plausibler Scope-
 - **[Cockburn] Live-Geld-Ausnahme.** quantbot/Trading-Path-Beads → Sage **nur eskalieren**, kein autonomes close/re-dispatch (Live-Geld-Konvention „keine Änderungen ohne Permission").
 - **[Hohpe] Subscribable Execution-End-Event verifizieren** (wie Dispatch-PRD A1) — emittiert der vibekanban-adapter wirklich ein abonnierbares Event, oder degradiert „edge-triggered" still zu Poll?
 - **[Newman] Heal-Counter-Reset-Semantik** — setzt partieller Fortschritt (ein paar Commits, dann Fehler) den Zähler zurück oder nicht? Definieren, sonst verhungern harte Tasks oder pausierten Beads bleiben.
-- **[Crispin] Den Sage testen braucht eine Sandbox** (fake failed Bead/Workspace) — an die Staging-vk-Instanz koppeln, den autonomen Mutator nicht gegen prod-Beads testen.
+- **[Crispin] Den Sage testen braucht eine Sandbox** (fake gescheiterter Bead/Workspace) — an die Staging-vk-Instanz koppeln, den autonomen Mutator nicht gegen prod-Beads testen.

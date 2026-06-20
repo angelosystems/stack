@@ -165,7 +165,7 @@ Das PRD ist klar strukturiert, das Problem ist sauber vom Lösungs-Pitch getrenn
 
 1. **[Newman/Fowler — MAJOR] Die agentische Orchestrierungs-Komponente fehlt.** MCP liefert Tools + Resources, aber *wer* fährt die LLM↔Tool-Schleife (LLM-Call → Tool-Call ausführen → Antwort)? Der Browser kann es nicht (keine Keys client-seitig). Diese Komponente (im `serve`-Backend? eigener `agent-runner`?) ist das Herz des Features und ist nicht benannt. Dazu: das **Konversations-Memory** — der Agent muss die `ai_message`-Events pro Karte als Verlauf rücklesen; Thread-Isolation bei parallelen Tabs/Sessions spezifizieren (sonst interleaven zwei Gespräche auf derselben Karte).
 2. **[Hohpe — MAJOR] `ai_*`-Events vs. bestehende Event-Consumer + Idempotenz.** Der solartown-adapter/Stage-Proposer konsumiert `initiative_event`s. `ai_message`/`ai_action` dürfen diese Consumer **nicht** triggern/verfälschen — Event-Namespacing + Consumer-Filter festlegen. Und: AI-Aktionen brauchen einen Idempotency-Key (doppelte `dispatch`-Bestätigung = zwei Workspaces; `dispatch` löst echtes Compute aus).
-3. **[Nygard — MAJOR] Confirm-UI muss die konkrete Aktion + Params zeigen (Diff), nicht nur einen Button** — sonst Rubber-Stamping statt echtem Gate. Fehlgeschlagene AI-Aktionen (Endpoint 5xx) müssen ebenfalls Events werden (kein Silent-Fail), und LLM-Ausfall (one-api down/Timeout) muss im Drawer graceful degradieren.
+3. **[Nygard — MAJOR] Confirm-UI muss die konkrete Aktion + Params zeigen (Diff), nicht nur einen Button** — sonst Rubber-Stamping statt echtem Gate. Fehlgeschlagene AI-Aktionen (Endpoint 5xx) müssen ebenfalls Events werden (kein Silent-Miss), und LLM-Ausfall (one-api down/Timeout) muss im Drawer graceful degradieren.
 
 **NOTES (vor finalem Greenlight):**
 

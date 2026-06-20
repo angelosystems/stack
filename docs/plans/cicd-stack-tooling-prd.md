@@ -43,7 +43,7 @@ Software-Company-Grade rechte Hälfte, im Stil des bestehenden Stacks
 
 ```
 … main → [CI-Gate] → [Artefakt SHA] → [Deploy staging] → [Smoke] → [Promote prod] → [Health] → [Rollback?] → [Deploy-Event → Karte]
-         required      build-once       isoliert           pass?     atomar+restart    /api 200   auto bei Fail   sichtbar im Board
+         required      build-once       isoliert           pass?     atomar+restart    /api 200   auto bei Miss   sichtbar im Board
          check                                                                                                     
 ```
 
@@ -105,7 +105,7 @@ siehst du Plan→Bead→Code→Merge→Deploy→Health an **einem** Ort.
 - SC2: Ein absichtlich gebrochener Build/Test wird vom CI-Gate **vor** Merge
   rot und blockiert den mq-auto-merger.
 - SC3: Ein Deploy, dessen Health-Check fehlschlägt, rollt automatisch auf die
-  vorige Binary zurück und meldet den Fehlschlag als Event (kein Silent-Fail).
+  vorige Binary zurück und meldet den Fehlschlag als Event (kein Silent-Miss).
 - SC4: Staging-Smoke fängt einen Fehler wie den `<rig>_clean`-DSN-Bug **vor**
   prod (reproduzierbar mit genau diesem Bug als Regressions-Smoke).
 - SC5: Jede Initiative mit deploybarer Komponente zeigt im Drawer den aktuellen

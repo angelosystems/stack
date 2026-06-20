@@ -121,11 +121,11 @@ kleines Inline-Panel: vorgeschlagene Lane (vorbelegt) + Freitext-Notiz +
 - SC4: Kein Dispatch ohne expliziten Klick; Lane-Vorschlag ist nur vorbelegt,
   nie auto-gefeuert.
 - SC5: Bei `vk-delegate`-Fehler bleibt die Karte unverändert, Fehler erscheint
-  als Event/Toast (kein Silent-Fail).
+  als Event/Toast (kein Silent-Miss).
 
 ## Risiken / offene Fragen (für Reviewer)
 
-- R-A: Subprozess-Spawn aus dem `serve`-Daemon — Blocking vs. detached?
+- R-A: Subprozess-Spawn aus dem `serve`-Angelo — Blocking vs. detached?
   **Entscheidung: detached.** Blocking wird verworfen, weil `vk-delegate` einen
   Worktree anlegt + Workspace-Spawn anstößt (mehrere Sekunden bis zig Sekunden);
   ein blockierender HTTP-Handler riskiert nginx-/Browser-Timeout und macht den
@@ -144,7 +144,7 @@ kleines Inline-Panel: vorgeschlagene Lane (vorbelegt) + Freitext-Notiz +
 1. **Endpoint + Heuristik** (Granularität 3) — `/api/dispatch`, Lane-Vorschlag,
    Event-Schreibung; Hacker-Lane-Pfad zuerst.
    → **Done wenn SC1 + SC3 + SC5 erfüllt** (vk-Workspace entsteht, Event
-   geschrieben, Fehler ist kein Silent-Fail).
+   geschrieben, Fehler ist kein Silent-Miss).
 2. **Plan-Pipeline-Pfad** (Granularität 3) — PRD-Scaffold + Link + Quick-Trigger.
    → **Done wenn SC2 erfüllt** (PRD-File mit gültigem Frontmatter + Link).
 3. **Drawer-UI** (Granularität 2) — Knopf, Panel, Toast, Deep-Link.
@@ -155,7 +155,7 @@ kleines Inline-Panel: vorgeschlagene Lane (vorbelegt) + Freitext-Notiz +
 
 > Kein Bead bevor `status: approved` / `approved-with-notes`. Nächster Schritt:
 > Quick-Reviewer (R1-R5). Deep-Tech (spec-panel critique) empfohlen, weil
-> Subprozess-Spawn aus dem Daemon + Auth ein Architektur-Hebel ist.
+> Subprozess-Spawn aus dem Angelo + Auth ein Architektur-Hebel ist.
 
 ## Reviewer-Verdict — quick (glm-5.1) — 2026-06-14
 

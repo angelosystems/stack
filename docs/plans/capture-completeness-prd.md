@@ -66,7 +66,7 @@ Ein Reconciler findet Arbeit-ohne-Zuhause: (a) Beads ohne `plan:<slug>` bzw.
 ohne passende Initiative, (b) vk-Workspaces ohne Initiative-Link, (c) Commits
 auf getrackten Repos ohne Bead-Referenz. Ergebnis erscheint als sichtbare
 Board-Lane/View **„⚠ Unlinked — braucht Zuhause"**, gruppiert nach Firma.
-Der bestehende `--link`-Lauf zählt „orphaned" schon — diese Zahl bekommt ein
+Der bestehende `--link`-Lauf zählt die Roamer schon — diese Zahl bekommt ein
 Gesicht. **Alternative verworfen:** Orphans nur loggen (journalctl) — verworfen,
 weil unsichtbar = wird nie zugeordnet; das Leck muss aufs Board.
 
@@ -168,6 +168,6 @@ Klarer, strukturierter PRD-Draft mit messbarem Problembeleg, expliziter Nicht-Zi
 
 **NOTES:**
 - **[Cockburn] Steady-State-Triage-Last** — braucht jeder Orphan Mensch-Zuordnung? Dann ist die Hand-Erfassung nur verschoben, nicht entfernt (Ziel war Reduktion). Catch-all als *permanentes* Zuhause (niedrige Last) vs. Pflicht-Re-Assign klären.
-- **[Fowler] Detektor = Erweiterung des bestehenden `--link`-Reconcilers** (eine Orphan-Quelle), kein paralleler zweiter — sonst zwei Wahrheiten über „was ist orphan". Explizit machen.
+- **[Fowler] Detektor = Erweiterung des bestehenden `--link`-Reconcilers** (eine Roamer-Quelle), kein paralleler zweiter — sonst zwei Wahrheiten über „was ist roamer". Explizit machen.
 - **[Newman] `mk capture`-Idempotenz** (Doppel-Lauf = Doppel-Event) + Verortung der Metrik-Berechnung (per-rig vs. global, wann).
 - **[Wiegers] SC2 ohne Schwelle** — „sinkt messbar" braucht einen Floor oder die Akzeptanz „jeder verbleibende Orphan hat einen dokumentierten Grund" schärfer als Pflicht formulieren.
