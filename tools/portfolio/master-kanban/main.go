@@ -3062,6 +3062,10 @@ var sageSweepChan = make(chan struct{}, 1)
 var sageSweepMutex sync.Mutex
 
 func runSageSweep(ctx context.Context, p *pgxpool.Pool) {
+	runSageSweepEx(ctx, p, false)
+}
+
+func runSageSweepEx(ctx context.Context, p *pgxpool.Pool, onlyStuck bool) {
 	if sageOutageSimulated {
 		return
 	}
@@ -3074,21 +3078,42 @@ func runSageSweep(ctx context.Context, p *pgxpool.Pool) {
 		return
 	}
 
-	query := `
-		SELECT 
-			hex(w.id),
-			w.name,
-			hex(w.task_id),
-			COALESCE(ep.status, ''),
-			COALESCE(ep.exit_code, ''),
-			CAST(strftime('%s', 'now') - strftime('%s', COALESCE(ep.updated_at, w.created_at)) AS INTEGER) AS age_seconds
-		FROM workspaces w
-		LEFT JOIN sessions s ON s.workspace_id = w.id
-		LEFT JOIN execution_processes ep ON ep.session_id = s.id
-		WHERE (w.archived = 0 OR substr(hex(w.id), 1, 8) IN ('935D9575', 'B8427650', '05021F1F', '64D07879'))
-		  AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
-		ORDER BY w.created_at DESC, ep.created_at DESC;
-	`
+	var query string
+	if onlyStuck {
+		query = `
+			SELECT 
+				hex(w.id),
+				w.name,
+				hex(w.task_id),
+				COALESCE(ep.status, ''),
+				COALESCE(ep.exit_code, ''),
+				CAST(strftime('%s', 'now') - strftime('%s', COALESCE(ep.updated_at, w.created_at)) AS INTEGER) AS age_seconds
+			FROM workspaces w
+			LEFT JOIN sessions s ON s.workspace_id = w.id
+			LEFT JOIN execution_processes ep ON ep.session_id = s.id
+			WHERE w.archived = 0
+			  AND ep.status = 'running'
+			  AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
+			  AND CAST(strftime('%s', 'now') - strftime('%s', COALESCE(ep.updated_at, w.created_at)) AS INTEGER) > 7200
+			ORDER BY w.created_at DESC, ep.created_at DESC;
+		`
+	} else {
+		query = `
+			SELECT 
+				hex(w.id),
+				w.name,
+				hex(w.task_id),
+				COALESCE(ep.status, ''),
+				COALESCE(ep.exit_code, ''),
+				CAST(strftime('%s', 'now') - strftime('%s', COALESCE(ep.updated_at, w.created_at)) AS INTEGER) AS age_seconds
+			FROM workspaces w
+			LEFT JOIN sessions s ON s.workspace_id = w.id
+			LEFT JOIN execution_processes ep ON ep.session_id = s.id
+			WHERE (w.archived = 0 OR substr(hex(w.id), 1, 8) IN ('935D9575', 'B8427650', '05021F1F', '64D07879'))
+			  AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
+			ORDER BY w.created_at DESC, ep.created_at DESC;
+		`
+	}
 	cmd := exec.Command("sqlite3", "-readonly", "-separator", "|", vkDB, query)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -3294,8 +3319,8 @@ func startSageSteward(p *pgxpool.Pool) {
 				continue
 			}
 
-			// Run the Sage Sweep periodically
-			runSageSweep(context.Background(), p)
+			// Run the Sage Sweep periodically - only for stuck running workspaces
+			runSageSweepEx(context.Background(), p, true)
 
 			_, err := p.Exec(context.Background(),
 				`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
