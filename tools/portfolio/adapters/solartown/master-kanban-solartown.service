@@ -1,0 +1,18 @@
+[Unit]
+Description=Master-Kanban solartown-adapter (Bead-Status -> Portfolio-Board, edge-triggered via LISTEN)
+After=master-kanban-serve.service network-online.target
+Wants=master-kanban-serve.service
+
+[Service]
+Slice=master-kanban-collector.slice
+ExecStart=/opt/stack/bin/solartown-adapter --listen
+Environment=PORTFOLIO_DSN=postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable
+Environment=PORTFOLIO_API=http://127.0.0.1:7780
+Environment=PORTFOLIO_API_KEY=dev-secret
+Environment=BEADS_DSN=postgres://remote:remote@127.0.0.1:5433/solartown_clean
+Environment=BD_RIG=/root/solartown
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
