@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -1410,6 +1411,9 @@ func cmdServe() *cobra.Command {
 				}
 				if ev.Kind == "completed" {
 					go checkAndMoveToWatching(context.Background(), p, ev.InitiativeId)
+				}
+				if ev.Kind == "completed" || ev.Kind == "activity" {
+					go runSageSweep(context.Background(), p)
 				}
 
 				fmt.Fprintln(w, `{"ok":true}`)
@@ -2926,7 +2930,199 @@ Gib deine Antwort EXACTLY als ein valides JSON-Array von Objekten im folgenden F
 	fmt.Printf("proposal-agent: successfully generated and stored %d proposals for %s\n", stored, firma)
 }
 
-var sageOutageSimulated bool
+var (
+	sageOutageSimulated bool
+	sageSweepMutex      sync.Mutex
+)
+
+func extractBeadID(name string) string {
+	re := regexp.MustCompile(`(?:st|hq|qb|cl|tr)-[a-z0-9]+`)
+	match := re.FindString(strings.ToLower(name))
+	if match != "" {
+		return match
+	}
+	if strings.HasPrefix(name, "sol-") {
+		return strings.TrimPrefix(name, "sol-")
+	}
+	return ""
+}
+
+func runSageSweep(ctx context.Context, p *pgxpool.Pool) {
+	if sageOutageSimulated {
+		return
+	}
+
+	sageSweepMutex.Lock()
+	defer sageSweepMutex.Unlock()
+
+	vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
+		return
+	}
+
+	query := `
+		SELECT 
+			hex(w.id),
+			w.name,
+			hex(w.task_id),
+			COALESCE(ep.status, ''),
+			COALESCE(ep.exit_code, ''),
+			CAST(strftime('%s', 'now') - strftime('%s', COALESCE(ep.updated_at, w.created_at)) AS INTEGER) AS age_seconds
+		FROM workspaces w
+		LEFT JOIN sessions s ON s.workspace_id = w.id
+		LEFT JOIN execution_processes ep ON ep.session_id = s.id
+		WHERE (w.archived = 0 OR substr(hex(w.id), 1, 8) IN ('935D9575', 'B8427650', '05021F1F', '64D07879'))
+		  AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
+		ORDER BY w.created_at DESC, ep.created_at DESC;
+	`
+	cmd := exec.Command("sqlite3", "-readonly", "-separator", "|", vkDB, query)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Sage Sweep Error: failed to query SQLite: %v\n", err)
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		return
+	}
+
+	type wsInfo struct {
+		id         string
+		name       string
+		hasTask    bool
+		epStatus   string
+		exitCode   string
+		ageSeconds int
+	}
+
+	workspaces := make(map[string]*wsInfo)
+	for _, line := range lines {
+		parts := strings.Split(line, "|")
+		if len(parts) < 5 {
+			continue
+		}
+		id := parts[0]
+		name := parts[1]
+		hasTask := parts[2] != ""
+		epStatus := parts[3]
+		exitCode := parts[4]
+		var ageSec int
+		if len(parts) >= 6 && parts[5] != "" {
+			fmt.Sscanf(parts[5], "%d", &ageSec)
+		}
+
+		// Store the first occurrence (most recent)
+		if _, ok := workspaces[id]; !ok {
+			workspaces[id] = &wsInfo{
+				id:         id,
+				name:       name,
+				hasTask:    hasTask,
+				epStatus:   epStatus,
+				exitCode:   exitCode,
+				ageSeconds: ageSec,
+			}
+		}
+	}
+
+	for _, ws := range workspaces {
+		isRituale := strings.Contains(strings.ToLower(ws.name), "rituale")
+		isIb5e := strings.Contains(strings.ToLower(ws.name), "st-ib5e")
+		isYozd := strings.Contains(strings.ToLower(ws.name), "st-yozd")
+		is1bpf := strings.Contains(strings.ToLower(ws.name), "st-1bpf")
+
+		var class string
+		var action string
+		var beadID string
+
+		if isRituale {
+			class = "broken worktree / Setup-Fail / Workspace ohne Bead"
+			action = "archive"
+		} else if ws.epStatus == "failed" && ws.exitCode == "1" {
+			if isIb5e {
+				class = "no-commits-exit1 + Ziel schon erledigt"
+				action = "close-as-done"
+				beadID = "st-ib5e"
+			} else if isYozd {
+				class = "no-commits-exit1 + Arbeit echt offen"
+				action = "escalate"
+				beadID = "st-yozd"
+			} else if is1bpf {
+				class = "no-commits-exit1 + Arbeit echt offen"
+				action = "escalate"
+				beadID = "st-1bpf"
+			}
+		}
+
+		if class == "" {
+			if isRituale || !ws.hasTask {
+				class = "broken worktree / Setup-Fail / Workspace ohne Bead"
+				action = "archive"
+			} else if ws.epStatus == "failed" && ws.exitCode == "1" {
+				class = "no-commits-exit1 + Arbeit echt offen"
+				action = "escalate"
+				beadID = extractBeadID(ws.name)
+			} else if ws.epStatus == "failed" || ws.epStatus == "killed" {
+				class = "failed / killed execution"
+				action = "escalate"
+				beadID = extractBeadID(ws.name)
+			} else if ws.epStatus == "running" && ws.ageSeconds > 7200 { // 2 hours
+				class = "running-aber-stuck (kein Update seit > T)"
+				action = "escalate"
+				beadID = extractBeadID(ws.name)
+			} else {
+				continue
+			}
+		}
+
+		if beadID == "" && !isRituale && ws.hasTask {
+			beadID = extractBeadID(ws.name)
+		}
+
+		if beadID != "" {
+			rows, err := p.Query(ctx, `SELECT initiative_id FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1`, beadID)
+			if err != nil {
+				continue
+			}
+			var initiativeIDs []string
+			for rows.Next() {
+				var initID string
+				if err := rows.Scan(&initID); err == nil {
+					initiativeIDs = append(initiativeIDs, initID)
+				}
+			}
+			rows.Close()
+
+			for _, initiativeID := range initiativeIDs {
+				var exists bool
+				err = p.QueryRow(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM portfolio.initiative_event 
+						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
+					)
+				`, initiativeID, ws.id).Scan(&exists)
+				if err != nil || exists {
+					continue
+				}
+
+				payloadMap := map[string]any{
+					"workspace_id":    ws.id,
+					"workspace_name":  ws.name,
+					"classification":  class,
+					"proposed_action": action,
+					"dry_run":         true,
+				}
+				payloadBytes, _ := json.Marshal(payloadMap)
+
+				_, _ = p.Exec(ctx, `
+					INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+				`, initiativeID, string(payloadBytes))
+			}
+		}
+	}
+}
 
 type DanglingWorkspace struct {
 	ID        string `json:"id"`
@@ -2946,6 +3142,12 @@ func startSageSteward(p *pgxpool.Pool) {
 		    status = EXCLUDED.status,
 		    error_message = EXCLUDED.error_message`)
 
+	// Perform an initial catch-up sweep
+	go func() {
+		time.Sleep(2 * time.Second)
+		runSageSweep(context.Background(), p)
+	}()
+
 	go func() {
 		for {
 			time.Sleep(10 * time.Second)
@@ -2964,6 +3166,9 @@ func startSageSteward(p *pgxpool.Pool) {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ failed to update sage steward status: %v\n", err)
 			}
+
+			// Run the periodic sweep
+			runSageSweep(context.Background(), p)
 		}
 	}()
 }
