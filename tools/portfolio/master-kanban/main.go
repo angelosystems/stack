@@ -1242,42 +1242,6 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(response)
 			})
 
-			// L1 — Unlinked items endpoint
-			http.HandleFunc("/api/unlinked", func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-
-				rows, err := p.Query(r.Context(),
-					`SELECT id, kind, title, firma, rig_prefix, join_key, discovered_at FROM portfolio.unlinked_item ORDER BY firma, kind, id`)
-				if err != nil {
-					http.Error(w, err.Error(), 500)
-					return
-				}
-				defer rows.Close()
-
-				type unlinkedItem struct {
-					ID           string    `json:"id"`
-					Kind         string    `json:"kind"`
-					Title        string    `json:"title"`
-					Firma        string    `json:"firma"`
-					RigPrefix    string    `json:"rig_prefix"`
-					JoinKey      *string   `json:"join_key"`
-					DiscoveredAt time.Time `json:"discovered_at"`
-				}
-
-				items := []unlinkedItem{}
-				for rows.Next() {
-					var item unlinkedItem
-					if err := rows.Scan(&item.ID, &item.Kind, &item.Title, &item.Firma, &item.RigPrefix, &item.JoinKey, &item.DiscoveredAt); err != nil {
-						http.Error(w, err.Error(), 500)
-						return
-					}
-					items = append(items, item)
-				}
-
-				json.NewEncoder(w).Encode(items)
-			})
-
 			// L3 — Link an unlinked item to an initiative
 			http.HandleFunc("/api/link", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
