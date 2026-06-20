@@ -475,6 +475,30 @@ func runLink(p *pgxpool.Pool) error {
 			}
 			continue
 		}
+		if reason, reachable := rigReachable(rig.Dir); !reachable {
+			fmt.Printf("  ⊘ skip rig %s (prefix %s): Quelle unerreichbar — %s\n", rig.Dir, rig.Prefix, reason)
+			unreachableRigs = append(unreachableRigs, rig.Prefix)
+
+			firma := getFirmaForRig(rig.Prefix)
+			rigID := "rig:" + rig.Prefix
+			title := "nicht erfasst — Quelle unerreichbar"
+
+			_, dbErr := p.Exec(context.Background(),
+				`INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key)
+				 VALUES ($1, 'rig', $2, $3, $4, NULL)
+				 ON CONFLICT (id) DO UPDATE SET
+				    kind = EXCLUDED.kind,
+				    title = EXCLUDED.title,
+				    firma = EXCLUDED.firma,
+				    rig_prefix = EXCLUDED.rig_prefix,
+				    join_key = EXCLUDED.join_key,
+				    discovered_at = now()`,
+				rigID, title, firma, rig.Prefix)
+			if dbErr != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to record unreachable rig %s: %v\n", rig.Prefix, dbErr)
+			}
+			continue
+		}
 		fmt.Printf("  scanning rig %s (prefix %s)\n", rig.Dir, rig.Prefix)
 		t, n, al, o, err := scanRigBeads(p, slugToInitiative, rig, linkedBeads)
 		if err != nil {
@@ -572,6 +596,29 @@ func slugFromSpecID(specID string) string {
 	base = strings.TrimSuffix(base, ".md")
 	base = strings.TrimSuffix(base, "-prd")
 	return base
+}
+
+// rigReachable returns (reason, true) when the rig directory exists and has a
+// .beads database; otherwise (reason, false) for soft "Quelle unerreichbar"
+// reporting instead of letting bd/chdir hard-error.
+func rigReachable(dir string) (string, bool) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "dir nicht vorhanden", false
+		}
+		return fmt.Sprintf("stat: %v", err), false
+	}
+	if !info.IsDir() {
+		return "nicht Verzeichnis", false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads")); err != nil {
+		if os.IsNotExist(err) {
+			return "kein .beads", false
+		}
+		return fmt.Sprintf("stat .beads: %v", err), false
+	}
+	return "", true
 }
 
 func sqlNullString(s string) *string {
