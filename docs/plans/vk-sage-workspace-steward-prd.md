@@ -4,7 +4,7 @@ slug: vk-sage-workspace-steward
 status: approved-with-notes
 layer: prd
 parent_plan: /opt/stack/docs/plans/master-kanban.md
-scope: Ein Sage-Analog für vk-Workspaces — diagnostiziert tote/hängende Workspaces und heilt sie (re-dispatch, close-as-done, nudge-merge, eskalieren), statt sie als Leichen hängen zu lassen. Jeder Workspace wurde mit einem Grund (Bead) angelegt; ein toter Workspace ist ein unerledigtes Ziel.
+scope: Ein Sage-Analog für vk-Workspaces — diagnostiziert ruhende/pausierte Workspaces und heilt sie (re-dispatch, close-as-done, nudge-merge, eskalieren), statt sie ungenutzt liegen zu lassen. Jeder Workspace wurde mit einem Grund (Bead) angelegt; ein ruhender Workspace ist ein unerledigtes Ziel.
 created: 2026-06-19
 review:
   quick: auto
@@ -33,7 +33,7 @@ vk archiviert oder heilt ruhende Workspaces nicht. Belegt 2026-06-19:
 
 Folge: Ruhende Workspaces hängen als „aktiv", verzerren die Agenten-Auslastung,
 binden Retry-Compute. **Jeder Workspace wurde mit einem Grund (Bead)
-angelegt** — ein toter Workspace ist ein *unerledigtes Ziel*, nicht nur Müll.
+angelegt** — ein ruhender Workspace ist ein *unerledigtes Ziel*, nicht nur Müll.
 Aber: **naives „bei Fehler neu starten" loopt ewig** (die 3 pausierten Beads beweisen es).
 
 ## Ziel
@@ -115,7 +115,7 @@ still.
   Sessions+Reactor zusammen = die Überlauf-Sorge. Mitigation: Sage-Dispatches
   laufen durch dasselbe Admission-/WIP-Gate (sobald es existiert); bis dahin
   harte Concurrency-Cap + das Retry-Budget.
-- R-C: **Eskalations-Flut** — jeder tote Workspace eskaliert → Lärm. Mitigation:
+- R-C: **Eskalations-Flut** — jeder ruhende Workspace eskaliert → Lärm. Mitigation:
   einmal pro Bead eskalieren, dedupen, gruppieren.
 - R-D: **Workspaces ohne Bead** (tr-*/Test) — kein „Grund" zum Heilen; nur
   archivieren, nie re-dispatchen.
@@ -164,7 +164,7 @@ Ein klar strukturierten Plan mit starkem Problembeleg, bewusst plausibler Scope-
 
 **MUST-FIX vor Phase-1-Beads (3):**
 
-1. **[Nygard — KRITISCH] Der Sage muss die *alleinige* Re-Dispatch-Autorität bei Fehlern sein.** Heute re-dispatchen **zwei** Dinge gescheiterte Beads: der bestehende Auto-Retry (der die 3 Zombies 4-5× geloopt hat) **und** der Reactor. Einen smarten Healer danebenzustellen, *ohne den dummen Retry zu entfernen/unterzuordnen*, macht das Retry-Budget wirkungslos — die pausierten Beads bleiben. Das PRD muss spezifizieren: alten Auto-Retry abschalten, **alle** Failure-Re-Dispatches durch den Sage routen.
+1. **[Nygard — KRITISCH] Der Sage muss die *alleinige* Re-Dispatch-Autorität bei Fehlern sein.** Heute re-dispatchen **zwei** Dinge gescheiterte Beads: der bestehende Auto-Retry (der die 3 pausierten Beads 4-5× geloopt hat) **und** der Reactor. Einen smarten Healer danebenzustellen, *ohne den dummen Retry zu entfernen/unterzuordnen*, macht das Retry-Budget wirkungslos — die pausierten Beads bleiben. Das PRD muss spezifizieren: alten Auto-Retry abschalten, **alle** Failure-Re-Dispatches durch den Sage routen.
 2. **[Fowler — MAJOR] Der „close-as-done"-Sicherheitsmechanismus ist hand-waved.** Es ist die *gefährlichste* Aktion (markiert Arbeit still als erledigt). R-A nennt „verifizierbarer Check", aber **wie** der Sage das Done-Artefakt eines beliebigen Beads mit Prosa-Akzeptanz kennt, ist unspezifiziert. Entweder Beads tragen einen **maschinen-prüfbaren Done-Probe**, oder close-as-done braucht **Mensch-Bestätigung**. Sonst droppt ein false-close Arbeit lautlos — das Gegenteil der Capture-Completeness-Maxime.
 3. **[Hohpe — MAJOR] Atomarer Claim/Lock vor jeder Aktion.** Ohne per-Bead-Lease/Compare-and-Set handeln zwei Sage-Zyklen (oder Sage+Reactor) doppelt am selben ruhenden Workspace. Heal-Counter-Inkrement **und** Aktion müssen atomar sein.
 
