@@ -439,6 +439,204 @@
       </section>
     </template>
 
+    <!-- ════ CAPACITY-HOST-VIEW (P2.1) ════ -->
+    <template x-if="view==='capacity_host'">
+      <section class="bg-white rounded-lg shadow-sm border border-slate-200">
+        <header class="px-5 py-3 border-b border-slate-200 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <h2 class="font-semibold uppercase tracking-wide text-sm">⚡ Host-Kapazität & Systemgesundheit</h2>
+            <span class="text-xs text-slate-400">Echtzeit-Metriken aus dem kanonischen Collector-Datensatz</span>
+          </div>
+          <!-- Liveness & Stand-Indikator -->
+          <div class="flex items-center gap-2 text-xs font-medium" x-show="capacityHost">
+            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider"
+              :class="capacityHost.liveness === 'alive' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'"
+              x-text="'Collector: ' + capacityHost.liveness"></span>
+            <span class="text-slate-400">|</span>
+            <span class="text-slate-500">Stand:</span>
+            <span class="font-mono text-slate-800" x-text="'vor ' + capacityHost.age_seconds + 's'"></span>
+          </div>
+        </header>
+
+        <div class="p-6">
+          <!-- Fallback when no data -->
+          <template x-if="!capacityHost">
+            <div class="py-12 text-center text-slate-400">
+              <span class="text-3xl animate-pulse">⏳</span>
+              <div class="mt-2 font-semibold">Lade Host-Kapazitätsdaten...</div>
+            </div>
+          </template>
+
+          <template x-if="capacityHost">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              
+              <!-- Left: Visual Column / Kapazitäts-Säule -->
+              <div class="bg-slate-50 rounded-xl p-5 border border-slate-100 flex flex-col items-center justify-center min-h-[400px]">
+                <h3 class="font-bold text-slate-700 text-sm uppercase tracking-wider mb-6 text-center">Kapazitäts-Säule</h3>
+                
+                <!-- The physical pillar graphic -->
+                <div class="relative w-28 h-72 bg-slate-200 rounded-2xl border-4 border-slate-300 shadow-inner overflow-hidden flex flex-col justify-end">
+                  
+                  <!-- RAM Portion -->
+                  <div class="w-full transition-all duration-500 ease-out flex items-center justify-center text-white font-mono text-xs font-bold"
+                    :style="'height: ' + capacityHost.ram + '%;'"
+                    :class="capacityHost.ram >= 90 ? 'bg-red-500' : (capacityHost.ram >= 75 ? 'bg-amber-500' : 'bg-sky-500')">
+                    <span x-text="Math.round(capacityHost.ram) + '% RAM'"></span>
+                  </div>
+                  
+                  <!-- Headroom Indicator Overlay / Label at top if room -->
+                  <div class="absolute inset-x-0 top-2 text-center font-semibold text-xs text-slate-600 flex flex-col items-center">
+                    <span>Headroom</span>
+                    <span class="font-mono text-emerald-600 font-bold text-sm" x-text="Math.round(capacityHost.headroom) + '%'"></span>
+                  </div>
+                </div>
+
+                <div class="mt-6 text-center space-y-1 text-xs text-slate-500">
+                  <div class="font-semibold text-slate-700">Verfügbarer Headroom: <span class="font-mono text-emerald-600 font-bold" x-text="capacityHost.headroom.toFixed(1) + '%'"></span></div>
+                  <div>(Puffer für Agenten-Instanziierung)</div>
+                </div>
+              </div>
+
+              <!-- Middle: Detailed Metrics & Progress Bars -->
+              <div class="space-y-6 lg:col-span-2">
+                
+                <!-- Verdict Alert Banner -->
+                <div class="p-4 rounded-xl border flex items-center gap-4 transition"
+                  :class="capacityHost.governor_verdict === 'healthy' ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : (capacityHost.governor_verdict === 'freeze' ? 'bg-amber-50 border-amber-200 text-amber-950 animate-pulse' : 'bg-red-50 border-red-200 text-red-950')">
+                  <span class="text-2xl" x-text="capacityHost.governor_verdict === 'healthy' ? '🟢' : (capacityHost.governor_verdict === 'freeze' ? '⚠️' : '🚨')"></span>
+                  <div class="flex-1">
+                    <div class="font-bold text-sm uppercase tracking-wider">Governor-Verdict: <span x-text="capacityHost.governor_verdict"></span></div>
+                    <div class="text-xs mt-0.5" x-text="capacityHost.governor_verdict === 'healthy' ? 'Systemauslastung im grünen Bereich. Dispatches uneingeschränkt zulässig.' : 'WARNUNG: Hohe Systemlast! Governor erzwingt Freeze-Marge.'"></div>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  
+                  <!-- Resources Card -->
+                  <div class="bg-white border border-slate-150 rounded-xl p-5 shadow-sm space-y-4">
+                    <h4 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
+                      <span>📊</span> System-Ressourcen
+                    </h4>
+                    
+                    <!-- CPU progress -->
+                    <div class="space-y-1">
+                      <div class="flex justify-between text-xs">
+                        <span class="text-slate-600 font-medium">CPU-Last</span>
+                        <span class="font-mono font-bold text-slate-800" x-text="capacityHost.cpu.toFixed(1) + '%'"></span>
+                      </div>
+                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <div class="h-full bg-slate-600 transition-all duration-500" :style="'width: ' + capacityHost.cpu + '%'"></div>
+                      </div>
+                    </div>
+
+                    <!-- RAM progress -->
+                    <div class="space-y-1">
+                      <div class="flex justify-between text-xs">
+                        <span class="text-slate-600 font-medium">RAM-Belegung</span>
+                        <span class="font-mono font-bold text-slate-800" x-text="capacityHost.ram.toFixed(1) + '%'"></span>
+                      </div>
+                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <div class="h-full bg-sky-500 transition-all duration-500" :style="'width: ' + capacityHost.ram + '%'"></div>
+                      </div>
+                    </div>
+
+                    <!-- Disk progress -->
+                    <div class="space-y-1">
+                      <div class="flex justify-between text-xs">
+                        <span class="text-slate-600 font-medium">Disk-Belegung</span>
+                        <span class="font-mono font-bold text-slate-800" x-text="capacityHost.disk.toFixed(1) + '%'"></span>
+                      </div>
+                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <div class="h-full bg-amber-600 transition-all duration-500" :style="'width: ' + capacityHost.disk + '%'"></div>
+                      </div>
+                    </div>
+
+                    <!-- Swap progress -->
+                    <div class="space-y-1">
+                      <div class="flex justify-between text-xs">
+                        <span class="text-slate-600 font-medium">Swap-Belegung</span>
+                        <span class="font-mono font-bold text-slate-800" x-text="capacityHost.swap.toFixed(1) + '%'"></span>
+                      </div>
+                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <div class="h-full bg-indigo-500 transition-all duration-500" :style="'width: ' + capacityHost.swap + '%'"></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- PSI Pressure Stalls Card -->
+                  <div class="bg-white border border-slate-150 rounded-xl p-5 shadow-sm space-y-4">
+                    <h4 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
+                      <span>⏳</span> System-Druck (PSI)
+                    </h4>
+                    
+                    <div class="space-y-4">
+                      <!-- PSI CPU -->
+                      <div class="flex items-center justify-between border-b border-slate-50 pb-2">
+                        <div>
+                          <div class="text-xs font-medium text-slate-700">PSI CPU</div>
+                          <div class="text-[10px] text-slate-400">Verzögerung durch CPU-Mangel</div>
+                        </div>
+                        <span class="font-mono font-bold text-sm text-slate-800" x-text="capacityHost.psi_cpu.toFixed(2) + '%'"></span>
+                      </div>
+
+                      <!-- PSI Memory -->
+                      <div class="flex items-center justify-between border-b border-slate-50 pb-2">
+                        <div>
+                          <div class="text-xs font-medium text-slate-700">PSI Memory</div>
+                          <div class="text-[10px] text-slate-400">Verzögerung durch RAM-Mangel</div>
+                        </div>
+                        <span class="font-mono font-bold text-sm text-slate-800" x-text="capacityHost.psi_memory.toFixed(2) + '%'"></span>
+                      </div>
+
+                      <!-- PSI IO -->
+                      <div class="flex items-center justify-between">
+                        <div>
+                          <div class="text-xs font-medium text-slate-700">PSI IO</div>
+                          <div class="text-[10px] text-slate-400">Verzögerung durch Festplatten-I/O</div>
+                        </div>
+                        <span class="font-mono font-bold text-sm text-slate-800" x-text="capacityHost.psi_io.toFixed(2) + '%'"></span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Freeze-Marge Card -->
+                  <div class="bg-white border border-slate-150 rounded-xl p-5 shadow-sm space-y-4 md:col-span-2">
+                    <h4 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
+                      <span>❄️</span> Freeze-Marge & Stabilität
+                    </h4>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <!-- Committed Ratio -->
+                      <div class="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
+                        <div>
+                          <div class="text-xs font-semibold text-slate-700">Committed Ratio</div>
+                          <div class="text-[10px] text-slate-400">Zugeordneter vs physischer Speicher</div>
+                        </div>
+                        <span class="font-mono font-bold text-base text-slate-800" x-text="capacityHost.committed_ratio.toFixed(3)"></span>
+                      </div>
+
+                      <!-- Swap Trend -->
+                      <div class="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
+                        <div>
+                          <div class="text-xs font-semibold text-slate-700">Swap-Trend</div>
+                          <div class="text-[10px] text-slate-400">Verlaufstendenz der Auslagerung</div>
+                        </div>
+                        <span class="font-mono font-bold text-sm px-2.5 py-1 rounded"
+                          :class="capacityHost.swap_trend === 'stable' ? 'bg-slate-200 text-slate-700' : (capacityHost.swap_trend === 'rising' ? 'bg-red-100 text-red-800 animate-pulse' : 'bg-emerald-100 text-emerald-800')"
+                          x-text="capacityHost.swap_trend"></span>
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+
+            </div>
+          </template>
+        </div>
+      </section>
+    </template>
+
     <footer class="text-xs text-slate-500 pt-4 pb-12">
       Master-Kanban LIVE · Board = Portfolio · Pipeline = Plan-Status (git-Frontmatter) · Backlog = Beads ohne Lane ·
       SoT: git + solartown_clean — dieses Board ist reine Projektion
@@ -804,6 +1002,7 @@ function liveKanban() {
       { id: 'pipeline', label: 'Pipeline' },
       { id: 'backlog',  label: 'Backlog' },
       { id: 'unlinked', label: '⚠ Unlinked — braucht Zuhause' },
+      { id: 'capacity_host', label: '⚡ Kapazität (Host)' },
     ],
     firmas: [
       { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 3, wipSoon: 5 },
@@ -870,6 +1069,7 @@ function liveKanban() {
 
     rollup: {},
     capacity: {},
+    capacityHost: null,
     toasts: [],
     showToast(message, type = 'success') {
       const id = Date.now() + Math.random();
@@ -883,8 +1083,9 @@ function liveKanban() {
       await this.loadWipLimits();
       this.loadRollup();
       this.loadCapacity();
+      this.loadCapacityHost();
       this.loadUnlinked();
-      setInterval(() => { this.refresh(true); this.loadCapacity(); }, 30000);
+      setInterval(() => { this.refresh(true); this.loadCapacity(); this.loadCapacityHost(); }, 30000);
       // Deep-Link: #<initiative-id> öffnet Karte + Baum
       const h = location.hash.slice(1);
       if (h) this.$nextTick(async () => {
@@ -1173,6 +1374,12 @@ function liveKanban() {
         if (r.ok) this.capacity = await r.json();
       } catch (e) { console.error('capacity fetch:', e); }
     },
+    async loadCapacityHost() {
+      try {
+        const r = await fetch(this.apiBase + '/api/capacity-host');
+        if (r.ok) this.capacityHost = await r.json();
+      } catch (e) { console.error('capacityHost fetch:', e); }
+    },
     async loadWipLimits() {
       try {
         const r = await fetch(this.apiBase + '/api/wip-limits');
@@ -1200,6 +1407,7 @@ function liveKanban() {
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
         if (this.view === 'unlinked') await this.loadUnlinked();
+        if (this.view === 'capacity_host') await this.loadCapacityHost();
         const t = new Date().toLocaleTimeString('de-DE');
         this.lastFetched = (silent ? 'auto-refresh' : 'geladen') + ' ' + t;
       } catch (e) {
@@ -1213,6 +1421,7 @@ function liveKanban() {
       if (v === 'pipeline') await this.loadAllPlans();
       if (v === 'backlog') await this.loadBacklog();
       if (v === 'unlinked') await this.loadUnlinked();
+      if (v === 'capacity_host') await this.loadCapacityHost();
     },
 
     async loadUnlinked() {
