@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -375,7 +374,7 @@ func TestSageStopAndEscalate(t *testing.T) {
 
 	// --- TEST 1: Regular Bead (N=2 retry budget) ---
 	// First Failure (Retry 1/2) -> Should heal
-	res1, err := engine.ProcessFailure(ctx, testBeadID)
+	res1, err := engine.ProcessFailure(ctx, testBeadID, false)
 	if err != nil {
 		t.Fatalf("ProcessFailure 1 failed: %v", err)
 	}
@@ -390,7 +389,7 @@ func TestSageStopAndEscalate(t *testing.T) {
 	}
 
 	// Second Failure (Retry 2/2) -> Should heal
-	res2, err := engine.ProcessFailure(ctx, testBeadID)
+	res2, err := engine.ProcessFailure(ctx, testBeadID, false)
 	if err != nil {
 		t.Fatalf("ProcessFailure 2 failed: %v", err)
 	}
@@ -405,7 +404,7 @@ func TestSageStopAndEscalate(t *testing.T) {
 	}
 
 	// Third Failure (Retry 3/2 -> Budget Exhausted!) -> Should stop and escalate (SC3)
-	res3, err := engine.ProcessFailure(ctx, testBeadID)
+	res3, err := engine.ProcessFailure(ctx, testBeadID, false)
 	if err != nil {
 		t.Fatalf("ProcessFailure 3 failed: %v", err)
 	}
@@ -449,7 +448,7 @@ func TestSageStopAndEscalate(t *testing.T) {
 
 	// --- TEST 2: Live Geld Bead (quantbot) ---
 	// First Failure -> Should immediately escalate with Live-Geld-Konvention exception
-	resLG, err := engine.ProcessFailure(ctx, testLiveGeldID)
+	resLG, err := engine.ProcessFailure(ctx, testLiveGeldID, false)
 	if err != nil {
 		t.Fatalf("ProcessFailure for Live-Geld failed: %v", err)
 	}
@@ -570,5 +569,57 @@ func TestSageSteward_Sweep(t *testing.T) {
 
 	if !exists {
 		t.Errorf("expected sage_action event to be logged for initiative %s after runSageSweep, but it was not", testInitiativeID)
+	}
+}
+
+func TestSagePartialProgressReset(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+		return
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+		return
+	}
+
+	testBeadID := "sa-test-sage-reset-bead"
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testBeadID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testBeadID)
+
+	// Insert test initiative with initial heal_count = 1
+	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend, heal_count)
+		VALUES ($1, 'stayawesome', 'idea', 'Test Regular Bead with Partial Progress Reset', 'plan_file', 1)`, testBeadID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testBeadID)
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testBeadID)
+	}()
+
+	engine := NewSageDecisionEngine(p, 2)
+
+	// Failure with hasPartialProgress = true -> Should reset the counter to 0 and heal/re-dispatch
+	res, err := engine.ProcessFailure(ctx, testBeadID, true)
+	if err != nil {
+		t.Fatalf("ProcessFailure failed: %v", err)
+	}
+	if res != "healed" {
+		t.Errorf("expected res to be 'healed', got %q", res)
+	}
+
+	var healCount int
+	_ = p.QueryRow(ctx, "SELECT heal_count FROM portfolio.initiative WHERE id = $1", testBeadID).Scan(&healCount)
+	if healCount != 0 {
+		t.Errorf("expected heal_count to be reset to 0, got %d", healCount)
 	}
 }

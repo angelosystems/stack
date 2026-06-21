@@ -406,7 +406,8 @@ func NewSageDecisionEngine(pool *pgxpool.Pool, defaultMaxHeals int) *SageDecisio
 }
 
 // ProcessFailure evaluates a failed run for an initiative and decides whether to heal or escalate.
-func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID string) (string, error) {
+// It implements the Newman-Note Reset-Semantik for partial progress (Counter-Reset-Regel).
+func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID string, hasPartialProgress bool) (string, error) {
 	// 1. Fetch the initiative details (firma/company, current heal_count)
 	var firma string
 	var healCount int
@@ -431,8 +432,16 @@ func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID st
 		return "escalated (live-geld)", nil
 	}
 
-	// 3. For regular beads, check the retry/healing budget (L4)
-	if healCount >= s.DefaultMaxHeals {
+	// 3. Apply Newman-Note Reset-Semantik: If hasPartialProgress is true, reset heal count to 0.
+	var newHealCount int
+	if hasPartialProgress {
+		newHealCount = 0
+	} else {
+		newHealCount = healCount + 1
+	}
+
+	// 4. For regular beads, check the retry/healing budget (L4)
+	if !hasPartialProgress && healCount >= s.DefaultMaxHeals {
 		// STOP + Escalate!
 		err = s.Escalate(ctx, initiativeID, fmt.Sprintf("Retry-Budget verbraucht (%d/%d erfolglose Heilungen)", healCount, s.DefaultMaxHeals), healCount, false)
 		if err != nil {
@@ -441,19 +450,33 @@ func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID st
 		return "escalated (budget-exhausted)", nil
 	}
 
-	// 4. Otherwise, perform healing/re-dispatch
-	newHealCount := healCount + 1
+	// 5. Update initiative heal_count and heal_counter
 	_, err = s.Pool.Exec(ctx,
-		`UPDATE portfolio.initiative SET heal_count = $1, updated_at = now() WHERE id = $2`,
+		`UPDATE portfolio.initiative SET heal_count = $1, heal_counter = $1, updated_at = now() WHERE id = $2`,
 		newHealCount, initiativeID)
 	if err != nil {
 		return "", err
 	}
 
+	// Also sync to sage_heal_count table
+	_, _ = s.Pool.Exec(ctx, `
+		INSERT INTO portfolio.sage_heal_count (bead_id, heal_count, escalated, updated_at)
+		VALUES ($1, $2, false, NOW())
+		ON CONFLICT (bead_id) DO UPDATE
+		SET heal_count = EXCLUDED.heal_count,
+		    updated_at = NOW()
+	`, initiativeID, newHealCount)
+
 	// Log healing action board-event
+	var reason string
+	if hasPartialProgress {
+		reason = fmt.Sprintf("Automatisches Heilen / Re-dispatch eingeleitet mit Reset des Heal-Counters wegen partial progress (Heilversuch %d/%d)", newHealCount, s.DefaultMaxHeals)
+	} else {
+		reason = fmt.Sprintf("Automatisches Heilen / Re-dispatch eingeleitet (Heilversuch %d/%d)", newHealCount, s.DefaultMaxHeals)
+	}
 	payload := SageAction{
 		Action:     "heal",
-		Reason:     fmt.Sprintf("Automatisches Heilen / Re-dispatch eingeleitet (Heilversuch %d/%d)", newHealCount, s.DefaultMaxHeals),
+		Reason:     reason,
 		HealCount:  newHealCount,
 		IsLiveGeld: false,
 		Timestamp:  time.Now().Format(time.RFC3339),
