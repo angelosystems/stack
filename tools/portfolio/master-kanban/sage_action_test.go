@@ -114,6 +114,7 @@ func TestSageDryRun_SC4(t *testing.T) {
 		t.Fatalf("failed to execute sage command: %v", err)
 	}
 
+<<<<<<< HEAD
 	// 3. Verify that the board events (sage_action) were logged for each of the 3 target workspaces with beads
 	expectedWSIDs := []string{
 		"05021F1F765846E299B6A36B39DC39F8", // sol-st-yozd
@@ -121,6 +122,14 @@ func TestSageDryRun_SC4(t *testing.T) {
 		"B842765043A04994B61AACF51E019956", // sol-st-ib5e
 	}
 	for _, wsID := range expectedWSIDs {
+=======
+	// 3. Verify that the board events (sage_action) were logged for each of the 3 target workspaces
+	for _, wsID := range targetWSIDs {
+		if wsID == "935D9575FDF54F9C816381B9A97DD481" {
+			continue // Skip rituale as it has no bead/initiative to log board events to
+		}
+
+>>>>>>> origin/polecat/basalt/st-r8wm2@mqmky2zl
 		var exists bool
 		err = p.QueryRow(ctx, `
 			SELECT EXISTS(

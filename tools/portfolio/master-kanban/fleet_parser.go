@@ -30,6 +30,7 @@ type TokenUsage struct {
 	CacheCreationTokens int64
 	CacheReadTokens     int64
 	OverloadEvents      int64
+	RequestCount        int64
 }
 
 // Matches checks if the rule matches the given process, executor, and model
@@ -181,6 +182,7 @@ func ParseTranscriptFile(path string, storedOffset int64, rules []DiscoveryRule)
 				}
 
 				if u != nil {
+					usage.RequestCount++
 					if u.InputTokens != nil {
 						usage.InputTokens += *u.InputTokens
 					}
@@ -301,21 +303,41 @@ func cmdFleetParse() *cobra.Command {
 
 				// Only update database if we actually read any new content
 				if newOffset > storedOffset {
-					// 1. If any new metrics were parsed, update provider_usage
-					if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheReadTokens > 0 || usage.OverloadEvents > 0 {
+					// 1. If any new metrics were parsed, update provider_usage and agent_usage
+					if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheReadTokens > 0 || usage.OverloadEvents > 0 || usage.RequestCount > 0 {
 						_, err = p.Exec(ctx, `
-							INSERT INTO portfolio.provider_usage (provider_bucket, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, overload_events, updated_at)
-							VALUES ($1, $2, $3, $4, $5, $6, now())
+							INSERT INTO portfolio.provider_usage (provider_bucket, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, overload_events, request_count, updated_at)
+							VALUES ($1, $2, $3, $4, $5, $6, $7, now())
 							ON CONFLICT (provider_bucket) DO UPDATE SET
 								input_tokens = portfolio.provider_usage.input_tokens + EXCLUDED.input_tokens,
 								output_tokens = portfolio.provider_usage.output_tokens + EXCLUDED.output_tokens,
 								cache_creation_tokens = portfolio.provider_usage.cache_creation_tokens + EXCLUDED.cache_creation_tokens,
 								cache_read_tokens = portfolio.provider_usage.cache_read_tokens + EXCLUDED.cache_read_tokens,
 								overload_events = portfolio.provider_usage.overload_events + EXCLUDED.overload_events,
+								request_count = portfolio.provider_usage.request_count + EXCLUDED.request_count,
 								updated_at = now()
-						`, bucket, usage.InputTokens, usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, usage.OverloadEvents)
+						`, bucket, usage.InputTokens, usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, usage.OverloadEvents, usage.RequestCount)
 						if err != nil {
 							fmt.Fprintf(os.Stderr, "Error updating provider_usage for bucket %s: %v\n", bucket, err)
+						}
+
+						agentName := ExtractAgentName(path)
+						if agentName != "" {
+							_, err = p.Exec(ctx, `
+								INSERT INTO portfolio.agent_usage (agent_name, provider_bucket, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, overload_events, request_count, updated_at)
+								VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+								ON CONFLICT (agent_name, provider_bucket) DO UPDATE SET
+									input_tokens = portfolio.agent_usage.input_tokens + EXCLUDED.input_tokens,
+									output_tokens = portfolio.agent_usage.output_tokens + EXCLUDED.output_tokens,
+									cache_creation_tokens = portfolio.agent_usage.cache_creation_tokens + EXCLUDED.cache_creation_tokens,
+									cache_read_tokens = portfolio.agent_usage.cache_read_tokens + EXCLUDED.cache_read_tokens,
+									overload_events = portfolio.agent_usage.overload_events + EXCLUDED.overload_events,
+									request_count = portfolio.agent_usage.request_count + EXCLUDED.request_count,
+									updated_at = now()
+							`, agentName, bucket, usage.InputTokens, usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, usage.OverloadEvents, usage.RequestCount)
+							if err != nil {
+								fmt.Fprintf(os.Stderr, "Error updating agent_usage for agent %s, bucket %s: %v\n", agentName, bucket, err)
+							}
 						}
 					}
 
@@ -343,4 +365,70 @@ func cmdFleetParse() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// ExtractAgentName extracts the agent/workspace name from the file path
+func ExtractAgentName(path string) string {
+	rel := strings.TrimPrefix(path, "/root/.claude/projects/")
+	rel = strings.TrimPrefix(rel, "/")
+
+	parts := strings.Split(rel, "/")
+	dir := parts[0]
+
+	if len(parts) == 1 {
+		dir = strings.TrimSuffix(dir, ".jsonl")
+	}
+
+	if strings.Contains(dir, "polecats-") {
+		idx := strings.Index(dir, "polecats-")
+		sub := dir[idx+9:]
+		p := strings.Split(sub, "-")
+		if len(p) > 0 {
+			return p[0]
+		}
+	}
+
+	if strings.Contains(dir, "worktrees-") {
+		idx := strings.Index(dir, "worktrees-")
+		sub := dir[idx+10:]
+		p := strings.Split(sub, "-")
+		startIdx := 0
+		if len(p) > 0 && len(p[0]) == 4 {
+			startIdx = 1
+		}
+		if len(p) > startIdx {
+			for i := startIdx; i < len(p); i++ {
+				if strings.Contains(strings.ToLower(p[i]), "stayawesome") {
+					return "stayawesomeOS"
+				}
+				if strings.Contains(strings.ToLower(p[i]), "solartown") {
+					return "solartown"
+				}
+				if strings.Contains(strings.ToLower(p[i]), "quantbot") {
+					return "quantbot"
+				}
+			}
+			if len(p) > startIdx+2 {
+				for i := startIdx; i < len(p)-1; i++ {
+					if (p[i] == "st" || p[i] == "tr" || p[i] == "so" || p[i] == "qu") && i+1 < len(p) {
+						return p[i] + "-" + p[i+1]
+					}
+				}
+			}
+			return p[startIdx]
+		}
+	}
+
+	if strings.Contains(dir, "witness") {
+		return "witness"
+	}
+	if strings.Contains(dir, "refinery") {
+		return "refinery"
+	}
+
+	name := strings.TrimPrefix(dir, "-")
+	name = strings.TrimPrefix(name, "root-")
+	name = strings.TrimPrefix(name, "opt-")
+	name = strings.TrimSuffix(name, ".jsonl")
+	return name
 }
