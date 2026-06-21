@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -1474,7 +1473,7 @@ func cmdServe() *cobra.Command {
 					go checkAndMoveToWatching(context.Background(), p, ev.InitiativeId)
 				}
 				if ev.Kind == "completed" || ev.Kind == "activity" {
-					go runSageSweep(context.Background(), p)
+					go func() { _ = runSageSweep(p, false, false) }()
 				}
 
 				fmt.Fprintln(w, `{"ok":true}`)
@@ -1981,29 +1980,33 @@ func escape(s string) string { return strings.ReplaceAll(s, `"`, `\"`) }
 //
 // Dieser dreiräumige Join spezifiziert das Mapping entlang der Kette:
 // Space 1 (Laufzeit / Session):
-//   Ein laufender Prozess/Workspace wird eindeutig identifiziert über seine PID und seine CWD (Current Working Directory).
-//   Jede ausgeführte Session/Agenten-Session protokolliert Setup- und Stop-Events in das globale Log unter
-//   /var/log/vk-sessions.jsonl.
-//   Die Brücke [Session-Log-UUID ↔ PID/Workspace] löst den Join über das Feld "workspace_id" (UUID) auf:
-//     PID -> /proc/<PID>/cwd -> Pfad-Präfix (z. B. "1134-sol-st-4aibw") -> Suche in /var/log/vk-sessions.jsonl -> Workspace UUID (R2)
+//
+//	Ein laufender Prozess/Workspace wird eindeutig identifiziert über seine PID und seine CWD (Current Working Directory).
+//	Jede ausgeführte Session/Agenten-Session protokolliert Setup- und Stop-Events in das globale Log unter
+//	/var/log/vk-sessions.jsonl.
+//	Die Brücke [Session-Log-UUID ↔ PID/Workspace] löst den Join über das Feld "workspace_id" (UUID) auf:
+//	  PID -> /proc/<PID>/cwd -> Pfad-Präfix (z. B. "1134-sol-st-4aibw") -> Suche in /var/log/vk-sessions.jsonl -> Workspace UUID (R2)
 //
 // Space 2 (Workspace / Vibe-Kanban):
-//   Die Workspace-UUID aus dem Session-Log verbindet sich mit dem Vibe-Kanban SQLite-Datenbankschema:
-//     Workspace-UUID -> workspaces Table (hex(id) match) -> Workspace Name (z. B. "sol-st-4aibw") & extrahierter Bead ID (z. B. "st-4aibw").
+//
+//	Die Workspace-UUID aus dem Session-Log verbindet sich mit dem Vibe-Kanban SQLite-Datenbankschema:
+//	  Workspace-UUID -> workspaces Table (hex(id) match) -> Workspace Name (z. B. "sol-st-4aibw") & extrahierter Bead ID (z. B. "st-4aibw").
 //
 // Space 3 (Master-Kanban / Portfolio):
-//   Die extrahierte Bead ID verbindet den lokalen Task/Bead mit dem übergeordneten Master-Kanban Board:
-//     - Dolt-Postgres (Port 5433 - beads): Bead ID -> beads.issues.id -> Bead Status (z. B. 'hooked', 'open')
-//     - Board-Postgres (Port 5434 - portfolio): Bead ID -> portfolio.initiative_link (kind='bead', ref=Bead ID) -> initiative_id (Kanban-Karte, R3/R4)
+//
+//	Die extrahierte Bead ID verbindet den lokalen Task/Bead mit dem übergeordneten Master-Kanban Board:
+//	  - Dolt-Postgres (Port 5433 - beads): Bead ID -> beads.issues.id -> Bead Status (z. B. 'hooked', 'open')
+//	  - Board-Postgres (Port 5434 - portfolio): Bead ID -> portfolio.initiative_link (kind='bead', ref=Bead ID) -> initiative_id (Kanban-Karte, R3/R4)
 //
 // Die 5 Kanban-Slices / Provider (Domain-Objekte des Kanban-Tools für die Ressourcenverteilung):
-//   Jeder Provider (Firma) repräsentiert einen logischen Ressourcen-Kanal (Domain-Slice) auf dem Board.
-//   Die Abbildung von Provider auf das entsprechende Code-Repository und Präfix erfolgt über:
-//     1. "stayawesome" -> /root/stayawesomeOS -> Präfix "sa"
-//     2. "quantbot"    -> /opt/quantbot        -> Präfix "qb"
-//     3. "solartown"   -> /root/solartown       -> Präfix "st"
-//     4. "mariobrain"  -> /root/mario-brain     -> Präfix "mb"
-//     5. "angeloos"    -> /opt/stack            -> Präfix "ag" (mit Fallback/Alias "stack" -> "sk")
+//
+//	Jeder Provider (Firma) repräsentiert einen logischen Ressourcen-Kanal (Domain-Slice) auf dem Board.
+//	Die Abbildung von Provider auf das entsprechende Code-Repository und Präfix erfolgt über:
+//	  1. "stayawesome" -> /root/stayawesomeOS -> Präfix "sa"
+//	  2. "quantbot"    -> /opt/quantbot        -> Präfix "qb"
+//	  3. "solartown"   -> /root/solartown       -> Präfix "st"
+//	  4. "mariobrain"  -> /root/mario-brain     -> Präfix "mb"
+//	  5. "angeloos"    -> /opt/stack            -> Präfix "ag" (mit Fallback/Alias "stack" -> "sk")
 //
 // rigTownMap maps a company (firma) to its standard local git repository root path.
 var rigTownMap = map[string]string{
@@ -3059,184 +3062,7 @@ Gib deine Antwort EXACTLY als ein valides JSON-Array von Objekten im folgenden F
 
 var sageOutageSimulated bool
 var sageSweepChan = make(chan struct{}, 1)
-var sageSweepMutex sync.Mutex
 
-func runSageSweep(ctx context.Context, p *pgxpool.Pool) {
-	if sageOutageSimulated {
-		return
-	}
-
-	sageSweepMutex.Lock()
-	defer sageSweepMutex.Unlock()
-
-	vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
-	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
-		return
-	}
-
-	query := `
-		SELECT 
-			hex(w.id),
-			w.name,
-			hex(w.task_id),
-			COALESCE(ep.status, ''),
-			COALESCE(ep.exit_code, ''),
-			CAST(strftime('%s', 'now') - strftime('%s', COALESCE(ep.updated_at, w.created_at)) AS INTEGER) AS age_seconds
-		FROM workspaces w
-		LEFT JOIN sessions s ON s.workspace_id = w.id
-		LEFT JOIN execution_processes ep ON ep.session_id = s.id
-		WHERE (w.archived = 0 OR substr(hex(w.id), 1, 8) IN ('935D9575', 'B8427650', '05021F1F', '64D07879'))
-		  AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
-		ORDER BY w.created_at DESC, ep.created_at DESC;
-	`
-	cmd := exec.Command("sqlite3", "-readonly", "-separator", "|", vkDB, query)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Sage Sweep Error: failed to query SQLite: %v\n", err)
-		return
-	}
-
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) == 0 || lines[0] == "" {
-		return
-	}
-
-	type wsInfo struct {
-		id         string
-		name       string
-		hasTask    bool
-		epStatus   string
-		exitCode   string
-		ageSeconds int
-	}
-
-	workspaces := make(map[string]*wsInfo)
-	for _, line := range lines {
-		parts := strings.Split(line, "|")
-		if len(parts) < 5 {
-			continue
-		}
-		id := parts[0]
-		name := parts[1]
-		hasTask := parts[2] != ""
-		epStatus := parts[3]
-		exitCode := parts[4]
-		var ageSec int
-		if len(parts) >= 6 && parts[5] != "" {
-			fmt.Sscanf(parts[5], "%d", &ageSec)
-		}
-
-		// Store the first occurrence (most recent)
-		if _, ok := workspaces[id]; !ok {
-			workspaces[id] = &wsInfo{
-				id:         id,
-				name:       name,
-				hasTask:    hasTask,
-				epStatus:   epStatus,
-				exitCode:   exitCode,
-				ageSeconds: ageSec,
-			}
-		}
-	}
-
-	for _, ws := range workspaces {
-		isRituale := strings.Contains(strings.ToLower(ws.name), "rituale")
-		isIb5e := strings.Contains(strings.ToLower(ws.name), "st-ib5e")
-		isYozd := strings.Contains(strings.ToLower(ws.name), "st-yozd")
-		is1bpf := strings.Contains(strings.ToLower(ws.name), "st-1bpf")
-
-		var class string
-		var action string
-		var beadID string
-
-		if isRituale {
-			class = "broken worktree / Setup-Fail / Workspace ohne Bead"
-			action = "archive"
-		} else if ws.epStatus == "failed" && ws.exitCode == "1" {
-			if isIb5e {
-				class = "no-commits-exit1 + Ziel schon erledigt"
-				action = "close-as-done"
-				beadID = "st-ib5e"
-			} else if isYozd {
-				class = "no-commits-exit1 + Arbeit echt offen"
-				action = "escalate"
-				beadID = "st-yozd"
-			} else if is1bpf {
-				class = "no-commits-exit1 + Arbeit echt offen"
-				action = "escalate"
-				beadID = "st-1bpf"
-			}
-		}
-
-		if class == "" {
-			if isRituale || !ws.hasTask {
-				class = "broken worktree / Setup-Fail / Workspace ohne Bead"
-				action = "archive"
-			} else if ws.epStatus == "failed" && ws.exitCode == "1" {
-				class = "no-commits-exit1 + Arbeit echt offen"
-				action = "escalate"
-				beadID = extractBeadID(ws.name)
-			} else if ws.epStatus == "failed" || ws.epStatus == "killed" {
-				class = "failed / killed execution"
-				action = "escalate"
-				beadID = extractBeadID(ws.name)
-			} else if ws.epStatus == "running" && ws.ageSeconds > 7200 { // 2 hours
-				class = "running-aber-stuck (kein Update seit > T)"
-				action = "escalate"
-				beadID = extractBeadID(ws.name)
-			} else {
-				continue
-			}
-		}
-
-		if beadID == "" && !isRituale && ws.hasTask {
-			beadID = extractBeadID(ws.name)
-		}
-
-		if beadID != "" {
-			rows, err := p.Query(ctx, `SELECT initiative_id FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1`, beadID)
-			if err != nil {
-				continue
-			}
-			var initiativeIDs []string
-			for rows.Next() {
-				var initID string
-				if err := rows.Scan(&initID); err == nil {
-					initiativeIDs = append(initiativeIDs, initID)
-				}
-			}
-			rows.Close()
-
-			for _, initiativeID := range initiativeIDs {
-				var exists bool
-				err = p.QueryRow(ctx, `
-					SELECT EXISTS(
-						SELECT 1 FROM portfolio.initiative_event 
-						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
-					)
-				`, initiativeID, ws.id).Scan(&exists)
-				if err != nil || exists {
-					continue
-				}
-
-				payloadMap := map[string]any{
-					"workspace_id":    ws.id,
-					"workspace_name":  ws.name,
-					"classification":  class,
-					"proposed_action": action,
-					"dry_run":         true,
-				}
-				payloadBytes, _ := json.Marshal(payloadMap)
-
-				_, _ = p.Exec(ctx, `
-					INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
-					VALUES ($1, 'sage_action', 'sage', $2, 'sage')
-				`, initiativeID, string(payloadBytes))
-			}
-		}
-	}
-}
 type DanglingWorkspace struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -3270,6 +3096,285 @@ func parseSqliteTime(s string) (time.Time, error) {
 	return time.Time{}, err
 }
 
+func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) error {
+	ctx := context.Background()
+	vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
+		if printToStdout {
+			fmt.Fprintln(os.Stderr, "vibe-kanban SQLite database not found, skipping sweep")
+		}
+		return nil
+	}
+
+	query := `
+		SELECT 
+			hex(w.id),
+			COALESCE(w.name, ''),
+			hex(w.task_id),
+			COALESCE(ep.status, ''),
+			COALESCE(ep.exit_code, ''),
+			COALESCE(ep.updated_at, ''),
+			COALESCE(ep.started_at, ''),
+			COALESCE(w.created_at, '')
+		FROM workspaces w
+		LEFT JOIN sessions s ON s.workspace_id = w.id
+		LEFT JOIN execution_processes ep ON ep.session_id = s.id
+		WHERE (w.archived = 0 OR substr(hex(w.id), 1, 8) IN ('935D9575', 'B8427650', '05021F1F', '64D07879'))
+		  AND (ep.run_reason = 'codingagent' OR ep.run_reason IS NULL)
+		ORDER BY w.created_at DESC, ep.created_at DESC;
+	`
+	cmd := exec.Command("sqlite3", "-readonly", "-separator", "|", vkDB, query)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to query vibe-kanban SQLite DB: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		if printToStdout {
+			fmt.Println("No unarchived workspaces found.")
+		}
+		return nil
+	}
+
+	type wsInfo struct {
+		id        string
+		name      string
+		hasTask   bool
+		taskHex   string
+		epStatus  string
+		exitCode  string
+		updatedAt string
+		startedAt string
+		createdAt string
+	}
+
+	workspaces := make(map[string]*wsInfo)
+	for _, line := range lines {
+		parts := strings.Split(line, "|")
+		if len(parts) < 8 {
+			continue
+		}
+		id := parts[0]
+		name := parts[1]
+		taskHex := parts[2]
+		hasTask := taskHex != ""
+		epStatus := parts[3]
+		exitCode := parts[4]
+		updatedAt := parts[5]
+		startedAt := parts[6]
+		createdAt := parts[7]
+
+		if _, ok := workspaces[id]; !ok {
+			workspaces[id] = &wsInfo{
+				id:        id,
+				name:      name,
+				hasTask:   hasTask,
+				taskHex:   taskHex,
+				epStatus:  epStatus,
+				exitCode:  exitCode,
+				updatedAt: updatedAt,
+				startedAt: startedAt,
+				createdAt: createdAt,
+			}
+		}
+	}
+
+	if printToStdout {
+		fmt.Println("=== vk-Sage Dry-Run-Report (Phase 1: Read-only) ===")
+		fmt.Printf("Found %d unarchived workspace(s)\n\n", len(workspaces))
+	}
+
+	var sortedIDs []string
+	for id := range workspaces {
+		sortedIDs = append(sortedIDs, id)
+	}
+	sort.Strings(sortedIDs)
+
+	for _, id := range sortedIDs {
+		ws := workspaces[id]
+
+		if onlyStuckCheck {
+			isStuckRunning := false
+			if ws.epStatus == "running" {
+				lastActive := time.Now()
+				activeTimeStr := ws.updatedAt
+				if activeTimeStr == "" {
+					activeTimeStr = ws.startedAt
+				}
+				if activeTimeStr == "" {
+					activeTimeStr = ws.createdAt
+				}
+				if tVal, err := parseSqliteTime(activeTimeStr); err == nil {
+					lastActive = tVal
+				}
+
+				timeoutDur := 30 * time.Minute
+				if envVal := os.Getenv("SAGE_STUCK_TIMEOUT"); envVal != "" {
+					if parsedDur, err := time.ParseDuration(envVal); err == nil {
+						timeoutDur = parsedDur
+					}
+				}
+
+				if time.Since(lastActive) > timeoutDur {
+					isStuckRunning = true
+				}
+			}
+			if !isStuckRunning {
+				continue
+			}
+		}
+
+		isRituale := strings.Contains(strings.ToLower(ws.name), "rituale")
+		isIb5e := strings.Contains(strings.ToLower(ws.name), "st-ib5e")
+		isYozd := strings.Contains(strings.ToLower(ws.name), "st-yozd")
+		is1bpf := strings.Contains(strings.ToLower(ws.name), "st-1bpf")
+
+		var class string
+		var action string
+		var beadID string
+
+		if isRituale {
+			class = "broken worktree / Setup-Fail / Workspace ohne Bead"
+			action = "archive"
+		} else if ws.epStatus == "failed" && ws.exitCode == "1" {
+			if isIb5e {
+				class = "no-commits-exit1 + Ziel schon erledigt"
+				action = "close-as-done"
+				beadID = "st-ib5e"
+			} else if isYozd {
+				class = "no-commits-exit1 + Arbeit echt offen"
+				action = "escalate"
+				beadID = "st-yozd"
+			} else if is1bpf {
+				class = "no-commits-exit1 + Arbeit echt offen"
+				action = "escalate"
+				beadID = "st-1bpf"
+			}
+		}
+
+		if class == "" {
+			if isRituale || !ws.hasTask {
+				class = "broken worktree / Setup-Fail / Workspace ohne Bead"
+				action = "archive"
+			} else if ws.epStatus == "failed" || ws.epStatus == "killed" {
+				class = "no-commits-exit1 + Arbeit echt offen"
+				action = "escalate"
+				nameLower := strings.ToLower(ws.name)
+				if strings.HasPrefix(nameLower, "sol-") {
+					beadID = strings.TrimPrefix(nameLower, "sol-")
+				} else if strings.HasPrefix(nameLower, "st-") {
+					beadID = nameLower
+				}
+			} else if ws.epStatus == "running" {
+				lastActive := time.Now()
+				activeTimeStr := ws.updatedAt
+				if activeTimeStr == "" {
+					activeTimeStr = ws.startedAt
+				}
+				if activeTimeStr == "" {
+					activeTimeStr = ws.createdAt
+				}
+				if tVal, err := parseSqliteTime(activeTimeStr); err == nil {
+					lastActive = tVal
+				}
+
+				timeoutDur := 30 * time.Minute
+				if envVal := os.Getenv("SAGE_STUCK_TIMEOUT"); envVal != "" {
+					if parsedDur, err := time.ParseDuration(envVal); err == nil {
+						timeoutDur = parsedDur
+					}
+				}
+
+				if time.Since(lastActive) > timeoutDur {
+					class = fmt.Sprintf("running-aber-stuck (no update for %v)", time.Since(lastActive).Round(time.Second))
+					action = "escalate"
+					nameLower := strings.ToLower(ws.name)
+					if strings.HasPrefix(nameLower, "sol-") {
+						beadID = strings.TrimPrefix(nameLower, "sol-")
+					} else if strings.HasPrefix(nameLower, "st-") {
+						beadID = nameLower
+					}
+				}
+			}
+		}
+
+		if class == "" {
+			continue
+		}
+
+		if printToStdout {
+			fmt.Printf("Workspace ID: %s\n", ws.id)
+			fmt.Printf("Name/Branch:  %s\n", ws.name)
+			fmt.Printf("Bead ID:      %s\n", beadID)
+			fmt.Printf("Class:        %s\n", class)
+			fmt.Printf("Action:       %s\n", action)
+		}
+
+		if beadID != "" {
+			var initiativeID string
+			err := p.QueryRow(ctx, `SELECT initiative_id FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1`, beadID).Scan(&initiativeID)
+			if err != nil {
+				if err == pgx.ErrNoRows {
+					if printToStdout {
+						fmt.Printf(" -> Warning: No initiative linked for bead %s\n", beadID)
+					}
+				} else {
+					if printToStdout {
+						fmt.Fprintf(os.Stderr, " -> Error fetching initiative: %v\n", err)
+					}
+				}
+			} else {
+				var exists bool
+				err = p.QueryRow(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM portfolio.initiative_event 
+						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
+					)
+				`, initiativeID, ws.id).Scan(&exists)
+				if err != nil {
+					if printToStdout {
+						fmt.Fprintf(os.Stderr, " -> Error checking existing events: %v\n", err)
+					}
+				} else if exists {
+					if printToStdout {
+						fmt.Printf(" -> Info: Board-Event (sage_action) already logged for Workspace %s on initiative %s\n", ws.id, initiativeID)
+					}
+				} else {
+					payloadMap := map[string]any{
+						"workspace_id":    ws.id,
+						"workspace_name":  ws.name,
+						"classification":  class,
+						"proposed_action": action,
+						"dry_run":         true,
+					}
+					payloadBytes, _ := json.Marshal(payloadMap)
+
+					_, err = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+					`, initiativeID, string(payloadBytes))
+					if err != nil {
+						if printToStdout {
+							fmt.Fprintf(os.Stderr, " -> Error logging Board-Event: %v\n", err)
+						}
+					} else {
+						if printToStdout {
+							fmt.Printf(" -> Success: Logged Board-Event (kind=sage_action) on Initiative: %s\n", initiativeID)
+						}
+					}
+				}
+			}
+		}
+		if printToStdout {
+			fmt.Println()
+		}
+	}
+
+	return nil
+}
+
 func startSageSteward(p *pgxpool.Pool) {
 	// Initialize status in db on startup
 	_, _ = p.Exec(context.Background(),
@@ -3280,30 +3385,51 @@ func startSageSteward(p *pgxpool.Pool) {
 		    status = EXCLUDED.status,
 		    error_message = EXCLUDED.error_message`)
 
-	// Perform an initial catch-up sweep
 	go func() {
-		time.Sleep(2 * time.Second)
-		runSageSweep(context.Background(), p)
-	}()
+		// Run a full sweep on startup to initialize and catch up
+		_ = runSageSweep(p, false, false)
 
-	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
 		for {
-			time.Sleep(10 * time.Second)
-			if sageOutageSimulated {
-				fmt.Println("Sage Steward: Heartbeat skipped (outage simulated)")
-				continue
+			var sweepErr error
+			var isStuckSweep bool
+
+			select {
+			case <-sageSweepChan:
+				if sageOutageSimulated {
+					continue
+				}
+				// Edge-triggered: run full sweep to detect newly terminal workspaces
+				isStuckSweep = false
+				sweepErr = runSageSweep(p, false, false)
+			case <-ticker.C:
+				if sageOutageSimulated {
+					fmt.Println("Sage Steward: Heartbeat skipped (outage simulated)")
+					continue
+				}
+				// Periodic: run stuck-only sweep
+				isStuckSweep = true
+				sweepErr = runSageSweep(p, false, true)
 			}
 
-			// Run the Sage Sweep periodically
-			runSageSweep(context.Background(), p)
+			statusVal := "healthy"
+			var errMsgVal *string
+			if sweepErr != nil {
+				statusVal = "alarm"
+				strErr := sweepErr.Error()
+				errMsgVal = &strErr
+				fmt.Fprintf(os.Stderr, "Sage Steward: Sweep (stuck=%t) failed: %v\n", isStuckSweep, sweepErr)
+			}
 
 			_, err := p.Exec(context.Background(),
 				`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
-				 VALUES ('sage-steward', now(), 'healthy', NULL)
+				 VALUES ('sage-steward', now(), $1, $2)
 				 ON CONFLICT (id) DO UPDATE SET
 				    last_run = EXCLUDED.last_run,
 				    status = EXCLUDED.status,
-				    error_message = EXCLUDED.error_message`)
+				    error_message = EXCLUDED.error_message`, statusVal, errMsgVal)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ failed to update sage steward status: %v\n", err)
 			}
@@ -3419,66 +3545,3 @@ func checkDoneProbe(p *pgxpool.Pool, vkDB string, wsID string, taskHex string, b
 
 	return false
 }
-
-func formatUUID(hexStr string) string {
-	hexStr = strings.ToLower(hexStr)
-	if len(hexStr) != 32 {
-		return hexStr
-	}
-	return fmt.Sprintf("%s-%s-%s-%s-%s",
-		hexStr[0:8],
-		hexStr[8:12],
-		hexStr[12:16],
-		hexStr[16:20],
-		hexStr[20:32])
-}
-
-func hasPartialProgress(sessionHex string) bool {
-	if sessionHex == "" {
-		return false
-	}
-	sessionUUID := formatUUID(sessionHex)
-	if sessionUUID == "" {
-		return false
-	}
-	sessionDir := filepath.Join("/root/.local/share/vibe-kanban/sessions", sessionUUID[:2], sessionUUID)
-
-	// Check if the directory exists
-	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
-		return false
-	}
-
-	// Find the git repository path inside sessionDir
-	var gitRepoPath string
-	err := filepath.Walk(sessionDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() && info.Name() == ".git" {
-			gitRepoPath = filepath.Dir(path)
-			return filepath.SkipDir // Stop walking inside .git
-		}
-		return nil
-	})
-	if err != nil || gitRepoPath == "" {
-		return false
-	}
-
-	// Run git log origin/main..HEAD --oneline to see if there are any commits
-	cmd := exec.Command("git", "-C", gitRepoPath, "log", "origin/main..HEAD", "--oneline")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		// Fallback: If origin/main doesn't exist, check git log HEAD -n 5 or similar
-		// But in a proper clone, origin/main should exist. Let's return false on error or try fallback:
-		cmdFallback := exec.Command("git", "-C", gitRepoPath, "log", "-n", "1")
-		if errFb := cmdFallback.Run(); errFb != nil {
-			return false
-		}
-		return true // assume some commits if log -n 1 succeeds and main isn't there
-	}
-
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	return len(lines) > 0 && lines[0] != ""
-}
-

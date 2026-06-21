@@ -374,7 +374,7 @@ func TestSageStopAndEscalate(t *testing.T) {
 
 	// --- TEST 1: Regular Bead (N=2 retry budget) ---
 	// First Failure (Retry 1/2) -> Should heal
-	res1, err := engine.ProcessFailure(ctx, testBeadID, false)
+	res1, err := engine.ProcessFailure(ctx, testBeadID)
 	if err != nil {
 		t.Fatalf("ProcessFailure 1 failed: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestSageStopAndEscalate(t *testing.T) {
 	}
 
 	// Second Failure (Retry 2/2) -> Should heal
-	res2, err := engine.ProcessFailure(ctx, testBeadID, false)
+	res2, err := engine.ProcessFailure(ctx, testBeadID)
 	if err != nil {
 		t.Fatalf("ProcessFailure 2 failed: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestSageStopAndEscalate(t *testing.T) {
 	}
 
 	// Third Failure (Retry 3/2 -> Budget Exhausted!) -> Should stop and escalate (SC3)
-	res3, err := engine.ProcessFailure(ctx, testBeadID, false)
+	res3, err := engine.ProcessFailure(ctx, testBeadID)
 	if err != nil {
 		t.Fatalf("ProcessFailure 3 failed: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestSageStopAndEscalate(t *testing.T) {
 
 	// --- TEST 2: Live Geld Bead (quantbot) ---
 	// First Failure -> Should immediately escalate with Live-Geld-Konvention exception
-	resLG, err := engine.ProcessFailure(ctx, testLiveGeldID, false)
+	resLG, err := engine.ProcessFailure(ctx, testLiveGeldID)
 	if err != nil {
 		t.Fatalf("ProcessFailure for Live-Geld failed: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestSageSteward_Sweep(t *testing.T) {
 	}
 
 	// Trigger runSageSweep
-	runSageSweep(ctx, p)
+	_ = runSageSweep(p, true, false)
 
 	// Verify that the sage_action event was logged!
 	var exists bool
@@ -609,7 +609,7 @@ func TestSagePartialProgressReset(t *testing.T) {
 	engine := NewSageDecisionEngine(p, 2)
 
 	// Failure with hasPartialProgress = true -> Should reset the counter to 0 and heal/re-dispatch
-	res, err := engine.ProcessFailure(ctx, testBeadID, true)
+	res, err := engine.ProcessFailure(ctx, testBeadID)
 	if err != nil {
 		t.Fatalf("ProcessFailure failed: %v", err)
 	}
