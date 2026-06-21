@@ -553,7 +553,7 @@ func TestSageSteward_Sweep(t *testing.T) {
 	}
 
 	// Trigger runSageSweep
-	_ = runSageSweep(p, true, false)
+	runSageSweep(ctx, p)
 
 	// Verify that the sage_action event was logged!
 	var exists bool
@@ -572,7 +572,7 @@ func TestSageSteward_Sweep(t *testing.T) {
 	}
 }
 
-func TestSagePartialProgressReset(t *testing.T) {
+func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 	dsn := os.Getenv("PORTFOLIO_DSN")
 	if dsn == "" {
 		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
@@ -582,44 +582,76 @@ func TestSagePartialProgressReset(t *testing.T) {
 	p, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Skip("skipping integration test; db not reachable:", err)
-		return
 	}
 	defer p.Close()
 
 	if err := p.Ping(ctx); err != nil {
 		t.Skip("skipping integration test; db ping failed:", err)
-		return
 	}
 
-	testBeadID := "sa-test-sage-reset-bead"
-	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testBeadID)
-	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testBeadID)
+	testBeadID := "st-ib5e"
+	testInitiativeID := "init-sage-test-sweep-stuck"
 
-	// Insert test initiative with initial heal_count = 1
-	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend, heal_count)
-		VALUES ($1, 'stayawesome', 'idea', 'Test Regular Bead with Partial Progress Reset', 'plan_file', 1)`, testBeadID)
+	// Clean up any old test data
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	// Create test initiative
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
+		VALUES ($1, 'Sage Test Initiative Stuck', 'idea', false, 'stayawesome', 'plan_file')
+	`, testInitiativeID)
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}
-	defer func() {
-		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testBeadID)
-		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testBeadID)
-	}()
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
-	engine := NewSageDecisionEngine(p, 2)
-
-	// Failure with hasPartialProgress = true -> Should reset the counter to 0 and heal/re-dispatch
-	res, err := engine.ProcessFailure(ctx, testBeadID)
+	// Create test link to the bead
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+		VALUES ($1, 'bead', $2)
+	`, testInitiativeID, testBeadID)
 	if err != nil {
-		t.Fatalf("ProcessFailure failed: %v", err)
-	}
-	if res != "healed" {
-		t.Errorf("expected res to be 'healed', got %q", res)
+		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
-	var healCount int
-	_ = p.QueryRow(ctx, "SELECT heal_count FROM portfolio.initiative WHERE id = $1", testBeadID).Scan(&healCount)
-	if healCount != 0 {
-		t.Errorf("expected heal_count to be reset to 0, got %d", healCount)
+	// Trigger runSageSweepEx with onlyStuck = true.
+	// Since st-ib5e is failed (not running-and-stuck), no event should be logged.
+	runSageSweepEx(ctx, p, true)
+
+	var exists bool
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event 
+			WHERE initiative_id = $1 AND kind = 'sage_action'
+		)
+	`, testInitiativeID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("failed to query logged event: %v", err)
+	}
+
+	if exists {
+		t.Errorf("expected NO sage_action event to be logged for initiative %s after runSageSweepEx(onlyStuck=true) on a failed workspace, but one was logged", testInitiativeID)
+	}
+
+	// Trigger runSageSweepEx with onlyStuck = false.
+	// This should log the event since it processes everything.
+	runSageSweepEx(ctx, p, false)
+
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event 
+			WHERE initiative_id = $1 AND kind = 'sage_action'
+		)
+	`, testInitiativeID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("failed to query logged event: %v", err)
+	}
+
+	if !exists {
+		t.Errorf("expected sage_action event to be logged for initiative %s after runSageSweepEx(onlyStuck=false), but it was not", testInitiativeID)
 	}
 }
