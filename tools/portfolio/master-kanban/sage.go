@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -407,7 +408,7 @@ func NewSageDecisionEngine(pool *pgxpool.Pool, defaultMaxHeals int) *SageDecisio
 
 // ProcessFailure evaluates a failed run for an initiative and decides whether to heal or escalate.
 // It implements the Newman-Note Reset-Semantik for partial progress (Counter-Reset-Regel).
-func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID string, hasPartialProgress bool) (string, error) {
+func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID string) (string, error) {
 	// 1. Fetch the initiative details (firma/company, current heal_count)
 	var firma string
 	var healCount int
@@ -432,16 +433,31 @@ func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID st
 		return "escalated (live-geld)", nil
 	}
 
-	// 3. Apply Newman-Note Reset-Semantik: If hasPartialProgress is true, reset heal count to 0.
-	var newHealCount int
-	if hasPartialProgress {
-		newHealCount = 0
-	} else {
-		newHealCount = healCount + 1
+	// Determine beadID (fallback to initiativeID if not linked)
+	var beadID string
+	_ = s.Pool.QueryRow(ctx,
+		`SELECT ref FROM portfolio.initiative_link WHERE initiative_id = $1 AND kind = 'bead' LIMIT 1`,
+		initiativeID).Scan(&beadID)
+	if beadID == "" {
+		beadID = initiativeID
 	}
 
-	// 4. For regular beads, check the retry/healing budget (L4)
-	if !hasPartialProgress && healCount >= s.DefaultMaxHeals {
+	// Newman-Note Reset-Semantik: check for partial progress (at least 1 commit in the latest workspace)
+	hasProgress := false
+	sessionID, err := getLatestSessionIDForBead(beadID)
+	if err == nil && sessionID != "" {
+		if hasPartialProgress(sessionID) {
+			hasProgress = true
+			healCount = 0
+			// Reset persisted counters to 0
+			_, _ = s.Pool.Exec(ctx, `UPDATE portfolio.initiative SET heal_count = 0 WHERE id = $1`, initiativeID)
+			_, _ = s.Pool.Exec(ctx, `UPDATE portfolio.sage_heal_count SET heal_count = 0 WHERE bead_id = $1`, beadID)
+			_, _ = s.Pool.Exec(ctx, `UPDATE portfolio.sage_lease SET heal_counter = 0 WHERE bead_id = $1`, beadID)
+		}
+	}
+
+	// 3. For regular beads, check the retry/healing budget (L4)
+	if healCount >= s.DefaultMaxHeals {
 		// STOP + Escalate!
 		err = s.Escalate(ctx, initiativeID, fmt.Sprintf("Retry-Budget verbraucht (%d/%d erfolglose Heilungen)", healCount, s.DefaultMaxHeals), healCount, false)
 		if err != nil {
@@ -450,33 +466,45 @@ func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID st
 		return "escalated (budget-exhausted)", nil
 	}
 
-	// 5. Update initiative heal_count and heal_counter
+	// 4. Otherwise, perform healing/re-dispatch
+	newHealCount := healCount + 1
 	_, err = s.Pool.Exec(ctx,
-		`UPDATE portfolio.initiative SET heal_count = $1, heal_counter = $1, updated_at = now() WHERE id = $2`,
+		`UPDATE portfolio.initiative SET heal_count = $1, updated_at = now() WHERE id = $2`,
 		newHealCount, initiativeID)
 	if err != nil {
 		return "", err
 	}
 
-	// Also sync to sage_heal_count table
+	// Keep sage_heal_count and sage_lease tables in sync
 	_, _ = s.Pool.Exec(ctx, `
 		INSERT INTO portfolio.sage_heal_count (bead_id, heal_count, escalated, updated_at)
 		VALUES ($1, $2, false, NOW())
-		ON CONFLICT (bead_id) DO UPDATE
-		SET heal_count = EXCLUDED.heal_count,
-		    updated_at = NOW()
-	`, initiativeID, newHealCount)
+		ON CONFLICT (bead_id) DO UPDATE SET heal_count = EXCLUDED.heal_count, updated_at = NOW()
+	`, beadID, newHealCount)
+	_, _ = s.Pool.Exec(ctx, `
+		UPDATE portfolio.sage_lease SET heal_counter = $1, updated_at = NOW() WHERE bead_id = $2
+	`, newHealCount, beadID)
 
-	// Log healing action board-event
-	var reason string
-	if hasPartialProgress {
-		reason = fmt.Sprintf("Automatisches Heilen / Re-dispatch eingeleitet mit Reset des Heal-Counters wegen partial progress (Heilversuch %d/%d)", newHealCount, s.DefaultMaxHeals)
-	} else {
-		reason = fmt.Sprintf("Automatisches Heilen / Re-dispatch eingeleitet (Heilversuch %d/%d)", newHealCount, s.DefaultMaxHeals)
+	// SC2: Append diagnosis-informed / re-scoped prompt suffix to description so the retry is not identical
+	var description string
+	err = s.Pool.QueryRow(ctx, `SELECT COALESCE(description, '') FROM portfolio.initiative WHERE id = $1`, initiativeID).Scan(&description)
+	if err == nil {
+		diagnosisSuffix := fmt.Sprintf("\n\n---\n### 🧓 [Sage Diagnose & Re-Scope (Versuch %d)]\nDie vorherige Ausführung scheiterte mit `no-commits-exit1` (Exit-Code 1, keine Commits). Mögliche Ursachen: unvollständige Umsetzung, Setup-Fehler oder stagnierende Blockade. Bitte analysiere den Workspace, behebe die Fehlerursache und stelle sicher, dass du Fortschritt commitest.", newHealCount)
+		checkString := fmt.Sprintf("[Sage Diagnose & Re-Scope (Versuch %d)]", newHealCount)
+		if !strings.Contains(description, checkString) {
+			newDescription := description + diagnosisSuffix
+			_, _ = s.Pool.Exec(ctx, `UPDATE portfolio.initiative SET description = $1 WHERE id = $2`, newDescription, initiativeID)
+		}
 	}
+
+	reasonStr := fmt.Sprintf("Automatisches Heilen / Re-dispatch eingeleitet (Heilversuch %d/%d)", newHealCount, s.DefaultMaxHeals)
+	if hasProgress {
+		reasonStr = fmt.Sprintf("Automatisches Heilen / Re-dispatch eingeleitet (Heilversuch %d/%d). Reset-Semantik: Zähler zurückgesetzt, da im vorherigen Versuch partieller Fortschritt (Commits) nachgewiesen wurde.", newHealCount, s.DefaultMaxHeals)
+	}
+
 	payload := SageAction{
 		Action:     "heal",
-		Reason:     reason,
+		Reason:     reasonStr,
 		HealCount:  newHealCount,
 		IsLiveGeld: false,
 		Timestamp:  time.Now().Format(time.RFC3339),
@@ -494,6 +522,39 @@ func (s *SageDecisionEngine) ProcessFailure(ctx context.Context, initiativeID st
 	fmt.Printf("[Sage Advisor-Signal] HEAL: Initiative %s re-dispatched. Versuch %d/%d.\n", initiativeID, newHealCount, s.DefaultMaxHeals)
 
 	return "healed", nil
+}
+
+func getLatestSessionIDForBead(beadID string) (string, error) {
+	vkDB := os.Getenv("VK_DB")
+	if vkDB == "" {
+		vkDB = os.Getenv("VIBE_KANBAN_DB")
+	}
+	if vkDB == "" {
+		vkDB = "/root/.local/share/vibe-kanban/db.v2.sqlite"
+	}
+	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
+		return "", nil
+	}
+
+	// Strip single quotes to be clean
+	beadID = strings.ReplaceAll(beadID, "'", "")
+
+	query := fmt.Sprintf(`
+		SELECT hex(s.id)
+		FROM workspaces w
+		JOIN sessions s ON s.workspace_id = w.id
+		WHERE w.name LIKE '%%%s%%'
+		ORDER BY w.created_at DESC, s.created_at DESC
+		LIMIT 1;
+	`, beadID)
+
+	cmd := exec.Command("sqlite3", "-readonly", vkDB, query)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.String()), nil
 }
 
 // Escalate logs an escalation event and stops any future automatic action on the bead
@@ -520,6 +581,60 @@ func (s *SageDecisionEngine) Escalate(ctx context.Context, initiativeID string, 
 	return nil
 }
 
+func formatUUID(s string) string {
+	s = strings.ToLower(s)
+	if len(s) != 32 {
+		return s
+	}
+	return fmt.Sprintf("%s-%s-%s-%s-%s", s[0:8], s[8:12], s[12:16], s[16:20], s[20:])
+}
+
+func hasPartialProgress(sessionID string) bool {
+	uuid := formatUUID(sessionID)
+	if len(uuid) != 36 {
+		return false
+	}
+	prefix := uuid[:2]
+	sessionsBase := os.Getenv("VK_SESSIONS")
+	if sessionsBase == "" {
+		sessionsBase = os.Getenv("VIBE_KANBAN_SESSIONS")
+	}
+	if sessionsBase == "" {
+		sessionsBase = "/root/.local/share/vibe-kanban/sessions"
+	}
+	sessionPath := filepath.Join(sessionsBase, prefix, uuid)
+
+	if _, err := os.Stat(sessionPath); os.IsNotExist(err) {
+		return false
+	}
+
+	// We need to find any git repo in the sessionPath
+	var repoPath string
+	err := filepath.Walk(sessionPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && info.Name() == ".git" {
+			repoPath = filepath.Dir(path)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if err != nil || repoPath == "" {
+		return false
+	}
+
+	// Run git log origin/main..HEAD --oneline to see if there are any commits
+	cmd := exec.Command("git", "-C", repoPath, "log", "origin/main..HEAD", "--oneline")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+
+	return strings.TrimSpace(out.String()) != ""
+}
+
 func buildDiagnosisPrompt(healCount int, isYozd, is1bpf bool) string {
 	var specificDiagnosis string
 	if isYozd {
@@ -536,4 +651,3 @@ func buildDiagnosisPrompt(healCount int, isYozd, is1bpf bool) string {
 		specificDiagnosis,
 	)
 }
-
