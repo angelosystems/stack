@@ -439,6 +439,7 @@
       </section>
     </template>
 
+<<<<<<< HEAD
     <!-- ════ CAPACITY-HOST-VIEW (P2.1) ════ -->
     <template x-if="view==='capacity_host'">
       <section class="bg-white rounded-lg shadow-sm border border-slate-200">
@@ -633,6 +634,170 @@
 
             </div>
           </template>
+=======
+    <!-- ════ CAPACITY-VIEW (Resource-Fleet-Manager, P2.1) ════ -->
+    <template x-if="view==='capacity_tab'">
+      <section class="bg-white rounded-lg shadow-sm border border-slate-200">
+        <header class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <h2 class="font-bold text-slate-800 text-sm tracking-wide uppercase">🔌 Server-Kapazität & Metriken</h2>
+            <span class="text-xs text-slate-400">Echtzeit-Host-Ressourcen aus dem Collector-Datensatz</span>
+          </div>
+          <div class="flex items-center gap-2 text-xs">
+            <span class="text-slate-500">Liveness:</span>
+            <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide"
+              :class="hostCapacity.collector_liveness === 'healthy' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800 animate-pulse'"
+              x-text="hostCapacity.collector_liveness || 'unknown'"></span>
+            <span class="text-slate-400">|</span>
+            <span class="text-slate-500">Stand:</span>
+            <span class="font-mono text-slate-700" x-text="hostCapacity.last_updated_seconds_ago !== undefined ? 'vor ' + hostCapacity.last_updated_seconds_ago + 's' : '—'"></span>
+          </div>
+        </header>
+
+        <div class="p-6 space-y-6">
+          <!-- KPI Metrics Row -->
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <!-- CPU Indicator -->
+            <div class="bg-slate-50 border border-slate-150 rounded-xl p-4 flex flex-col justify-between">
+              <div>
+                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">CPU-Auslastung</span>
+                <div class="text-2xl font-black text-slate-800 mt-1" x-text="(hostCapacity.cpu_pct !== undefined ? hostCapacity.cpu_pct.toFixed(1) : '0.0') + '%'"></div>
+              </div>
+              <div class="mt-4">
+                <div class="w-full bg-slate-200 rounded-full h-2">
+                  <div class="bg-sky-500 h-2 rounded-full" :style="'width: ' + Math.min(hostCapacity.cpu_pct || 0, 100) + '%'"></div>
+                </div>
+                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
+                  <span>Headroom: <b class="text-slate-600 font-mono" x-text="(hostCapacity.cpu_headroom_pct !== undefined ? hostCapacity.cpu_headroom_pct.toFixed(1) : '0.0') + '%'"></b></span>
+                  <span x-text="hostCapacity.nproc + ' Kerne'"></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- RAM Indicator -->
+            <div class="bg-slate-50 border border-slate-150 rounded-xl p-4 flex flex-col justify-between">
+              <div>
+                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">RAM-Auslastung</span>
+                <div class="text-2xl font-black text-slate-800 mt-1" x-text="(hostCapacity.ram_pct !== undefined ? hostCapacity.ram_pct.toFixed(1) : '0.0') + '%'"></div>
+              </div>
+              <div class="mt-4">
+                <div class="w-full bg-slate-200 rounded-full h-2">
+                  <div class="bg-emerald-500 h-2 rounded-full" :style="'width: ' + Math.min(hostCapacity.ram_pct || 0, 100) + '%'"></div>
+                </div>
+                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
+                  <span>Verfügbar: <b class="text-slate-600 font-mono" x-text="(hostCapacity.mem_avail_gb !== undefined ? hostCapacity.mem_avail_gb.toFixed(1) : '0.0') + ' GB'"></b></span>
+                  <span>Gesamt: <b class="font-mono" x-text="(hostCapacity.mem_total_gb !== undefined ? hostCapacity.mem_total_gb.toFixed(1) : '0.0') + ' GB'"></b></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Swap Indicator -->
+            <div class="bg-slate-50 border border-slate-150 rounded-xl p-4 flex flex-col justify-between">
+              <div>
+                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Swap-Belegung</span>
+                <div class="text-2xl font-black text-slate-800 mt-1" x-text="(hostCapacity.swap_pct !== undefined ? hostCapacity.swap_pct.toFixed(1) : '0.0') + '%'"></div>
+              </div>
+              <div class="mt-4">
+                <div class="w-full bg-slate-200 rounded-full h-2">
+                  <div class="bg-amber-500 h-2 rounded-full" :style="'width: ' + Math.min(hostCapacity.swap_pct || 0, 100) + '%'"></div>
+                </div>
+                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
+                  <span>Benutzt: <b class="text-slate-600 font-mono" x-text="(hostCapacity.swap_used_gb !== undefined ? hostCapacity.swap_used_gb.toFixed(1) : '0.0') + ' GB'"></b></span>
+                  <span>Trend: <span class="font-bold text-slate-600" x-text="hostCapacity.swap_trend || 'stable'"></span></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Disk Indicator -->
+            <div class="bg-slate-50 border border-slate-150 rounded-xl p-4 flex flex-col justify-between">
+              <div>
+                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Disk-Belegung (Root)</span>
+                <div class="text-2xl font-black text-slate-800 mt-1" x-text="(hostCapacity.disk_pct !== undefined ? hostCapacity.disk_pct.toFixed(1) : '0.0') + '%'"></div>
+              </div>
+              <div class="mt-4">
+                <div class="w-full bg-slate-200 rounded-full h-2">
+                  <div class="bg-indigo-500 h-2 rounded-full" :style="'width: ' + Math.min(hostCapacity.disk_pct || 0, 100) + '%'"></div>
+                </div>
+                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
+                  <span>Status: <b class="text-slate-600" x-text="hostCapacity.disk_pct < 80 ? 'Gesund' : 'Kritisch'"></b></span>
+                  <span>Ziel-Host: <b class="font-mono">nuernberg</b></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Governor & System Details -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Capacity Governor Status & Verdict -->
+            <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4">
+              <div class="flex items-center justify-between border-b border-slate-200 pb-3">
+                <h3 class="font-bold text-slate-800 text-xs tracking-wide uppercase">👮 Capacity Governor Verdict</h3>
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold"
+                  :class="hostCapacity.governor_verdict === 'OK' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-red-100 text-red-800 border border-red-200 animate-pulse'">
+                  <span class="h-2 w-2 rounded-full" :class="hostCapacity.governor_verdict === 'OK' ? 'bg-emerald-500' : 'bg-red-600'"></span>
+                  <span x-text="hostCapacity.governor_verdict || 'OK'"></span>
+                </span>
+              </div>
+              
+              <div class="space-y-2 text-sm text-slate-600">
+                <div class="flex justify-between">
+                  <span>Active Load (1m):</span>
+                  <span class="font-mono font-bold text-slate-800" x-text="hostCapacity.load1"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>Available Memory:</span>
+                  <span class="font-mono font-bold text-slate-800" x-text="(hostCapacity.mem_avail_gb !== undefined ? hostCapacity.mem_avail_gb.toFixed(2) : '0.00') + ' GB'"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>Committed Ratio:</span>
+                  <span class="font-mono font-bold text-slate-800" x-text="(hostCapacity.committed_ratio !== undefined ? (hostCapacity.committed_ratio * 100).toFixed(1) : '0.0') + '%'"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>PSI Memory Some (10s avg):</span>
+                  <span class="font-mono font-bold text-slate-800" x-text="(hostCapacity.psi_mem_some_avg10 !== undefined ? hostCapacity.psi_mem_some_avg10.toFixed(2) : '0.00')"></span>
+                </div>
+              </div>
+
+              <!-- Verdict reasons list -->
+              <div x-show="hostCapacity.governor_reasons" class="bg-red-50 text-red-700 p-3 rounded-md border border-red-100 text-xs">
+                <div class="font-bold uppercase tracking-wider mb-1">Ausschlaggebende Gründe:</div>
+                <div class="font-mono" x-text="hostCapacity.governor_reasons"></div>
+              </div>
+            </div>
+
+            <!-- Freeze-Marge (Memory Commits & Safety) -->
+            <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4">
+              <div class="flex items-center justify-between border-b border-slate-200 pb-3">
+                <h3 class="font-bold text-slate-800 text-xs tracking-wide uppercase">❄️ Freeze-Marge & Limits</h3>
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold"
+                  :class="hostCapacity.freeze_marge > 15 ? 'bg-indigo-100 text-indigo-800 border border-indigo-200' : 'bg-rose-100 text-rose-800 border border-rose-200'">
+                  <span x-text="(hostCapacity.freeze_marge !== undefined ? hostCapacity.freeze_marge.toFixed(1) : '0.0') + '% Free'"></span>
+                </span>
+              </div>
+
+              <div class="space-y-3.5 text-xs text-slate-600 leading-relaxed">
+                <p>
+                  Die <b>Freeze-Marge</b> spiegelt das Verhältnis von zugesichertem Speicher (<code>Committed_AS</code>) zum harten Kernel-Limit (<code>CommitLimit</code>) wider. 
+                  Sinkt diese Marge nahe Null, gerät das System in Gefahr und der Kernel verweigert jegliche weitere Allokationen (OOM/Freeze).
+                </p>
+                <div class="space-y-1 bg-slate-100 p-3 rounded border border-slate-200 text-xs font-mono">
+                  <div class="flex justify-between">
+                    <span>Committed_AS:</span>
+                    <span class="font-semibold text-slate-800" x-text="hostCapacity.committed_ratio !== undefined ? (hostCapacity.committed_ratio * 100).toFixed(1) + '%' : '—'"></span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span>Soft-Reserve Limit:</span>
+                    <span class="font-semibold text-slate-800">85.0%</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span>Stress-Throttle Limit:</span>
+                    <span class="font-semibold text-rose-600 font-bold">90.0%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+>>>>>>> origin/polecat/basalt/st-avpzo@mqmn0q85
         </div>
       </section>
     </template>
@@ -1002,7 +1167,11 @@ function liveKanban() {
       { id: 'pipeline', label: 'Pipeline' },
       { id: 'backlog',  label: 'Backlog' },
       { id: 'unlinked', label: '⚠ Unlinked — braucht Zuhause' },
+<<<<<<< HEAD
       { id: 'capacity_host', label: '⚡ Kapazität (Host)' },
+=======
+      { id: 'capacity_tab', label: '🔋 Kapazität' },
+>>>>>>> origin/polecat/basalt/st-avpzo@mqmn0q85
     ],
     firmas: [
       { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 3, wipSoon: 5 },
@@ -1039,6 +1208,28 @@ function liveKanban() {
     unlinkedItems: [],
     detectorStatus: { status: 'unknown', unreachable_rigs: [] },
     sageStatus: { status: 'unknown', last_run: null, dangling_count: 0, dangling_baseline: 4, outage_simulated: false, dangling_workspaces: [] },
+    hostCapacity: {
+      cpu_pct: 0,
+      ram_pct: 0,
+      disk_pct: 0,
+      mem_total_gb: 0,
+      mem_avail_gb: 0,
+      swap_total_gb: 0,
+      swap_free_gb: 0,
+      swap_used_gb: 0,
+      swap_pct: 0,
+      swap_trend: '',
+      psi_mem_some_avg10: 0,
+      committed_ratio: 0,
+      freeze_marge: 0,
+      load1: 0,
+      nproc: 0,
+      cpu_headroom_pct: 0,
+      governor_verdict: '',
+      governor_reasons: '',
+      last_updated_seconds_ago: 0,
+      collector_liveness: ''
+    },
     lastFetched: '',
 
     dispatchOpen: false,
@@ -1085,7 +1276,15 @@ function liveKanban() {
       this.loadCapacity();
       this.loadCapacityHost();
       this.loadUnlinked();
+<<<<<<< HEAD
       setInterval(() => { this.refresh(true); this.loadCapacity(); this.loadCapacityHost(); }, 30000);
+=======
+      setInterval(() => {
+        this.refresh(true);
+        this.loadCapacity();
+        if (this.view === 'capacity_tab') this.loadHostCapacity();
+      }, 30000);
+>>>>>>> origin/polecat/basalt/st-avpzo@mqmn0q85
       // Deep-Link: #<initiative-id> öffnet Karte + Baum
       const h = location.hash.slice(1);
       if (h) this.$nextTick(async () => {
@@ -1374,11 +1573,19 @@ function liveKanban() {
         if (r.ok) this.capacity = await r.json();
       } catch (e) { console.error('capacity fetch:', e); }
     },
+<<<<<<< HEAD
     async loadCapacityHost() {
       try {
         const r = await fetch(this.apiBase + '/api/capacity-host');
         if (r.ok) this.capacityHost = await r.json();
       } catch (e) { console.error('capacityHost fetch:', e); }
+=======
+    async loadHostCapacity() {
+      try {
+        const r = await fetch(this.apiBase + '/api/host-capacity');
+        if (r.ok) this.hostCapacity = await r.json();
+      } catch (e) { console.error('host capacity fetch error:', e); }
+>>>>>>> origin/polecat/basalt/st-avpzo@mqmn0q85
     },
     async loadWipLimits() {
       try {
@@ -1407,7 +1614,11 @@ function liveKanban() {
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
         if (this.view === 'unlinked') await this.loadUnlinked();
+<<<<<<< HEAD
         if (this.view === 'capacity_host') await this.loadCapacityHost();
+=======
+        if (this.view === 'capacity_tab') await this.loadHostCapacity();
+>>>>>>> origin/polecat/basalt/st-avpzo@mqmn0q85
         const t = new Date().toLocaleTimeString('de-DE');
         this.lastFetched = (silent ? 'auto-refresh' : 'geladen') + ' ' + t;
       } catch (e) {
@@ -1421,7 +1632,11 @@ function liveKanban() {
       if (v === 'pipeline') await this.loadAllPlans();
       if (v === 'backlog') await this.loadBacklog();
       if (v === 'unlinked') await this.loadUnlinked();
+<<<<<<< HEAD
       if (v === 'capacity_host') await this.loadCapacityHost();
+=======
+      if (v === 'capacity_tab') await this.loadHostCapacity();
+>>>>>>> origin/polecat/basalt/st-avpzo@mqmn0q85
     },
 
     async loadUnlinked() {
