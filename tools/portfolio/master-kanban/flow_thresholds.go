@@ -134,12 +134,15 @@ func ParseThresholdDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// GetPromoteTarget returns the target stage when promoting a card from the given stage
-// as specified in the non-linear Stage-Übergangs-Map (P2.4).
-func GetPromoteTarget(stage string) (string, error) {
+// GetPromoteTarget returns the target stage when promoting a card from the given stage,
+// taking into account capacity constraints for the 'idea' stage as specified in the non-linear Stage-Übergangs-Map (P2.4).
+func GetPromoteTarget(stage string, hasCapacity bool, nowCount, nowLimit int) (string, error) {
 	stage = strings.ToLower(strings.TrimSpace(stage))
 	switch stage {
 	case "idea":
+		if hasCapacity && nowCount < nowLimit {
+			return "now", nil
+		}
 		return "soon", nil
 	case "soon":
 		return "now", nil

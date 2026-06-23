@@ -144,34 +144,54 @@ func TestFlowThresholdsAPI(t *testing.T) {
 
 func TestGetPromoteTarget(t *testing.T) {
 	tests := []struct {
-		stage    string
-		expected string
-		hasError bool
+		name        string
+		stage       string
+		hasCapacity bool
+		nowCount    int
+		nowLimit    int
+		expected    string
+		hasError    bool
 	}{
-		{"idea", "soon", false},
-		{"soon", "now", false},
-		{"now", "watching", false},
-		{"watching", "done", false},
-		{"done", "", true},
-		{"IDEA ", "soon", false},
-		{" watching", "done", false},
-		{"unknown", "", true},
+		// idea tests
+		{"idea with capacity under limit", "idea", true, 2, 5, "now", false},
+		{"idea without capacity under limit", "idea", false, 2, 5, "soon", false},
+		{"idea with capacity at limit", "idea", true, 5, 5, "soon", false},
+		{"idea with capacity over limit", "idea", true, 6, 5, "soon", false},
+		{"IDEA uppercase with capacity", "IDEA ", true, 1, 5, "now", false},
+
+		// soon tests
+		{"soon stage", "soon", false, 0, 0, "now", false},
+
+		// now tests
+		{"now stage", "now", false, 0, 0, "watching", false},
+
+		// watching tests
+		{"watching stage", "watching", false, 0, 0, "done", false},
+		{" watching with whitespace", " watching", false, 0, 0, "done", false},
+
+		// done terminal tests
+		{"done terminal", "done", false, 0, 0, "", true},
+
+		// unknown tests
+		{"unknown stage", "unknown", false, 0, 0, "", true},
 	}
 
 	for _, tc := range tests {
-		actual, err := GetPromoteTarget(tc.stage)
-		if tc.hasError {
-			if err == nil {
-				t.Errorf("expected error promoting from stage %q, but got none", tc.stage)
+		t.Run(tc.name, func(t *testing.T) {
+			actual, err := GetPromoteTarget(tc.stage, tc.hasCapacity, tc.nowCount, tc.nowLimit)
+			if tc.hasError {
+				if err == nil {
+					t.Errorf("expected error promoting from stage %q, but got none", tc.stage)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error promoting from stage %q: %v", tc.stage, err)
+				}
+				if actual != tc.expected {
+					t.Errorf("GetPromoteTarget(%q) = %q; expected %q", tc.stage, actual, tc.expected)
+				}
 			}
-		} else {
-			if err != nil {
-				t.Errorf("unexpected error promoting from stage %q: %v", tc.stage, err)
-			}
-			if actual != tc.expected {
-				t.Errorf("GetPromoteTarget(%q) = %q; expected %q", tc.stage, actual, tc.expected)
-			}
-		}
+		})
 	}
 }
 
