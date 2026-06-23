@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -241,6 +243,26 @@ func TestDispatchHack(t *testing.T) {
 	if err := p.Ping(ctx); err != nil {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
+
+	// Setup mock vk-delegate script
+	mockScriptPath := filepath.Join(t.TempDir(), "vk-delegate")
+	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440000"
+	scriptContent := fmt.Sprintf(`#!/bin/sh
+echo "workspace_id:        %s"
+echo "execution_process:   550e8400-e29b-41d4-a716-446655440001"
+echo "workspace_url:       http://localhost:54682/workspaces/%s"
+`, testWorkspaceID, testWorkspaceID)
+
+	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write mock script: %v", err)
+	}
+
+	// Override vkDelegatePath
+	oldVkPath := vkDelegatePath
+	vkDelegatePath = mockScriptPath
+	defer func() {
+		vkDelegatePath = oldVkPath
+	}()
 
 	testID := "sk-test-dispatch-hack"
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
