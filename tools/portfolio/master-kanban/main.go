@@ -3369,11 +3369,25 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 			)
 		`, initiativeID).Scan(&exists)
 		if !exists {
+			var currentStage, firma string
+			err = p.QueryRow(ctx, `SELECT stage, firma FROM portfolio.initiative WHERE id=$1`, initiativeID).Scan(&currentStage, &firma)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error querying initiative stage and firma: %v\n", err)
+				return
+			}
+			if currentStage == "done" {
+				return
+			}
+			var nowCount int
+			_ = p.QueryRow(ctx, `SELECT count(*) FROM portfolio.initiative WHERE firma=$1 AND stage='now' AND archived_at IS NULL`, firma).Scan(&nowCount)
+
+			targetStage := GetPromoteTargetStage(ctx, p, sp, nil, currentStage, firma, nowCount)
+
 			payloadBytes, _ := json.Marshal(map[string]any{
 				"classification":  "all-beads-closed",
 				"proposed_action": "stage-promotion",
-				"to_stage":        "watching",
-				"reason":          "Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu 'watching').",
+				"to_stage":        targetStage,
+				"reason":          fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu '%s').", targetStage),
 			})
 			_, err = p.Exec(ctx, `
 				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
@@ -4236,7 +4250,7 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 	// 1. "alle Beads closed" check:
 	rows, err := p.Query(ctx, `
 		SELECT id, stage, title, firma FROM portfolio.initiative 
-		WHERE stage NOT IN ('done', 'watching') AND archived_at IS NULL
+		WHERE stage <> 'done' AND archived_at IS NULL
 	`)
 	if err == nil {
 		type InitInfo struct {
@@ -4284,11 +4298,16 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 					)
 				`, init.ID).Scan(&exists)
 				if !exists {
+					var nowCount int
+					_ = p.QueryRow(ctx, `SELECT count(*) FROM portfolio.initiative WHERE firma=$1 AND stage='now' AND archived_at IS NULL`, init.Firma).Scan(&nowCount)
+
+					targetStage := GetPromoteTargetStage(ctx, p, sp, nil, init.Stage, init.Firma, nowCount)
+
 					payloadBytes, _ := json.Marshal(map[string]any{
 						"classification":  "all-beads-closed",
 						"proposed_action": "stage-promotion",
-						"to_stage":        "watching",
-						"reason":          "Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu 'watching').",
+						"to_stage":        targetStage,
+						"reason":          fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu '%s').", targetStage),
 					})
 					_, err = p.Exec(ctx, `
 						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
