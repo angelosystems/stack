@@ -19,7 +19,7 @@ Stay Awesome hat bereits einen HubSpot-Account. Self-Host-Twenty wird nicht geba
 | E2 Twenty-Stack hochfahren | Übersprungen (Projekt abgebrochen) |
 | E3 nginx + TLS | Übersprungen (Projekt abgebrochen) |
 | E4 Initial-Setup & Pipeline | Übersprungen (Projekt abgebrochen) |
-| E5 Integration & Doku | **Teilweise umgesetzt:** Deploy-Artefakte (`docker-compose.yml` und `.env.example`) unter `tools/twenty/` im Repository eingecheckt (G9), um einen reproduzierbaren Stand für die Zukunft zu wahren. |
+| E5 Integration & Doku | **Umgesetzt:** App im SA-Cockpit registriert (G7) sowie Deploy-Artefakte (`docker-compose.yml` und `.env.example`) unter `tools/twenty/` im Repository eingecheckt (G9). |
 
 ## Gates / Kriterien
 
@@ -31,7 +31,7 @@ Stay Awesome hat bereits einen HubSpot-Account. Self-Host-Twenty wird nicht geba
 | G4 Pipeline | ❌ Übersprungen | Keine Instanz konfiguriert. |
 | G5 DB-Isolation | ❌ Übersprungen | Keine Postgres-Instanz angelegt. |
 | G6 nginx-vhost | ❌ Übersprungen | Kein nginx-vhost auf deploy konfiguriert. |
-| G7 Cockpit-Registrierung | ❌ Übersprungen | Kein Eintrag in manifests/external. |
+| G7 Cockpit-Registrierung | ✅ Erfüllt | `manifests/external/crm.json` vorhanden und Cockpit-Tile sichtbar. |
 | G8 Admin-Credentials in Vault | ❌ Übersprungen | Keine Zugangsdaten generiert. |
 | G9 Reproduzierbarer Deploy | ✅ Erfüllt | `docker-compose.yml` und `.env.example` unter `tools/twenty/` im Repo versioniert. |
 
