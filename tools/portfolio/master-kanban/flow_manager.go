@@ -225,7 +225,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		// Stagnation Check
 		hasActiveWorkspace := false
 		for _, ws := range workspaces {
-			if ws.Status == "running" {
+			if ws.Status == "running" || ws.Status == "waiting" {
 				hasActiveWorkspace = true
 				break
 			}
@@ -239,17 +239,67 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		}
 
 		timeInactivity := time.Since(init.UpdatedAt)
-		if (init.Stage == "now" || init.Stage == "soon") && timeInactivity > 48*time.Hour && !hasActiveWorkspace && !hasActiveBeads {
-			flaggedReasons = append(flaggedReasons, fmt.Sprintf("Stagnation: %v tage stille, keine aktive arbeit (workspace/beads)", int(timeInactivity.Hours()/24)))
+		if init.Stage == "now" || init.Stage == "soon" {
+			threshold := GetStageThreshold(init.Firma, init.Stage)
+			if threshold > 0 && timeInactivity > threshold && !hasActiveWorkspace && !hasActiveBeads {
+				flaggedReasons = append(flaggedReasons, fmt.Sprintf("Stagnation: %v tage stille, keine aktive arbeit (workspace/beads)", int(timeInactivity.Hours()/24)))
+			}
 		}
 
 		// Backlog-Fäule Check
-		if init.Stage == "idea" && time.Since(init.CreatedAt) > 14*24*time.Hour && len(beads) == 0 && len(events) <= 1 {
-			flaggedReasons = append(flaggedReasons, "Backlog-Fäule: über 14 tage unbewegt in IDEA")
+		if init.Stage == "idea" {
+			threshold := GetStageThreshold(init.Firma, init.Stage)
+			if threshold > 0 && time.Since(init.CreatedAt) > threshold && len(beads) == 0 && len(events) <= 1 {
+				flaggedReasons = append(flaggedReasons, fmt.Sprintf("Backlog-Fäule: über %d tage unbewegt in IDEA", int(threshold.Hours()/24)))
+			}
 		}
 
 		// If flagged, run GLM diagnosis!
 		if len(flaggedReasons) > 0 {
+			// Eskalations-Leiter: Reactor -> vk-Sage -> Manager
+			// Check if any of the lower layers are engaged for this initiative.
+
+			// 1. Check for active/waiting Workspace
+			hasActiveWorkspace := false
+			for _, ws := range workspaces {
+				if ws.Status == "running" || ws.Status == "waiting" {
+					hasActiveWorkspace = true
+					break
+				}
+			}
+
+			// 2. Check for open Reactor attempt
+			openReactor := hasOpenReactorAttempt(events)
+
+			// 3. Check if in vk-Sage's queue (active lease)
+			hasSageLease := false
+			for _, b := range beads {
+				var lockedUntil time.Time
+				err := p.QueryRow(ctx, `
+					SELECT locked_until FROM portfolio.sage_lease WHERE bead_id = $1
+				`, b.Ref).Scan(&lockedUntil)
+				if err == nil && lockedUntil.After(time.Now()) {
+					hasSageLease = true
+					break
+				}
+			}
+
+			if hasActiveWorkspace || openReactor || hasSageLease {
+				var engaged []string
+				if hasActiveWorkspace {
+					engaged = append(engaged, "active Workspace")
+				}
+				if openReactor {
+					engaged = append(engaged, "open Reactor attempt")
+				}
+				if hasSageLease {
+					engaged = append(engaged, "vk-Sage's queue/lease")
+				}
+				fmt.Printf("Skipping flagged card %s (%s) because lower layers are engaged: %s\n\n",
+					init.ID, init.Title, strings.Join(engaged, ", "))
+				continue
+			}
+
 			fmt.Printf("Diagnosing flagged card %s (%s, Stage: %s, Firma: %s)\n", init.ID, init.Title, init.Stage, init.Firma)
 			fmt.Printf("  -> Flagged reasons: %s\n", strings.Join(flaggedReasons, " | "))
 
@@ -585,3 +635,32 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 	return false, "", nil
 }
 
+func hasOpenReactorAttempt(events []FlowEvent) bool {
+	for _, ev := range events {
+		if ev.Kind == "deployed" {
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(ev.Payload), &payload); err == nil {
+				status, _ := payload["status"].(string)
+				// If status is not one of the terminal statuses, there is an open reactor attempt.
+				if status != "healthy" && status != "failed" && status != "rolled-back" && status != "blocked_migrations" && status != "" {
+					return true
+				}
+			}
+		}
+		// If a dispatch occurred recently (e.g. within 15 minutes) and there is no newer deployment or finished workspace,
+		// there is an open reactor / dispatch attempt.
+		if ev.Kind == "dispatched" && time.Since(ev.At) < 15*time.Minute {
+			hasNewerActivity := false
+			for _, other := range events {
+				if other.At.After(ev.At) && (other.Kind == "deployed" || other.Kind == "workspace_started") {
+					hasNewerActivity = true
+					break
+				}
+			}
+			if !hasNewerActivity {
+				return true
+			}
+		}
+	}
+	return false
+}
