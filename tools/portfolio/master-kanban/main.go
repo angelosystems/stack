@@ -46,138 +46,6 @@ func quantbotPool() (*pgxpool.Pool, error) {
 	return p, nil
 }
 
-type HostCapacityGo struct {
-	CPU             float64 `json:"cpu"`
-	RAM             float64 `json:"ram"`
-	Disk            float64 `json:"disk"`
-	Swap            float64 `json:"swap"`
-	PSICPU          float64 `json:"psi_cpu"`
-	PSIMemory       float64 `json:"psi_memory"`
-	PSIIO           float64 `json:"psi_io"`
-	Headroom        float64 `json:"headroom"`
-	GovernorVerdict string  `json:"governor_verdict"`
-	CommittedRatio  float64 `json:"committed_ratio"`
-	SwapTrend       string  `json:"swap_trend"`
-	AgeSeconds      int     `json:"age_seconds"`
-	Liveness        string  `json:"liveness"`
-}
-
-func getHostCapacityGo(ctx context.Context) (*HostCapacityGo, error) {
-	qbp, err := quantbotPool()
-	if err != nil {
-		return nil, fmt.Errorf("quantbot database connection failed: %w", err)
-	}
-
-	rows, err := qbp.Query(ctx, `
-		SELECT DISTINCT ON (name) name, published_at, payload->>'value' AS value 
-		FROM public.kpi_events 
-		WHERE owner='infra' AND name IN ('cpu_nuernberg', 'ram_nuernberg', 'disk_nuernberg') 
-		ORDER BY name, published_at DESC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query kpi_events: %w", err)
-	}
-	defer rows.Close()
-
-	var cpu, ram, disk float64
-	var maxPublishedAt time.Time
-
-	for rows.Next() {
-		var name string
-		var pubAt time.Time
-		var valStr string
-		if err := rows.Scan(&name, &pubAt, &valStr); err != nil {
-			return nil, fmt.Errorf("failed to scan kpi_event row: %w", err)
-		}
-		var val float64
-		fmt.Sscanf(valStr, "%f", &val)
-
-		if pubAt.After(maxPublishedAt) {
-			maxPublishedAt = pubAt
-		}
-
-		switch name {
-		case "cpu_nuernberg":
-			cpu = val
-		case "ram_nuernberg":
-			ram = val
-		case "disk_nuernberg":
-			disk = val
-		}
-	}
-
-	// Falls keine Metriken gefunden wurden, Fallback auf plausible Standardwerte
-	if maxPublishedAt.IsZero() {
-		cpu = 42.5
-		ram = 71.2
-		disk = 82.1
-		maxPublishedAt = time.Now()
-	}
-
-	// Berechnungen für abgeleitete Werte
-	headroom := 100.0 - ram
-
-	// Governor Verdict
-	governorVerdict := "healthy"
-	if ram >= 90.0 || cpu >= 95.0 {
-		governorVerdict = "freeze"
-	}
-
-	// Swap
-	swap := (ram - 55.0) * 1.8
-	if swap < 5.0 {
-		swap = 5.0
-	} else if swap > 85.0 {
-		swap = 85.0
-	}
-
-	// PSI
-	psiCpu := cpu * 0.12
-	psiMem := (ram - 45.0) * 0.35
-	if psiMem < 0 {
-		psiMem = 0
-	}
-	psiIo := (disk - 50.0) * 0.08
-	if psiIo < 0 {
-		psiIo = 0
-	}
-
-	// Freeze Marge (committed_ratio, swap_trend)
-	committedRatio := ram * 1.05 / 100.0
-	swapTrend := "stable"
-	if ram > 75.0 {
-		swapTrend = "rising"
-	} else if ram < 60.0 {
-		swapTrend = "falling"
-	}
-
-	// Liveness & Age
-	ageSec := int(time.Now().Sub(maxPublishedAt).Seconds())
-	if ageSec < 0 {
-		ageSec = 0
-	}
-	liveness := "alive"
-	if ageSec >= 60 {
-		liveness = "dead"
-	}
-
-	return &HostCapacityGo{
-		CPU:             cpu,
-		RAM:             ram,
-		Disk:            disk,
-		Swap:            swap,
-		PSICPU:          psiCpu,
-		PSIMemory:       psiMem,
-		PSIIO:           psiIo,
-		Headroom:        headroom,
-		GovernorVerdict: governorVerdict,
-		CommittedRatio:  committedRatio,
-		SwapTrend:       swapTrend,
-		AgeSeconds:      ageSec,
-		Liveness:        liveness,
-	}, nil
-}
-
 // pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
 type pgxRows interface {
 	Next() bool
@@ -551,6 +419,7 @@ func cmdServe() *cobra.Command {
 		Short: "JSON-API für Cockpit-Page (Stage 3)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
+			http.DefaultServeMux = http.NewServeMux()
 			http.HandleFunc("/api/initiatives", func(w http.ResponseWriter, r *http.Request) {
 				rows, err := p.Query(r.Context(), `SELECT row_to_json(s) FROM portfolio.initiative_summary s ORDER BY firma, stage, id`)
 				if err != nil {
@@ -2060,10 +1929,105 @@ func cmdServe() *cobra.Command {
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
 
+			// POST /api/escalate
+			http.HandleFunc("/api/escalate", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct {
+					Id     string `json:"id"`
+					Reason string `json:"reason"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				payloadMap := map[string]any{
+					"action":       "escalate",
+					"reason":       body.Reason,
+					"timestamp":    time.Now().Format(time.RFC3339),
+					"heal_count":   0,
+					"is_live_geld": false,
+				}
+				payloadBytes, _ := json.Marshal(payloadMap)
+
+				_, err := p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1, 'sage_action', 'master', $2::jsonb, 'flow-manager')`,
+					body.Id, string(payloadBytes))
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
 			// Start background listeners
 			startStageChangeListener(p)
 			startProposalAgentListener(p)
 			startSageSteward(p)
+			startManagerSteward(p)
+
+			// GET /api/manager/digest
+			http.HandleFunc("/api/manager/digest", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				var payload string
+				err := p.QueryRow(r.Context(),
+					`SELECT payload FROM portfolio.manager_digest WHERE id = 'latest'`).Scan(&payload)
+				if err != nil {
+					resp := map[string]any{
+						"stagnant":      []any{},
+						"promote_ready": []any{},
+						"stale":         []any{},
+						"wip_overflow":  []any{},
+						"last_run":      time.Now(),
+						"status":        "unknown",
+					}
+					json.NewEncoder(w).Encode(resp)
+					return
+				}
+				w.Write([]byte(payload))
+			})
+
+			// GET /api/manager/status
+			http.HandleFunc("/api/manager/status", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				var lastRun time.Time
+				var status string
+				var errMsg *string
+				err := p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.manager_status WHERE id = 'manager-steward'`).
+					Scan(&lastRun, &status, &errMsg)
+				if err != nil {
+					lastRun = time.Now()
+					status = "unknown"
+				}
+
+				if time.Since(lastRun) > 30*time.Second {
+					status = "alarm"
+				}
+
+				resp := map[string]any{
+					"last_run":      lastRun,
+					"status":        status,
+					"error_message": errMsg,
+				}
+				json.NewEncoder(w).Encode(resp)
+			})
 
 			// GET /api/sage/status
 			http.HandleFunc("/api/sage/status", func(w http.ResponseWriter, r *http.Request) {
