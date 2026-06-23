@@ -531,6 +531,10 @@ func TestSageSteward_Sweep(t *testing.T) {
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
+	// Clean up other links to st-ib5e during this test to avoid non-deterministic SELECT in runSageSweep
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE ref = $1", testBeadID)
+	defer p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ('sk-deck-operationalisierung', 'bead', 'st-ib5e') ON CONFLICT DO NOTHING")
+
 	// Create test initiative
 	_, err = p.Exec(ctx, `
 		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
@@ -553,7 +557,7 @@ func TestSageSteward_Sweep(t *testing.T) {
 	}
 
 	// Trigger runSageSweep
-	runSageSweep(ctx, p)
+	_ = runSageSweep(p, false, false)
 
 	// Verify that the sage_action event was logged!
 	var exists bool
@@ -597,6 +601,10 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
+	// Clean up other links to st-ib5e during this test to avoid non-deterministic SELECT in runSageSweep
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE ref = $1", testBeadID)
+	defer p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ('sk-deck-operationalisierung', 'bead', 'st-ib5e') ON CONFLICT DO NOTHING")
+
 	// Create test initiative
 	_, err = p.Exec(ctx, `
 		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
@@ -618,9 +626,9 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
-	// Trigger runSageSweepEx with onlyStuck = true.
+	// Trigger runSageSweep with onlyStuck = true.
 	// Since st-ib5e is failed (not running-and-stuck), no event should be logged.
-	runSageSweepEx(ctx, p, true)
+	_ = runSageSweep(p, false, true)
 
 	var exists bool
 	err = p.QueryRow(ctx, `
@@ -637,9 +645,9 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 		t.Errorf("expected NO sage_action event to be logged for initiative %s after runSageSweepEx(onlyStuck=true) on a failed workspace, but one was logged", testInitiativeID)
 	}
 
-	// Trigger runSageSweepEx with onlyStuck = false.
+	// Trigger runSageSweep with onlyStuck = false.
 	// This should log the event since it processes everything.
-	runSageSweepEx(ctx, p, false)
+	_ = runSageSweep(p, false, false)
 
 	err = p.QueryRow(ctx, `
 		SELECT EXISTS(
