@@ -259,7 +259,9 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				continue
 			}
 
-			if diagnosis.Category == "Workspace-gescheitert" {
+			if init.Firma == "quantbot" {
+				diagnosis.ProposedAction = "escalate"
+			} else if diagnosis.Category == "Workspace-gescheitert" {
 				diagnosis.ProposedAction = "handover"
 			}
 
@@ -294,6 +296,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 
 				// If category is "Workspace-gescheitert" (Workspace-bedingte Stagnation),
 				// execute the explicit handover path: log a 'sage_action' event with action='handover' on the Initiative.
+				// But for quantbot (Live-Geld), we do NOT handover/re-dispatch; we log action='escalate' instead.
 				if diagnosis.Category == "Workspace-gescheitert" {
 					var targetWSID string
 					for _, ws := range workspaces {
@@ -310,10 +313,14 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 					}
 
 					if targetWSID != "" {
+						action := "handover"
+						if init.Firma == "quantbot" {
+							action = "escalate"
+						}
 						handoverPayload := map[string]any{
 							"workspace_id":    targetWSID,
-							"action":          "handover",
-							"reason":          fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning),
+							"action":          action,
+							"reason":          fmt.Sprintf("Manager Handover/Escalation (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning),
 							"source":          "manager",
 						}
 						handoverBytes, err := json.Marshal(handoverPayload)
@@ -323,9 +330,13 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 								VALUES ($1, 'sage_action', 'sage', $2, 'flow-manager', now())
 							`, init.ID, string(handoverBytes))
 							if err != nil {
-								fmt.Fprintf(os.Stderr, "  ❌ Failed to write handover sage_action event for %s: %v\n", init.ID, err)
+								fmt.Fprintf(os.Stderr, "  ❌ Failed to write handover/escalate sage_action event for %s: %v\n", init.ID, err)
 							} else {
-								fmt.Printf("  ✓ Handed over stagnant workspace %s to vk-Sage (sage_action event logged)\n", targetWSID)
+								if init.Firma == "quantbot" {
+									fmt.Printf("  ✓ Escalated stagnant workspace %s to vk-Sage (sage_action event logged)\n", targetWSID)
+								} else {
+									fmt.Printf("  ✓ Handed over stagnant workspace %s to vk-Sage (sage_action event logged)\n", targetWSID)
+								}
 							}
 						}
 					}
