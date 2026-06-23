@@ -47,3 +47,7 @@ CREATE TABLE IF NOT EXISTS portfolio.sage_status (
 INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
 VALUES ('sage-steward', now(), 'healthy', NULL)
 ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+VALUES ('kanban-flow-manager', now(), 'healthy', NULL)
+ON CONFLICT (id) DO NOTHING;

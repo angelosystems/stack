@@ -1984,20 +1984,51 @@ func cmdServe() *cobra.Command {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 
-				var lastRun time.Time
-				var status string
-				var errMsg *string
+				var stewardLastRun, managerLastRun time.Time
+				var stewardStatus, managerStatus string
+				var stewardErrMsg, managerErrMsg *string
+
 				err := p.QueryRow(r.Context(),
 					`SELECT last_run, status, error_message FROM portfolio.sage_status WHERE id = 'sage-steward'`).
-					Scan(&lastRun, &status, &errMsg)
+					Scan(&stewardLastRun, &stewardStatus, &stewardErrMsg)
 				if err != nil {
-					lastRun = time.Now()
-					status = "unknown"
+					stewardLastRun = time.Now()
+					stewardStatus = "unknown"
 				}
 
-				// If last run is older than 30 seconds, it's an alarm!
-				if time.Since(lastRun) > 30*time.Second {
-					status = "alarm"
+				err = p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.sage_status WHERE id = 'kanban-flow-manager'`).
+					Scan(&managerLastRun, &managerStatus, &managerErrMsg)
+				if err != nil {
+					managerLastRun = time.Now()
+					managerStatus = "unknown"
+				}
+
+				// If either last run is older than 30 seconds, it's an alarm!
+				stewardStale := time.Since(stewardLastRun) > 30*time.Second
+				managerStale := time.Since(managerLastRun) > 30*time.Second
+
+				aggregateStatus := "healthy"
+				if stewardStatus == "alarm" || managerStatus == "alarm" || stewardStale || managerStale {
+					aggregateStatus = "alarm"
+				}
+
+				oldestLastRun := stewardLastRun
+				if managerLastRun.Before(oldestLastRun) {
+					oldestLastRun = managerLastRun
+				}
+
+				var aggregateErrMsg *string
+				if stewardErrMsg != nil {
+					aggregateErrMsg = stewardErrMsg
+				} else if managerErrMsg != nil {
+					aggregateErrMsg = managerErrMsg
+				} else if stewardStale {
+					staleStr := "sage-steward run is stale"
+					aggregateErrMsg = &staleStr
+				} else if managerStale {
+					staleStr := "kanban-flow-manager run is stale"
+					aggregateErrMsg = &staleStr
 				}
 
 				dangling, err := getDanglingWorkspaces()
@@ -2006,9 +2037,9 @@ func cmdServe() *cobra.Command {
 				}
 
 				resp := map[string]any{
-					"last_run":            lastRun,
-					"status":              status,
-					"error_message":       errMsg,
+					"last_run":            oldestLastRun,
+					"status":              aggregateStatus,
+					"error_message":       aggregateErrMsg,
 					"dangling_count":      len(dangling),
 					"dangling_baseline":   4,
 					"outage_simulated":    sageOutageSimulated,
@@ -2044,14 +2075,14 @@ func cmdServe() *cobra.Command {
 					_, _ = p.Exec(r.Context(),
 						`UPDATE portfolio.sage_status 
 						 SET last_run = now() - interval '10 minutes', status = 'alarm' 
-						 WHERE id = 'sage-steward'`)
+						 WHERE id IN ('sage-steward', 'kanban-flow-manager')`)
 				} else {
 					sageOutageSimulated = false
 					// Restore healthy status
 					_, _ = p.Exec(r.Context(),
 						`UPDATE portfolio.sage_status 
 						 SET last_run = now(), status = 'healthy', error_message = NULL 
-						 WHERE id = 'sage-steward'`)
+						 WHERE id IN ('sage-steward', 'kanban-flow-manager')`)
 				}
 
 				w.Header().Set("Content-Type", "application/json")
@@ -3746,12 +3777,23 @@ func runSageSweepEx(ctx context.Context, p *pgxpool.Pool, onlyStuck bool) {
 }
 
 func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout bool) {
+	var runErr error
+
+	cooldownHours := 1
+	if envVal := os.Getenv("MANAGER_COOLDOWN_HOURS"); envVal != "" {
+		if val, err := strconv.Atoi(envVal); err == nil {
+			cooldownHours = val
+		}
+	}
+
 	// 1. "alle Beads closed" check:
 	rows, err := p.Query(ctx, `
 		SELECT id, stage, title, firma FROM portfolio.initiative 
 		WHERE stage NOT IN ('done', 'watching') AND archived_at IS NULL
 	`)
-	if err == nil {
+	if err != nil {
+		runErr = fmt.Errorf("query active initiatives failed: %w", err)
+	} else {
 		type InitInfo struct {
 			ID, Stage, Title, Firma string
 		}
@@ -3793,9 +3835,12 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 				_ = p.QueryRow(ctx, `
 					SELECT EXISTS(
 						SELECT 1 FROM portfolio.initiative_event
-						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = 'all-beads-closed'
+						WHERE initiative_id = $1 
+						  AND kind = 'sage_action' 
+						  AND (payload->>'classification') = 'all-beads-closed'
+						  AND at > now() - ($2 * interval '1 hour')
 					)
-				`, init.ID).Scan(&exists)
+				`, init.ID, cooldownHours).Scan(&exists)
 				if !exists {
 					payloadBytes, _ := json.Marshal(map[string]any{
 						"classification":  "all-beads-closed",
@@ -3826,7 +3871,9 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 		SELECT id, title, COALESCE(updated_at, created_at) FROM portfolio.initiative
 		WHERE stage = 'idea' AND archived_at IS NULL
 	`)
-	if err == nil {
+	if err != nil && runErr == nil {
+		runErr = fmt.Errorf("query backlog initiatives failed: %w", err)
+	} else if err == nil {
 		type BacklogInfo struct {
 			ID, Title string
 			BaseTime  time.Time
@@ -3853,9 +3900,12 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 				_ = p.QueryRow(ctx, `
 					SELECT EXISTS(
 						SELECT 1 FROM portfolio.initiative_event
-						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = 'backlog-faeule'
+						WHERE initiative_id = $1 
+						  AND kind = 'sage_action' 
+						  AND (payload->>'classification') = 'backlog-faeule'
+						  AND at > now() - ($2 * interval '1 hour')
 					)
-				`, item.ID).Scan(&exists)
+				`, item.ID, cooldownHours).Scan(&exists)
 				if !exists {
 					payloadBytes, _ := json.Marshal(map[string]any{
 						"classification":  "backlog-faeule",
@@ -3888,6 +3938,27 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 			}
 		}
 	}
+
+	// Update Kanban Flow Manager heartbeat in database
+	statusVal := "healthy"
+	var errMsg *string
+	if runErr != nil {
+		statusVal = "alarm"
+		errStr := runErr.Error()
+		errMsg = &errStr
+	}
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+		VALUES ('kanban-flow-manager', now(), $1, $2)
+		ON CONFLICT (id) DO UPDATE SET
+			last_run = EXCLUDED.last_run,
+			status = EXCLUDED.status,
+			error_message = EXCLUDED.error_message
+	`, statusVal, errMsg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error updating kanban-flow-manager status: %v\n", err)
+	}
 }
 
 func startSageSteward(p *pgxpool.Pool) {
@@ -3895,6 +3966,14 @@ func startSageSteward(p *pgxpool.Pool) {
 	_, _ = p.Exec(context.Background(),
 		`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
 		 VALUES ('sage-steward', now(), 'healthy', NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    error_message = EXCLUDED.error_message`)
+
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+		 VALUES ('kanban-flow-manager', now(), 'healthy', NULL)
 		 ON CONFLICT (id) DO UPDATE SET
 		    last_run = EXCLUDED.last_run,
 		    status = EXCLUDED.status,
@@ -3927,6 +4006,8 @@ func startSageSteward(p *pgxpool.Pool) {
 				// Periodic: run stuck-only sweep
 				isStuckSweep = true
 				sweepErr = runSageSweep(p, false, true)
+				// Periodischer Lauf des Managers
+				runInitiativeChecks(context.Background(), p, false)
 			}
 
 			statusVal := "healthy"
