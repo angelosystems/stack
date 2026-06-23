@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -96,3 +99,83 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 		t.Errorf("unexpected reason in Case 4: %s", reason)
 	}
 }
+
+func TestDiagnoseFlaggedCard(t *testing.T) {
+	type TextContent struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	type MockResponse struct {
+		Content []TextContent `json:"content"`
+	}
+
+	var mockText string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := MockResponse{
+			Content: []TextContent{
+				{
+					Type: "text",
+					Text: mockText,
+				},
+			},
+		}
+		b, _ := json.Marshal(resp)
+		w.Write(b)
+	}))
+	defer server.Close()
+
+	os.Setenv("ZAI_KEY", "test-key-123")
+	os.Setenv("REVIEWER_BASE_URL", server.URL)
+	defer func() {
+		os.Unsetenv("ZAI_KEY")
+		os.Unsetenv("REVIEWER_BASE_URL")
+	}()
+
+	init := FlowInitiative{
+		ID:          "init-1",
+		Firma:       "stayawesome",
+		Stage:       "now",
+		Title:       "Test Initiative",
+		Description: "A stagnant test initiative",
+		CreatedAt:   time.Now().Add(-10 * 24 * time.Hour),
+		UpdatedAt:   time.Now().Add(-5 * 24 * time.Hour),
+	}
+	beads := []LinkedBead{{Ref: "bead-1", Status: "open"}}
+	workspaces := []LinkedWorkspace{{ID: "ws-1", Status: "completed"}}
+	events := []FlowEvent{}
+	flaggedReasons := []string{"Stagnation: 5 tage stille"}
+
+	// Case 1: High confidence
+	mockText = `{"category": "wartet-auf-Mensch", "confidence": "High", "reasoning": "Needs manual triage as it has been stale for 5 days.", "proposed_action": "ask owner for input"}`
+	diag, err := diagnoseFlaggedCard(init, beads, workspaces, events, flaggedReasons)
+	if err != nil {
+		t.Fatalf("unexpected error in Case 1: %v", err)
+	}
+	if diag.Category != "wartet-auf-Mensch" {
+		t.Errorf("expected Category 'wartet-auf-Mensch', got '%s'", diag.Category)
+	}
+	if diag.Confidence != "High" {
+		t.Errorf("expected Confidence 'High', got '%s'", diag.Confidence)
+	}
+	if diag.ProposedAction != "ask owner for input" {
+		t.Errorf("expected ProposedAction 'ask owner for input', got '%s'", diag.ProposedAction)
+	}
+
+	// Case 2: Low confidence (suppress proposed action)
+	mockText = `{"category": "Workspace-gescheitert", "confidence": "Low", "reasoning": "Unclear status.", "proposed_action": "do something"}`
+	diag, err = diagnoseFlaggedCard(init, beads, workspaces, events, flaggedReasons)
+	if err != nil {
+		t.Fatalf("unexpected error in Case 2: %v", err)
+	}
+	if diag.Category != "Workspace-gescheitert" {
+		t.Errorf("expected Category 'Workspace-gescheitert', got '%s'", diag.Category)
+	}
+	if diag.Confidence != "Low" {
+		t.Errorf("expected Confidence 'Low', got '%s'", diag.Confidence)
+	}
+	if diag.ProposedAction != "" {
+		t.Errorf("expected ProposedAction to be empty for Low confidence, got '%s'", diag.ProposedAction)
+	}
+}
+
