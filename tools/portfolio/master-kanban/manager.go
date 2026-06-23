@@ -783,4 +783,3 @@ func GetPromoteTargetStage(ctx context.Context, p *pgxpool.Pool, sp *pgxpool.Poo
 	}
 	return targetStage
 }
-

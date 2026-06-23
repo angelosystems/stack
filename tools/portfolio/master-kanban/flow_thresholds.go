@@ -12,11 +12,11 @@ import (
 // 1. Environment variable: PORTFOLIO_THRESHOLD_<STAGE>_<FIRMA> (e.g. PORTFOLIO_THRESHOLD_NOW_STAYAWESOME)
 // 2. Environment variable: PORTFOLIO_THRESHOLD_<STAGE> (e.g. PORTFOLIO_THRESHOLD_NOW)
 // 3. Default conservative threshold:
-//    - "now": 3 days (72h)
-//    - "soon": 14 days (336h)
-//    - "idea": 90 days (2160h)
-//    - "watching": 30 days (720h)
-//    - "done": 0 (disabled)
+//   - "now": 3 days (72h)
+//   - "soon": 14 days (336h)
+//   - "idea": 90 days (2160h)
+//   - "watching": 30 days (720h)
+//   - "done": 0 (disabled)
 func GetStageThreshold(firma string, stage string) time.Duration {
 	stage = strings.ToLower(stage)
 	firma = strings.ToLower(firma)
@@ -70,63 +70,63 @@ func ParseThresholdDuration(s string) (time.Duration, error) {
 		var mo float64
 		if _, err := fmt.Sscanf(valStr, "%f", &mo); err == nil {
 			// Treat 1 month as 30 days
-			return time.Duration(mo * 30 * 24) * time.Hour, nil
+			return time.Duration(mo*30*24) * time.Hour, nil
 		}
 	}
 	if strings.HasSuffix(s, "months") {
 		valStr := strings.TrimSuffix(s, "months")
 		var mo float64
 		if _, err := fmt.Sscanf(valStr, "%f", &mo); err == nil {
-			return time.Duration(mo * 30 * 24) * time.Hour, nil
+			return time.Duration(mo*30*24) * time.Hour, nil
 		}
 	}
 	if strings.HasSuffix(s, "month") {
 		valStr := strings.TrimSuffix(s, "month")
 		var mo float64
 		if _, err := fmt.Sscanf(valStr, "%f", &mo); err == nil {
-			return time.Duration(mo * 30 * 24) * time.Hour, nil
+			return time.Duration(mo*30*24) * time.Hour, nil
 		}
 	}
 	if strings.HasSuffix(s, "w") {
 		valStr := strings.TrimSuffix(s, "w")
 		var w float64
 		if _, err := fmt.Sscanf(valStr, "%f", &w); err == nil {
-			return time.Duration(w * 7 * 24) * time.Hour, nil
+			return time.Duration(w*7*24) * time.Hour, nil
 		}
 	}
 	if strings.HasSuffix(s, "weeks") {
 		valStr := strings.TrimSuffix(s, "weeks")
 		var w float64
 		if _, err := fmt.Sscanf(valStr, "%f", &w); err == nil {
-			return time.Duration(w * 7 * 24) * time.Hour, nil
+			return time.Duration(w*7*24) * time.Hour, nil
 		}
 	}
 	if strings.HasSuffix(s, "week") {
 		valStr := strings.TrimSuffix(s, "week")
 		var w float64
 		if _, err := fmt.Sscanf(valStr, "%f", &w); err == nil {
-			return time.Duration(w * 7 * 24) * time.Hour, nil
+			return time.Duration(w*7*24) * time.Hour, nil
 		}
 	}
 	if strings.HasSuffix(s, "d") {
 		valStr := strings.TrimSuffix(s, "d")
 		var d float64
 		if _, err := fmt.Sscanf(valStr, "%f", &d); err == nil {
-			return time.Duration(d * 24) * time.Hour, nil
+			return time.Duration(d*24) * time.Hour, nil
 		}
 	}
 	if strings.HasSuffix(s, "days") {
 		valStr := strings.TrimSuffix(s, "days")
 		var d float64
 		if _, err := fmt.Sscanf(valStr, "%f", &d); err == nil {
-			return time.Duration(d * 24) * time.Hour, nil
+			return time.Duration(d*24) * time.Hour, nil
 		}
 	}
 	if strings.HasSuffix(s, "day") {
 		valStr := strings.TrimSuffix(s, "day")
 		var d float64
 		if _, err := fmt.Sscanf(valStr, "%f", &d); err == nil {
-			return time.Duration(d * 24) * time.Hour, nil
+			return time.Duration(d*24) * time.Hour, nil
 		}
 	}
 
@@ -153,4 +153,3 @@ func GetPromoteTarget(stage string) (string, error) {
 		return "", fmt.Errorf("unknown stage %q", stage)
 	}
 }
-

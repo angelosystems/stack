@@ -311,10 +311,10 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 
 					if targetWSID != "" {
 						handoverPayload := map[string]any{
-							"workspace_id":    targetWSID,
-							"action":          "handover",
-							"reason":          fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning),
-							"source":          "manager",
+							"workspace_id": targetWSID,
+							"action":       "handover",
+							"reason":       fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning),
+							"source":       "manager",
 						}
 						handoverBytes, err := json.Marshal(handoverPayload)
 						if err == nil {
@@ -584,4 +584,3 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 
 	return false, "", nil
 }
-
