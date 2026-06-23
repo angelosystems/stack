@@ -440,6 +440,7 @@ func cmdServe() *cobra.Command {
 		Short: "JSON-API für Cockpit-Page (Stage 3)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
+			http.DefaultServeMux = http.NewServeMux()
 			http.HandleFunc("/api/initiatives", func(w http.ResponseWriter, r *http.Request) {
 				rows, err := p.Query(r.Context(), `SELECT row_to_json(s) FROM portfolio.initiative_summary s ORDER BY firma, stage, id`)
 				if err != nil {
@@ -2185,10 +2186,105 @@ func cmdServe() *cobra.Command {
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
 
+			// POST /api/escalate
+			http.HandleFunc("/api/escalate", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct {
+					Id     string `json:"id"`
+					Reason string `json:"reason"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				payloadMap := map[string]any{
+					"action":       "escalate",
+					"reason":       body.Reason,
+					"timestamp":    time.Now().Format(time.RFC3339),
+					"heal_count":   0,
+					"is_live_geld": false,
+				}
+				payloadBytes, _ := json.Marshal(payloadMap)
+
+				_, err := p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1, 'sage_action', 'master', $2::jsonb, 'flow-manager')`,
+					body.Id, string(payloadBytes))
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
 			// Start background listeners
 			startStageChangeListener(p)
 			startProposalAgentListener(p)
 			startSageSteward(p)
+			startManagerSteward(p)
+
+			// GET /api/manager/digest
+			http.HandleFunc("/api/manager/digest", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				var payload string
+				err := p.QueryRow(r.Context(),
+					`SELECT payload FROM portfolio.manager_digest WHERE id = 'latest'`).Scan(&payload)
+				if err != nil {
+					resp := map[string]any{
+						"stagnant":      []any{},
+						"promote_ready": []any{},
+						"stale":         []any{},
+						"wip_overflow":  []any{},
+						"last_run":      time.Now(),
+						"status":        "unknown",
+					}
+					json.NewEncoder(w).Encode(resp)
+					return
+				}
+				w.Write([]byte(payload))
+			})
+
+			// GET /api/manager/status
+			http.HandleFunc("/api/manager/status", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				var lastRun time.Time
+				var status string
+				var errMsg *string
+				err := p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.manager_status WHERE id = 'manager-steward'`).
+					Scan(&lastRun, &status, &errMsg)
+				if err != nil {
+					lastRun = time.Now()
+					status = "unknown"
+				}
+
+				if time.Since(lastRun) > 30*time.Second {
+					status = "alarm"
+				}
+
+				resp := map[string]any{
+					"last_run":      lastRun,
+					"status":        status,
+					"error_message": errMsg,
+				}
+				json.NewEncoder(w).Encode(resp)
+			})
 
 			// GET /api/sage/status
 			http.HandleFunc("/api/sage/status", func(w http.ResponseWriter, r *http.Request) {
