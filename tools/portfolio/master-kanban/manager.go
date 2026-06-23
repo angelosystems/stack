@@ -170,27 +170,6 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		}
 	}
 
-	// Thresholds configurable via environment variables
-	stagnationThresholdNow := 48 * time.Hour
-	stagnationThresholdSoon := 168 * time.Hour
-	staleThresholdIdea := 720 * time.Hour // 30 days
-
-	if val := os.Getenv("MANAGER_STAGNATION_THRESHOLD_NOW"); val != "" {
-		if d, err := time.ParseDuration(val); err == nil {
-			stagnationThresholdNow = d
-		}
-	}
-	if val := os.Getenv("MANAGER_STAGNATION_THRESHOLD_SOON"); val != "" {
-		if d, err := time.ParseDuration(val); err == nil {
-			stagnationThresholdSoon = d
-		}
-	}
-	if val := os.Getenv("MANAGER_STALE_THRESHOLD_IDEA"); val != "" {
-		if d, err := time.ParseDuration(val); err == nil {
-			staleThresholdIdea = d
-		}
-	}
-
 	for _, init := range initiatives {
 		signal := FlowSignal{
 			InitiativeID: init.id,
@@ -311,21 +290,86 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		}
 
 		// 1. Detection: Stagnation (stockend)
-		// NOW threshold: 48h, SOON threshold: 168h
+		stgThresh := GetStageThreshold(init.firma, init.stage)
 		isStagnant := false
-		if (init.stage == "now" && signal.ActivityStaleHrs > stagnationThresholdNow.Hours() && !signal.HasActiveWork) ||
-			(init.stage == "soon" && signal.ActivityStaleHrs > stagnationThresholdSoon.Hours() && !signal.HasActiveWork) {
+		if (init.stage == "now" || init.stage == "soon") && stgThresh > 0 && signal.ActivityStaleHrs > stgThresh.Hours() && !signal.HasActiveWork {
 			isStagnant = true
 		}
 
 		if isStagnant {
-			// Rule-based Diagnosis
+			// Rule-based Diagnosis fallback
 			diagnosis := "wartet-auf-Mensch"
 			desc := fmt.Sprintf("Inaktivität seit %.1f Stunden in Stage '%s' ohne aktive Beads/Workspaces.", signal.ActivityStaleHrs, init.stage)
+			proposedAction := ""
+			confidence := "High"
+
+			// Try to load the latest GLM diagnosis from portfolio.initiative_event
+			var flowActionPayload string
+			err := p.QueryRow(ctx, `
+				SELECT payload::text FROM portfolio.initiative_event
+				WHERE initiative_id = $1 AND kind = 'flow_action'
+				ORDER BY at DESC LIMIT 1
+			`, init.id).Scan(&flowActionPayload)
+			if err == nil {
+				var parsed struct {
+					Category       string `json:"category"`
+					Confidence     string `json:"confidence"`
+					Reasoning      string `json:"reasoning"`
+					ProposedAction string `json:"proposed_action"`
+				}
+				if json.Unmarshal([]byte(flowActionPayload), &parsed) == nil {
+					if parsed.Category != "" {
+						diagnosis = parsed.Category
+					}
+					if parsed.Reasoning != "" {
+						desc = parsed.Reasoning
+					}
+					proposedAction = parsed.ProposedAction
+					confidence = parsed.Confidence
+				}
+			}
 
 			// Log Event (manager_flag) with Cooldown (once every 24 hours per initiative & flag type)
-			err := logManagerFlagWithCooldown(p, init.id, "stagnation", "Stagnation: "+diagnosis, desc)
+			err = logManagerFlagWithCooldown(p, init.id, "stagnation", "Stagnation: "+diagnosis, desc)
 			if err == nil {
+				var actions []ProposalAction
+				// Low-Confidence underdrückt Aktions-Vorschläge (R-B / Acceptanz-Kriterium)
+				if strings.ToLower(confidence) != "low" {
+					if proposedAction != "" && proposedAction != "handover" {
+						actions = append(actions, ProposalAction{
+							Label:    proposedAction,
+							Endpoint: "/api/dispatch",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":   init.id,
+								"note": fmt.Sprintf("Proposed action '%s' via Flow Manager", proposedAction),
+							},
+						})
+					} else {
+						actions = []ProposalAction{
+							{
+								Label:    "Re-Dispatch",
+								Endpoint: "/api/dispatch",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":   init.id,
+									"lane": "hack",
+									"note": "Re-dispatch stagnant initiative via Flow Manager",
+								},
+							},
+							{
+								Label:    "Eskalieren",
+								Endpoint: "/api/escalate",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":     init.id,
+									"reason": "Eskalation wegen Stagnation (Inaktivität)",
+								},
+							},
+						}
+					}
+				}
+
 				stagnantFlags = append(stagnantFlags, ManagerFlag{
 					InitiativeID:   init.id,
 					Firma:          init.firma,
@@ -334,27 +378,7 @@ func runManagerSweep(p *pgxpool.Pool) error {
 					Type:           "stagnation",
 					Classification: "Stagnation: " + diagnosis,
 					Description:    desc,
-					Actions: []ProposalAction{
-						{
-							Label:    "Re-Dispatch",
-							Endpoint: "/api/dispatch",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":   init.id,
-								"lane": "hack",
-								"note": "Re-dispatch stagnant initiative via Flow Manager",
-							},
-						},
-						{
-							Label:    "Eskalieren",
-							Endpoint: "/api/escalate",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":     init.id,
-								"reason": "Eskalation wegen Stagnation (Inaktivität)",
-							},
-						},
-					},
+					Actions:        actions,
 				})
 			}
 		}
@@ -363,10 +387,54 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		// All linked beads closed, but stage is not 'done'
 		if init.stage != "done" && signal.TotalBeads > 0 && signal.ClosedBeads == signal.TotalBeads {
 			desc := fmt.Sprintf("Alle %d verlinkten Beads sind geschlossen, aber die Karte befindet sich noch in Stage '%s'.", signal.TotalBeads, init.stage)
-			err := logManagerFlagWithCooldown(p, init.id, "promote_ready", "Promote-reif", desc)
+			proposedAction := "Ein-Klick-Promote"
+			confidence := "High"
+
+			// Try to load the latest GLM diagnosis from portfolio.initiative_event
+			var flowActionPayload string
+			err := p.QueryRow(ctx, `
+				SELECT payload::text FROM portfolio.initiative_event
+				WHERE initiative_id = $1 AND kind = 'flow_action'
+				ORDER BY at DESC LIMIT 1
+			`, init.id).Scan(&flowActionPayload)
 			if err == nil {
-				nowCount := wipCounts[init.firma]
-				targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
+				var parsed struct {
+					Category       string `json:"category"`
+					Confidence     string `json:"confidence"`
+					Reasoning      string `json:"reasoning"`
+					ProposedAction string `json:"proposed_action"`
+				}
+				if json.Unmarshal([]byte(flowActionPayload), &parsed) == nil {
+					if parsed.Category == "fertig-nicht-promotet" {
+						if parsed.Reasoning != "" {
+							desc = parsed.Reasoning
+						}
+						proposedAction = parsed.ProposedAction
+						confidence = parsed.Confidence
+					}
+				}
+			}
+
+			err = logManagerFlagWithCooldown(p, init.id, "promote_ready", "Promote-reif", desc)
+			if err == nil {
+				var actions []ProposalAction
+				// Low-Confidence underdrückt Aktions-Vorschläge (R-B / Acceptanz-Kriterium)
+				if strings.ToLower(confidence) != "low" {
+					nowCount := wipCounts[init.firma]
+					targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
+					actions = []ProposalAction{
+						{
+							Label:    proposedAction,
+							Endpoint: "/api/move",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":    init.id,
+								"stage": targetStage,
+							},
+						},
+					}
+				}
+
 				promoteReadyFlags = append(promoteReadyFlags, ManagerFlag{
 					InitiativeID:   init.id,
 					Firma:          init.firma,
@@ -375,24 +443,15 @@ func runManagerSweep(p *pgxpool.Pool) error {
 					Type:           "promote_ready",
 					Classification: "Promote-reif",
 					Description:    desc,
-					Actions: []ProposalAction{
-						{
-							Label:    "Ein-Klick-Promote",
-							Endpoint: "/api/move",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":    init.id,
-								"stage": targetStage,
-							},
-						},
-					},
+					Actions:        actions,
 				})
 			}
 		}
 
 		// 3. Detection: Backlog-Fäule / Veraltet (stale)
 		// Stage is 'idea' and stale threshold exceeded
-		if init.stage == "idea" && signal.ActivityStaleHrs > staleThresholdIdea.Hours() {
+		staleThresh := GetStageThreshold(init.firma, "idea")
+		if init.stage == "idea" && staleThresh > 0 && signal.ActivityStaleHrs > staleThresh.Hours() {
 			desc := fmt.Sprintf("Karte befindet sich seit %.1f Tagen ohne Aktivität in Stage 'idea' (Backlog-Fäule).", signal.ActivityStaleHrs/24.0)
 			err := logManagerFlagWithCooldown(p, init.id, "stale", "Veraltet (Backlog-Fäule)", desc)
 			if err == nil {
