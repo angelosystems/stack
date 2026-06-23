@@ -529,7 +529,7 @@ func cmdMove() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
-			tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = 			                      `, args[0], args[1])
+			tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, args[0], args[1])
 			if err != nil {
 				return err
 			}
@@ -855,17 +855,17 @@ func enrichFlowSignals(ctx context.Context, p *pgxpool.Pool, items []map[string]
 
 		// Put everything into the map under "flow_signals" and top-level fields
 		flowSignals := map[string]any{
-			"time_in_stage_seconds":      timeInStageSec,
-			"time_in_stage":              timeInStageStr,
-			"activity_silence_seconds":   activitySilenceSec,
-			"activity_silence":           activitySilenceStr,
-			"bead_progress_closed":       closedBeads,
-			"bead_progress_total":        totalBeads,
-			"bead_progress_percentage":   beadProgressPercentage,
-			"bead_progress_str":          beadProgressStr,
-			"wip_cards_in_now":           cardsInNow,
-			"wip_limit":                  nowLimit,
-			"wip_vs_limit_str":           wipVsLimitStr,
+			"time_in_stage_seconds":    timeInStageSec,
+			"time_in_stage":            timeInStageStr,
+			"activity_silence_seconds": activitySilenceSec,
+			"activity_silence":         activitySilenceStr,
+			"bead_progress_closed":     closedBeads,
+			"bead_progress_total":      totalBeads,
+			"bead_progress_percentage": beadProgressPercentage,
+			"bead_progress_str":        beadProgressStr,
+			"wip_cards_in_now":         cardsInNow,
+			"wip_limit":                nowLimit,
+			"wip_vs_limit_str":         wipVsLimitStr,
 		}
 		item["flow_signals"] = flowSignals
 
@@ -3119,7 +3119,7 @@ func cmdServe() *cobra.Command {
 					"dangling_baseline":   4,
 					"outage_simulated":    sageOutageSimulated,
 					"dangling_workspaces": dangling,
-					"manager_status":    mgrResp,
+					"manager_status":      mgrResp,
 				}
 				json.NewEncoder(w).Encode(resp)
 			})
