@@ -272,7 +272,7 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		}
 
 		if len(vkRefs) > 0 {
-			if _, statErr := os.Stat(vkDB); statErr == nil {
+			if _, err := os.Stat(vkDB); err == nil {
 				for _, ref := range vkRefs {
 					hexID := strings.ToUpper(strings.ReplaceAll(ref, "-", ""))
 					query := fmt.Sprintf(`
@@ -299,7 +299,7 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		}
 
 		// Calculate signal values based on gathered beads & workspaces
-		signal.TotalBeads = len(beads)
+		signal.TotalBeads = len(beadRefs)
 		for _, b := range beads {
 			if b.Status == "closed" {
 				signal.ClosedBeads++
@@ -308,7 +308,8 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			}
 		}
 		for _, ws := range workspaces {
-			if ws.Status == "running" {
+			status := strings.ToLower(ws.Status)
+			if status == "running" || status == "queued" || status == "waiting" || status == "pending" || status == "" {
 				signal.HasActiveWork = true
 			}
 		}
@@ -430,7 +431,6 @@ func runManagerSweep(p *pgxpool.Pool) error {
 						},
 					}
 				}
-
 				stagnantFlags = append(stagnantFlags, ManagerFlag{
 					InitiativeID:   init.id,
 					Firma:          init.firma,
@@ -447,7 +447,7 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		// 2. Detection: Promote-reif (promote-ready)
 		// All linked beads closed, but stage is not 'done'
 		if init.stage != "done" && signal.TotalBeads > 0 && signal.ClosedBeads == signal.TotalBeads {
-originalDesc := fmt.Sprintf("Alle %d verlinkten Beads sind geschlossen, aber die Karte befindet sich noch in Stage '%s'.", signal.TotalBeads, init.stage)
+			originalDesc := fmt.Sprintf("Alle %d verlinkten Beads sind geschlossen, aber die Karte befindet sich noch in Stage '%s'.", signal.TotalBeads, init.stage)
 			originalClassification := "Promote-reif"
 
 			nowCount := wipCounts[init.firma]
