@@ -3726,6 +3726,20 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 					} else if strings.HasPrefix(nameLower, "st-") {
 						beadID = nameLower
 					}
+
+					// Exclude cards/workspaces with healthy pending dispatches (waiting for capacity/polecat)
+					if beadID != "" {
+						sp, err := solartownPool()
+						if err == nil {
+							var beadStatus string
+							err = sp.QueryRow(ctx, `SELECT status FROM beads.issues WHERE id = $1 AND deleted_at IS NULL`, beadID).Scan(&beadStatus)
+							if err == nil && beadStatus == "open" {
+								class = ""
+								action = ""
+								beadID = ""
+							}
+						}
+					}
 				}
 			}
 		}
