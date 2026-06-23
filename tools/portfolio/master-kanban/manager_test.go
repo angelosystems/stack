@@ -140,3 +140,153 @@ func TestManagerSweepAndEscalate(t *testing.T) {
 		t.Errorf("Expected exactly 1 escalation event, got %d", count)
 	}
 }
+
+func TestManagerSweep_GlmDiagnosisIntegration(t *testing.T) {
+	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	ctx := context.Background()
+
+	pPool, err := pgxpool.New(ctx, portfolioDsn)
+	if err != nil {
+		t.Fatalf("Failed to connect to portfolio DB: %v", err)
+	}
+	defer pPool.Close()
+
+	// Swap global pool
+	oldPool := pool
+	pool = pPool
+	defer func() {
+		pool = oldPool
+	}()
+
+	testInitID := "st-test-glm-integration-init"
+
+	// Cleanup
+	cleanup := func() {
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitID)
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitID)
+	}
+	cleanup()
+	defer cleanup()
+
+	// 1. Create a stagnant initiative card in PostgreSQL (stage: now, updated_at 10 days ago)
+	_, err = pPool.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, firma, stage, title, description, created_at, updated_at)
+		VALUES ($1, 'solartown', 'now', 'Test Stagnant GLM Card', 'Desc', now() - interval '10 days', now() - interval '10 days')
+	`, testInitID)
+	if err != nil {
+		t.Fatalf("Failed to create test initiative: %v", err)
+	}
+
+	// 2. Set environment variables to enable fast stagnation check
+	t.Setenv("MANAGER_STAGNATION_THRESHOLD_NOW", "1h")
+
+	// Case A: High Confidence GLM payload
+	payloadHigh := map[string]any{
+		"category":        "Workspace-gescheitert",
+		"confidence":      "High",
+		"reasoning":       "The workspace has failed completely with exit status 1.",
+		"proposed_action": "handover",
+	}
+	payloadBytesHigh, _ := json.Marshal(payloadHigh)
+	_, err = pPool.Exec(ctx, `
+		INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+		VALUES ($1, 'flow_action', 'flow_manager', $2::jsonb, 'flow-manager', now() - interval '10 days')
+	`, testInitID, string(payloadBytesHigh))
+	if err != nil {
+		t.Fatalf("Failed to insert high confidence flow_action event: %v", err)
+	}
+
+	// Run the sweep
+	err = runManagerSweep(pPool)
+	if err != nil {
+		t.Fatalf("runManagerSweep failed: %v", err)
+	}
+
+	// Retrieve digest and verify
+	var payloadStr string
+	err = pPool.QueryRow(ctx, "SELECT payload FROM portfolio.manager_digest WHERE id = 'latest'").Scan(&payloadStr)
+	if err != nil {
+		t.Fatalf("Failed to fetch manager digest: %v", err)
+	}
+
+	var digest ManagerDigest
+	if err := json.Unmarshal([]byte(payloadStr), &digest); err != nil {
+		t.Fatalf("Failed to parse digest payload: %v", err)
+	}
+
+	foundHigh := false
+	for _, flag := range digest.Stagnant {
+		if flag.InitiativeID == testInitID {
+			foundHigh = true
+			if flag.Classification != "Stagnation: Workspace-gescheitert" {
+				t.Errorf("Expected classification 'Stagnation: Workspace-gescheitert', got %q", flag.Classification)
+			}
+			if flag.Description != "The workspace has failed completely with exit status 1." {
+				t.Errorf("Expected description to match reasoning, got %q", flag.Description)
+			}
+			// Actions should be present because confidence is High
+			if len(flag.Actions) == 0 {
+				t.Errorf("Expected actions to be present for High confidence, got 0")
+			}
+		}
+	}
+	if !foundHigh {
+		t.Errorf("Expected initiative to be flagged under stagnant with High confidence")
+	}
+
+	// Cleanup events for Case B
+	_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitID)
+
+	// Case B: Low Confidence GLM payload -> suppresses proposed actions
+	payloadLow := map[string]any{
+		"category":        "wartet-auf-Mensch",
+		"confidence":      "Low",
+		"reasoning":       "No activity detected, probably waiting for user feedback.",
+		"proposed_action": "ask owner",
+	}
+	payloadBytesLow, _ := json.Marshal(payloadLow)
+	_, err = pPool.Exec(ctx, `
+		INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+		VALUES ($1, 'flow_action', 'flow_manager', $2::jsonb, 'flow-manager', now() - interval '10 days')
+	`, testInitID, string(payloadBytesLow))
+	if err != nil {
+		t.Fatalf("Failed to insert low confidence flow_action event: %v", err)
+	}
+
+	// Run the sweep
+	err = runManagerSweep(pPool)
+	if err != nil {
+		t.Fatalf("runManagerSweep failed: %v", err)
+	}
+
+	// Retrieve digest and verify
+	err = pPool.QueryRow(ctx, "SELECT payload FROM portfolio.manager_digest WHERE id = 'latest'").Scan(&payloadStr)
+	if err != nil {
+		t.Fatalf("Failed to fetch manager digest: %v", err)
+	}
+
+	if err := json.Unmarshal([]byte(payloadStr), &digest); err != nil {
+		t.Fatalf("Failed to parse digest payload: %v", err)
+	}
+
+	foundLow := false
+	for _, flag := range digest.Stagnant {
+		if flag.InitiativeID == testInitID {
+			foundLow = true
+			if flag.Classification != "Stagnation: wartet-auf-Mensch" {
+				t.Errorf("Expected classification 'Stagnation: wartet-auf-Mensch', got %q", flag.Classification)
+			}
+			if flag.Description != "No activity detected, probably waiting for user feedback." {
+				t.Errorf("Expected description to match reasoning, got %q", flag.Description)
+			}
+			// Actions MUST be suppressed (len(Actions) == 0) because confidence is Low
+			if len(flag.Actions) != 0 {
+				t.Errorf("Expected actions to be suppressed (0 actions) for Low confidence, got %d actions", len(flag.Actions))
+			}
+		}
+	}
+	if !foundLow {
+		t.Errorf("Expected initiative to be flagged under stagnant with Low confidence")
+	}
+}
+
