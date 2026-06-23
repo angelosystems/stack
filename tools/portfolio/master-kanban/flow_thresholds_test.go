@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestParseThresholdDuration(t *testing.T) {
@@ -144,33 +148,127 @@ func TestFlowThresholdsAPI(t *testing.T) {
 
 func TestGetPromoteTarget(t *testing.T) {
 	tests := []struct {
-		stage    string
-		expected string
-		hasError bool
+		name        string
+		stage       string
+		hasCapacity bool
+		nowCount    int
+		nowLimit    int
+		expected    string
+		hasError    bool
 	}{
-		{"idea", "soon", false},
-		{"soon", "now", false},
-		{"now", "watching", false},
-		{"watching", "done", false},
-		{"done", "", true},
-		{"IDEA ", "soon", false},
-		{" watching", "done", false},
-		{"unknown", "", true},
+		// idea tests
+		{"idea with capacity under limit", "idea", true, 2, 5, "now", false},
+		{"idea without capacity under limit", "idea", false, 2, 5, "soon", false},
+		{"idea with capacity at limit", "idea", true, 5, 5, "soon", false},
+		{"idea with capacity over limit", "idea", true, 6, 5, "soon", false},
+		{"IDEA uppercase with capacity", "IDEA ", true, 1, 5, "now", false},
+
+		// soon tests
+		{"soon stage", "soon", false, 0, 0, "now", false},
+
+		// now tests
+		{"now stage", "now", false, 0, 0, "watching", false},
+
+		// watching tests
+		{"watching stage", "watching", false, 0, 0, "done", false},
+		{" watching with whitespace", " watching", false, 0, 0, "done", false},
+
+		// done terminal tests
+		{"done terminal", "done", false, 0, 0, "", true},
+
+		// unknown tests
+		{"unknown stage", "unknown", false, 0, 0, "", true},
 	}
 
 	for _, tc := range tests {
-		actual, err := GetPromoteTarget(tc.stage)
-		if tc.hasError {
-			if err == nil {
-				t.Errorf("expected error promoting from stage %q, but got none", tc.stage)
+		t.Run(tc.name, func(t *testing.T) {
+			actual, err := GetPromoteTarget(tc.stage, tc.hasCapacity, tc.nowCount, tc.nowLimit)
+			if tc.hasError {
+				if err == nil {
+					t.Errorf("expected error promoting from stage %q, but got none", tc.stage)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error promoting from stage %q: %v", tc.stage, err)
+				}
+				if actual != tc.expected {
+					t.Errorf("GetPromoteTarget(%q) = %q; expected %q", tc.stage, actual, tc.expected)
+				}
 			}
-		} else {
-			if err != nil {
-				t.Errorf("unexpected error promoting from stage %q: %v", tc.stage, err)
+		})
+	}
+}
+
+func TestGetPromoteTargetStage(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Test static non-idea transitions
+	cases := []struct {
+		current  string
+		expected string
+	}{
+		{"soon", "now"},
+		{"now", "watching"},
+		{"watching", "done"},
+		{"done", "done"}, // default fallback or done case
+		{"invalid", "done"},
+	}
+
+	for _, tc := range cases {
+		actual := GetPromoteTargetStage(ctx, nil, nil, fmt.Errorf("no db"), tc.current, "solartown", 0)
+		if actual != tc.expected {
+			t.Errorf("GetPromoteTargetStage(nil, nil, ..., %q, ...) = %q; expected %q", tc.current, actual, tc.expected)
+		}
+	}
+
+	// 2. Test idea transition when there is no database / capacity (fallback to soon)
+	actualSoon := GetPromoteTargetStage(ctx, nil, nil, fmt.Errorf("no db"), "idea", "solartown", 0)
+	if actualSoon != "soon" {
+		t.Errorf("expected idea with no db capacity to promote to 'soon', got %q", actualSoon)
+	}
+
+	// 3. Test idea transition with database pool (and mock stPool)
+	dsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	pPool, err := pgxpool.New(ctx, dsn)
+	if err == nil {
+		defer pPool.Close()
+
+		oldStPool := stPool
+		stPool = pPool
+		defer func() {
+			stPool = oldStPool
+		}()
+
+		testAgentID := "testrig-polecat-testagent"
+		_, _ = pPool.Exec(ctx, "DELETE FROM beads.labels WHERE issue_id = $1", testAgentID)
+		_, _ = pPool.Exec(ctx, "DELETE FROM beads.issues WHERE id = $1", testAgentID)
+
+		// A. Test when idle polecats > 0 (hasCapacity = true)
+		_, err = pPool.Exec(ctx, `
+			INSERT INTO beads.issues (id, rig, status, assignee, title, created_at, updated_at)
+			VALUES ($1, 'testrig', 'open', 'unassigned', 'Agent issue', now(), now())
+		`, testAgentID)
+		if err == nil {
+			_, _ = pPool.Exec(ctx, `
+				INSERT INTO beads.labels (issue_id, rig, label, created_at)
+				VALUES ($1, 'testrig', 'gt:agent', now())
+			`, testAgentID)
+			
+			// GetPromoteTargetStage with nowCount = 0 (under limit 3) -> should be "now"
+			target := GetPromoteTargetStage(ctx, pPool, pPool, nil, "idea", "solartown", 0)
+			if target != "now" {
+				t.Errorf("expected target stage 'now' when there is capacity, got %q", target)
 			}
-			if actual != tc.expected {
-				t.Errorf("GetPromoteTarget(%q) = %q; expected %q", tc.stage, actual, tc.expected)
+
+			// GetPromoteTargetStage with nowCount = 4 (above limit 3) -> should be "soon"
+			targetAbove := GetPromoteTargetStage(ctx, pPool, pPool, nil, "idea", "solartown", 4)
+			if targetAbove != "soon" {
+				t.Errorf("expected target stage 'soon' when nowCount is above WIP limit, got %q", targetAbove)
 			}
 		}
+
+		// Clean up
+		_, _ = pPool.Exec(ctx, "DELETE FROM beads.labels WHERE issue_id = $1", testAgentID)
+		_, _ = pPool.Exec(ctx, "DELETE FROM beads.issues WHERE id = $1", testAgentID)
 	}
 }
