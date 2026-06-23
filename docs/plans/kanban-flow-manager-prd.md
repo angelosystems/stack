@@ -130,6 +130,27 @@ Karte wird nicht jeden Zyklus neu geflaggt (Cooldown gegen Flag-Müdigkeit).
 
 - R-A: Schwellwert-Tuning — was ist „zu lange in Stage"? Pro Stage + pro Firma
   konfigurierbar; konservativ starten, nachjustieren. Vor L1 Defaults setzen.
+  
+  **Spezifikation: Per-Stage-Schwellen-Defaultmodell (P1.2)**
+  
+  Das Default-Schwellenmodell definiert, nach welcher Dauer von Inaktivität (Aktivitäts-Stille) eine Karte in einer bestimmten Stage als stagnierend oder veraltet (Backlog-Fäule) eingestuft wird.
+  
+  | Stage | Standard-Schwelle | Begründung & Typ |
+  |---|---|---|
+  | `now` | **3 Tage** (`3d`) | Active Execution. 3 Tage ohne jegliche Aktivität (Bead/Workspace/Commit) deutet auf Stagnation hin. |
+  | `soon` | **14 Tage** (`14d`) | Waiting queue. Längere Liegezeiten sind hier normal, aber nach 2 Wochen Inaktivität sollte nachgehakt werden. |
+  | `idea` | **90 Tage** (`90d`) | Backlog-Fäule. Im Idea-Backlog sind Monate legitim; nach 3 Monaten ohne Bewegung gilt die Idee als veraltet. |
+  | `watching` | **30 Tage** (`30d`) | Passive Beobachtung. Sollte nach 1 Monat ohne Aktivität evaluiert werden. |
+  | `done` | **Inaktiviert** (`0s`) | Abgeschlossene Arbeit altert nicht und löst keine Flow-Aktionen aus. |
+  
+  *Konfiguration & Priorität:*
+  Die Schwellenwerte können flexibel über Umgebungsvariablen überschrieben werden:
+  1. `PORTFOLIO_THRESHOLD_<STAGE>_<FIRMA>` (z.B. `PORTFOLIO_THRESHOLD_NOW_STAYAWESOME=12h`)
+  2. `PORTFOLIO_THRESHOLD_<STAGE>` (z.B. `PORTFOLIO_THRESHOLD_NOW=5d`)
+  3. Der oben spezifizierte Standardwert.
+  
+  Unterstützte Formate beim Parsing (erweiterte durations): Tage (`d`/`days`), Wochen (`w`/`weeks`), Monate (`mo`/`months`) sowie Standard-Go-Dauer-Formate (`h`, `m`).
+
 - R-B: Diagnose-Qualität — GLM liest das Warum evtl. falsch. Mitigation:
   Diagnose ist beratend; jede Aktion braucht Confirm; niedrige Confidence →
   nur flaggen, kein Aktions-Vorschlag.
