@@ -133,3 +133,24 @@ func ParseThresholdDuration(s string) (time.Duration, error) {
 	// Default standard parse
 	return time.ParseDuration(s)
 }
+
+// GetPromoteTarget returns the target stage when promoting a card from the given stage
+// as specified in the non-linear Stage-Übergangs-Map (P2.4).
+func GetPromoteTarget(stage string) (string, error) {
+	stage = strings.ToLower(strings.TrimSpace(stage))
+	switch stage {
+	case "idea":
+		return "soon", nil
+	case "soon":
+		return "now", nil
+	case "now":
+		return "watching", nil
+	case "watching":
+		return "done", nil
+	case "done":
+		return "", fmt.Errorf("terminal stage %q cannot be promoted", stage)
+	default:
+		return "", fmt.Errorf("unknown stage %q", stage)
+	}
+}
+

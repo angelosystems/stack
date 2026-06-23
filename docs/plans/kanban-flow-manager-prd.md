@@ -174,6 +174,19 @@ Da die Stages nicht linear sind, wird das Promote-Ziel über eine dynamische Ent
   explizit definieren.
 - R-E: Zeit-in-Stage braucht stage-move-Events; sind die lückenhaft, ist die
   Alterung approximativ — Fallback auf `updated_at`.
+- R-F: **Promote-Ziel mehrdeutig** — die Stages sind nicht linear (`idea`/`now`/`soon`/`watching`/`done`).
+  
+  **Spezifikation: Stage-Übergangs-Map (P2.4)**
+  
+  Das Modell definiert das eindeutige Promote-Ziel für jede Ausgangs-Stage, um Fehl-Promotions oder Unklarheiten bei automatisierten Vorschlägen zu vermeiden.
+  
+  | Ausgangs-Stage | Promote-Ziel | Bedeutung des Übergangs & Logik |
+  |---|---|---|
+  | `idea` | `soon` | **In Warteschlange einreihen.** Die Idee ist triagiert und bereit für die Detail-Ausarbeitung oder Einreihung in die nächste Planungsphase. |
+  | `soon` | `now` | **In aktive Entwicklung geben.** Karte rückt in die Spalte für aktive Ausführung vor; Beads werden an den Scheduler/Reactor übergeben. |
+  | `now` | `watching` | **In Beobachtung/Abnahme verschieben.** Aktive Umsetzung abgeschlossen (z. B. alle verlinkten Beads closed), wartet auf PR-Review, CI-Durchlauf oder menschliche Abnahme. |
+  | `watching` | `done` | **Final abschließen.** Abnahme erfolgreich, Karte wird archiviert/abgeschlossen. |
+  | `done` | *Terminal* | **Keine Promotion möglich.** Dies ist der Endzustand. Promotion aus `done` wirft einen Fehler. |
 
 ## Phasen (Granularität, keine Zeit)
 
@@ -216,6 +229,6 @@ Ein klar fokussierter, sauber abgegrenzter PRD-Draft. Das Problem ist konkret un
 
 **NOTES:**
 - **[Wiegers] Per-Stage-Schwellen sind das Korrektheits-Fundament** (R-A) — vor L1 das stage-differenzierte Default-Modell festnageln (NOW: Tage; IDEA: Monate legitim), nicht „später tunen".
-- **[Adzic] Promote-Ziel mehrdeutig** — die Stages sind nicht linear (idea/now/soon/watching/done). Die Stage-Übergangs-Karte definieren: was heißt „promoten" aus jeder Stage?
+- [x] **[Adzic] Promote-Ziel mehrdeutig** — die Stages sind nicht linear (idea/now/soon/watching/done). Die Stage-Übergangs-Karte definieren: was heißt „promoten" aus jeder Stage? (Spezifiziert in R-F / Spezifikation: Stage-Übergangs-Map (P2.4))
 - **[Cockburn] Digest-Zustellung: push statt pull.** Eine Ansicht, die Mario aktiv aufrufen muss, untergräbt einen *proaktiven* Manager — Zustellkanal spezifizieren (Dashboard/Mail/Fabric, kein Telegram).
 - **[Crispin] Den Manager gegen die Staging-Board-Instanz testen** (geseedete Karten in stockend/promote-reif-Zuständen), nicht gegen prod-Karten.
