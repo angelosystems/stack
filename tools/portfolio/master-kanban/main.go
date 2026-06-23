@@ -3412,6 +3412,31 @@ func parseSqliteTime(s string) (time.Time, error) {
 	return time.Time{}, err
 }
 
+var execBeadStatus = func(beadID string) (string, error) {
+	cmd := exec.Command("bd", "show", beadID, "--json")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	type beadInfo struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+
+	var beads []beadInfo
+	if err := json.Unmarshal(out.Bytes(), &beads); err != nil {
+		return "", err
+	}
+
+	if len(beads) == 0 {
+		return "", fmt.Errorf("no bead found with id %s", beadID)
+	}
+
+	return beads[0].Status, nil
+}
+
 func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) error {
 	ctx := context.Background()
 	vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
@@ -3535,6 +3560,12 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 
 				if time.Since(lastActive) > timeoutDur {
 					isStuckRunning = true
+					bid := extractBeadName(ws.name)
+					if bid != "" {
+						if bstatus, err := execBeadStatus(bid); err == nil && (bstatus == "open" || bstatus == "hooked") {
+							isStuckRunning = false
+						}
+					}
 				}
 			}
 			if !isStuckRunning {
@@ -3604,13 +3635,22 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 				}
 
 				if time.Since(lastActive) > timeoutDur {
-					class = fmt.Sprintf("running-aber-stuck (no update for %v)", time.Since(lastActive).Round(time.Second))
-					action = "escalate"
-					nameLower := strings.ToLower(ws.name)
-					if strings.HasPrefix(nameLower, "sol-") {
-						beadID = strings.TrimPrefix(nameLower, "sol-")
-					} else if strings.HasPrefix(nameLower, "st-") {
-						beadID = nameLower
+					bid := extractBeadName(ws.name)
+					isStuck := true
+					if bid != "" {
+						if bstatus, err := execBeadStatus(bid); err == nil && (bstatus == "open" || bstatus == "hooked") {
+							isStuck = false
+						}
+					}
+					if isStuck {
+						class = fmt.Sprintf("running-aber-stuck (no update for %v)", time.Since(lastActive).Round(time.Second))
+						action = "escalate"
+						nameLower := strings.ToLower(ws.name)
+						if strings.HasPrefix(nameLower, "sol-") {
+							beadID = strings.TrimPrefix(nameLower, "sol-")
+						} else if strings.HasPrefix(nameLower, "st-") {
+							beadID = nameLower
+						}
 					}
 				}
 			}

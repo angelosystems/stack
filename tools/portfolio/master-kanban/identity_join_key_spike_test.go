@@ -158,7 +158,7 @@ func TestIdentityJoinKeySpike(t *testing.T) {
 
 	sqliteLine := strings.TrimSpace(sqliteOut.String())
 	if sqliteLine == "" {
-		t.Skipf("Workspace UUID %s not found in SQLite workspaces table (likely unrelated running process on host)", workspaceID)
+		t.Skipf("Workspace UUID %s from background process not found in local SQLite database (multi-agent environment), skipping", workspaceID)
 	}
 
 	parts := strings.Split(sqliteLine, "|")
