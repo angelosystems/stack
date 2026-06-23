@@ -326,15 +326,21 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			// Log Event (manager_flag) with Cooldown (once every 24 hours per initiative & flag type)
 			err := logManagerFlagWithCooldown(p, init.id, "stagnation", "Stagnation: "+diagnosis, desc)
 			if err == nil {
-				stagnantFlags = append(stagnantFlags, ManagerFlag{
-					InitiativeID:   init.id,
-					Firma:          init.firma,
-					Stage:          init.stage,
-					Title:          init.title,
-					Type:           "stagnation",
-					Classification: "Stagnation: " + diagnosis,
-					Description:    desc,
-					Actions: []ProposalAction{
+				var actions []ProposalAction
+				if init.firma == "quantbot" {
+					actions = []ProposalAction{
+						{
+							Label:    "Eskalieren",
+							Endpoint: "/api/escalate",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":     init.id,
+								"reason": "Eskalation wegen Stagnation (Inaktivität)",
+							},
+						},
+					}
+				} else {
+					actions = []ProposalAction{
 						{
 							Label:    "Re-Dispatch",
 							Endpoint: "/api/dispatch",
@@ -354,7 +360,18 @@ func runManagerSweep(p *pgxpool.Pool) error {
 								"reason": "Eskalation wegen Stagnation (Inaktivität)",
 							},
 						},
-					},
+					}
+				}
+
+				stagnantFlags = append(stagnantFlags, ManagerFlag{
+					InitiativeID:   init.id,
+					Firma:          init.firma,
+					Stage:          init.stage,
+					Title:          init.title,
+					Type:           "stagnation",
+					Classification: "Stagnation: " + diagnosis,
+					Description:    desc,
+					Actions:        actions,
 				})
 			}
 		}
@@ -367,15 +384,22 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			if err == nil {
 				nowCount := wipCounts[init.firma]
 				targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
-				promoteReadyFlags = append(promoteReadyFlags, ManagerFlag{
-					InitiativeID:   init.id,
-					Firma:          init.firma,
-					Stage:          init.stage,
-					Title:          init.title,
-					Type:           "promote_ready",
-					Classification: "Promote-reif",
-					Description:    desc,
-					Actions: []ProposalAction{
+
+				var actions []ProposalAction
+				if init.firma == "quantbot" {
+					actions = []ProposalAction{
+						{
+							Label:    "Eskalieren",
+							Endpoint: "/api/escalate",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":     init.id,
+								"reason": "Eskalation wegen Promote-Reife (Live-Geld-Schutz)",
+							},
+						},
+					}
+				} else {
+					actions = []ProposalAction{
 						{
 							Label:    "Ein-Klick-Promote",
 							Endpoint: "/api/move",
@@ -385,7 +409,18 @@ func runManagerSweep(p *pgxpool.Pool) error {
 								"stage": targetStage,
 							},
 						},
-					},
+					}
+				}
+
+				promoteReadyFlags = append(promoteReadyFlags, ManagerFlag{
+					InitiativeID:   init.id,
+					Firma:          init.firma,
+					Stage:          init.stage,
+					Title:          init.title,
+					Type:           "promote_ready",
+					Classification: "Promote-reif",
+					Description:    desc,
+					Actions:        actions,
 				})
 			}
 		}
@@ -783,4 +818,3 @@ func GetPromoteTargetStage(ctx context.Context, p *pgxpool.Pool, sp *pgxpool.Poo
 	}
 	return targetStage
 }
-

@@ -178,4 +178,3 @@ func TestDiagnoseFlaggedCard(t *testing.T) {
 		t.Errorf("expected ProposedAction to be empty for Low confidence, got '%s'", diag.ProposedAction)
 	}
 }
-

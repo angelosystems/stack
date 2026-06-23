@@ -259,7 +259,9 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				continue
 			}
 
-			if diagnosis.Category == "Workspace-gescheitert" {
+			if init.Firma == "quantbot" {
+				diagnosis.ProposedAction = "escalate"
+			} else if diagnosis.Category == "Workspace-gescheitert" {
 				diagnosis.ProposedAction = "handover"
 			}
 
@@ -310,11 +312,17 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 					}
 
 					if targetWSID != "" {
+						handoverAction := "handover"
+						handoverReason := fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning)
+						if init.Firma == "quantbot" {
+							handoverAction = "escalate"
+							handoverReason = fmt.Sprintf("Eskalation wegen gescheitertem Workspace (Live-Geld-Schutz): %s", diagnosis.Reasoning)
+						}
 						handoverPayload := map[string]any{
-							"workspace_id":    targetWSID,
-							"action":          "handover",
-							"reason":          fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning),
-							"source":          "manager",
+							"workspace_id": targetWSID,
+							"action":       handoverAction,
+							"reason":       handoverReason,
+							"source":       "manager",
 						}
 						handoverBytes, err := json.Marshal(handoverPayload)
 						if err == nil {
@@ -584,4 +592,3 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 
 	return false, "", nil
 }
-

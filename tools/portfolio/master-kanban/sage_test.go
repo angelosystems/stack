@@ -908,10 +908,10 @@ func TestSageSteward_Handover(t *testing.T) {
 		}
 
 		payloadMap := map[string]any{
-			"workspace_id":    body.WorkspaceID,
-			"action":          "handover",
-			"reason":          body.Reason,
-			"source":          "manager",
+			"workspace_id": body.WorkspaceID,
+			"action":       "handover",
+			"reason":       body.Reason,
+			"source":       "manager",
 		}
 		payloadBytes, _ := json.Marshal(payloadMap)
 

@@ -174,5 +174,3 @@ func TestGetPromoteTarget(t *testing.T) {
 		}
 	}
 }
-
-
