@@ -3987,7 +3987,7 @@ func guessFirmaFromCWD() string {
 		return ""
 	}
 	cwd = strings.ToLower(cwd)
-	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") {
+	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") || strings.Contains(cwd, "/opt/stack") {
 		return "stack"
 	}
 	if strings.Contains(cwd, "stayawesome") {
@@ -4202,19 +4202,26 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 	}
 
 	if openCount == 0 {
+		// Fetch firma early so we can apply Live-Geld-Schutz bypass before confidence gates
+		var earlyFirma string
+		_ = p.QueryRow(ctx, `SELECT firma FROM portfolio.initiative WHERE id=$1`, initiativeID).Scan(&earlyFirma)
+
 		// Enforce Linkage Confidence threshold (SC-confidence / damping)
-		completenessPct, err := getLinkageCompleteness(ctx, p)
-		if err == nil {
-			threshold := 90.0
-			if envThreshold := os.Getenv("PORTFOLIO_CONFIDENCE_THRESHOLD"); envThreshold != "" {
-				var t float64
-				if _, err := fmt.Sscanf(envThreshold, "%f", &t); err == nil {
-					threshold = t
+		// quantbot bypasses this gate — Live-Geld-Schutz always escalates regardless of completeness
+		if earlyFirma != "quantbot" {
+			completenessPct, err := getLinkageCompleteness(ctx, p)
+			if err == nil {
+				threshold := 90.0
+				if envThreshold := os.Getenv("PORTFOLIO_CONFIDENCE_THRESHOLD"); envThreshold != "" {
+					var t float64
+					if _, err := fmt.Sscanf(envThreshold, "%f", &t); err == nil {
+						threshold = t
+					}
 				}
-			}
-			if completenessPct < threshold {
-				fmt.Printf("⚠ Auto-Stage: %s promote transition to watching bypassed/damped due to low linkage completeness (%.1f%% < %.1f%%)\n", initiativeID, completenessPct, threshold)
-				return
+				if completenessPct < threshold {
+					fmt.Printf("⚠ Auto-Stage: %s promote transition to watching bypassed/damped due to low linkage completeness (%.1f%% < %.1f%%)\n", initiativeID, completenessPct, threshold)
+					return
+				}
 			}
 		}
 

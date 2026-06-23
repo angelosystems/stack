@@ -380,6 +380,18 @@ func runManagerSweep(p *pgxpool.Pool) error {
 								"note": fmt.Sprintf("Proposed action '%s' via Flow Manager", proposedAction),
 							},
 						})
+					} else if init.firma == "quantbot" {
+						actions = []ProposalAction{
+							{
+								Label:    "Eskalieren",
+								Endpoint: "/api/escalate",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":     init.id,
+									"reason": "Eskalation wegen Stagnation (Live-Geld-Schutz)",
+								},
+							},
+						}
 					} else {
 						actions = []ProposalAction{
 							{
