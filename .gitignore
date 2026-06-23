@@ -33,6 +33,8 @@ tools/*
 !tools/master-kanban/**
 !tools/secrets-broker/
 !tools/secrets-broker/**
+!tools/twenty/
+!tools/twenty/**
 
 docs/*
 !docs/README.md
@@ -43,6 +45,7 @@ docs/*
 
 **/.env
 **/.env.*
+!tools/twenty/.env.example
 **/node_modules/
 **/.next/
 
