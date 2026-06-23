@@ -2419,12 +2419,16 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
+				var firma string
+				_ = p.QueryRow(r.Context(), "SELECT firma FROM portfolio.initiative WHERE id = $1", body.Id).Scan(&firma)
+				isLiveGeld := (firma == "quantbot")
+
 				payloadMap := map[string]any{
 					"action":       "escalate",
 					"reason":       body.Reason,
 					"timestamp":    time.Now().Format(time.RFC3339),
 					"heal_count":   0,
-					"is_live_geld": false,
+					"is_live_geld": isLiveGeld,
 				}
 				payloadBytes, _ := json.Marshal(payloadMap)
 
@@ -3797,11 +3801,22 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 
 			targetStage := GetPromoteTargetStage(ctx, p, sp, nil, currentStage, firma, nowCount)
 
+			var proposedAction, toStage, reason string
+			if firma == "quantbot" {
+				proposedAction = "escalate"
+				toStage = ""
+				reason = "Alle verknüpften Beads geschlossen (Eskalation wegen Live-Geld-Schutz)."
+			} else {
+				proposedAction = "stage-promotion"
+				toStage = targetStage
+				reason = fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu '%s').", targetStage)
+			}
+
 			payloadBytes, _ := json.Marshal(map[string]any{
 				"classification":  "all-beads-closed",
-				"proposed_action": "stage-promotion",
-				"to_stage":        targetStage,
-				"reason":          fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu '%s').", targetStage),
+				"proposed_action": proposedAction,
+				"to_stage":        toStage,
+				"reason":          reason,
 			})
 			_, err = p.Exec(ctx, `
 				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
@@ -3810,7 +3825,11 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error logging sage_action for all beads closed: %v\n", err)
 			} else {
-				fmt.Printf("✓ Proposed stage promotion for initiative %s because all beads are closed\n", initiativeID)
+				if firma == "quantbot" {
+					fmt.Printf("✓ Escalated initiative %s because all beads are closed (Live-Geld-Schutz)\n", initiativeID)
+				} else {
+					fmt.Printf("✓ Proposed stage promotion for initiative %s because all beads are closed\n", initiativeID)
+				}
 			}
 		}
 	}
@@ -4731,11 +4750,22 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 
 					targetStage := GetPromoteTargetStage(ctx, p, sp, nil, init.Stage, init.Firma, nowCount)
 
+					var proposedAction, toStage, reason string
+					if init.Firma == "quantbot" {
+						proposedAction = "escalate"
+						toStage = ""
+						reason = "Alle verknüpften Beads geschlossen (Eskalation wegen Live-Geld-Schutz)."
+					} else {
+						proposedAction = "stage-promotion"
+						toStage = targetStage
+						reason = fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu '%s').", targetStage)
+					}
+
 					payloadBytes, _ := json.Marshal(map[string]any{
 						"classification":  "all-beads-closed",
-						"proposed_action": "stage-promotion",
-						"to_stage":        targetStage,
-						"reason":          fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu '%s').", targetStage),
+						"proposed_action": proposedAction,
+						"to_stage":        toStage,
+						"reason":          reason,
 					})
 					_, err = p.Exec(ctx, `
 						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
@@ -4747,7 +4777,11 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 						}
 					} else {
 						if printToStdout {
-							fmt.Printf(" -> Proposed stage promotion for initiative %s because all beads are closed\n", init.ID)
+							if init.Firma == "quantbot" {
+								fmt.Printf(" -> Escalated initiative %s because all beads are closed (Live-Geld-Schutz)\n", init.ID)
+							} else {
+								fmt.Printf(" -> Proposed stage promotion for initiative %s because all beads are closed\n", init.ID)
+							}
 						}
 					}
 				}
