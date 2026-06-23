@@ -226,13 +226,19 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		}
 
 		timeInactivity := time.Since(init.UpdatedAt)
-		if (init.Stage == "now" || init.Stage == "soon") && timeInactivity > 48*time.Hour && !hasActiveWorkspace && !hasActiveBeads {
-			flaggedReasons = append(flaggedReasons, fmt.Sprintf("Stagnation: %v tage stille, keine aktive arbeit (workspace/beads)", int(timeInactivity.Hours()/24)))
+		if init.Stage == "now" || init.Stage == "soon" {
+			threshold := GetStageThreshold(init.Firma, init.Stage)
+			if threshold > 0 && timeInactivity > threshold && !hasActiveWorkspace && !hasActiveBeads {
+				flaggedReasons = append(flaggedReasons, fmt.Sprintf("Stagnation: %v tage stille, keine aktive arbeit (workspace/beads)", int(timeInactivity.Hours()/24)))
+			}
 		}
 
 		// Backlog-Fäule Check
-		if init.Stage == "idea" && time.Since(init.CreatedAt) > 14*24*time.Hour && len(beads) == 0 && len(events) <= 1 {
-			flaggedReasons = append(flaggedReasons, "Backlog-Fäule: über 14 tage unbewegt in IDEA")
+		if init.Stage == "idea" {
+			threshold := GetStageThreshold(init.Firma, init.Stage)
+			if threshold > 0 && time.Since(init.CreatedAt) > threshold && len(beads) == 0 && len(events) <= 1 {
+				flaggedReasons = append(flaggedReasons, fmt.Sprintf("Backlog-Fäule: über %d tage unbewegt in IDEA", int(threshold.Hours()/24)))
+			}
 		}
 
 		// If flagged, run GLM diagnosis!
