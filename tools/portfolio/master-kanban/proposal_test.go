@@ -61,10 +61,14 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 
 	testBeadID := "st-wisp-0hoz"
 
+	// Ensure st-catch-all exists in portfolio database
+	_, _ = pPool.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title) VALUES ('st-catch-all', 'solartown', 'watching', 'Solartown Catch-all') ON CONFLICT (id) DO NOTHING`)
+
 	// Cleanup any leftover test data
 	cleanup := func() {
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id IN ($1, $2)", testBeadID, "st-catch-all")
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id IN ($1, $2)", "proposal-"+testBeadID, testBeadID)
 		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id LIKE 'proposal-%'")
-		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testBeadID)
 		_, _ = sPool.Exec(ctx, "UPDATE beads.labels SET deleted_at=now() WHERE issue_id=$1 AND label='lane:plan'", testBeadID)
 	}
 	cleanup()
@@ -220,6 +224,16 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 		t.Errorf("Unexpected real initiative card values: title=%q, stage=%q", cardTitle, cardStage)
 	}
 
+	// Verify 'created' event was written on accept
+	var createdEventCount int
+	err = pPool.QueryRow(ctx, "SELECT COUNT(*) FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'created'", testBeadID).Scan(&createdEventCount)
+	if err != nil {
+		t.Fatalf("Failed to query created event: %v", err)
+	}
+	if createdEventCount != 1 {
+		t.Errorf("Expected 1 created event for accepted proposal, got %d", createdEventCount)
+	}
+
 	// Verify lane:plan label is set on the bead in beads database
 	var labelExists bool
 	err = sPool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM beads.labels WHERE issue_id = $1 AND label = 'lane:plan' AND deleted_at IS NULL)", testBeadID).Scan(&labelExists)
@@ -262,5 +276,56 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 	}
 	if propExists {
 		t.Errorf("Expected proposal card to be deleted after reject")
+	}
+
+	// Verify rejection activity event was logged on st-catch-all
+	var rejectEventCount int
+	err = pPool.QueryRow(ctx, "SELECT COUNT(*) FROM portfolio.initiative_event WHERE initiative_id = 'st-catch-all' AND kind = 'activity' AND payload->>'action' = 'reject'").Scan(&rejectEventCount)
+	if err != nil {
+		t.Fatalf("Failed to query reject event on catch-all: %v", err)
+	}
+	if rejectEventCount != 1 {
+		t.Errorf("Expected 1 reject event on st-catch-all, got %d", rejectEventCount)
+	}
+
+	// C. Test /api/move Endpoint
+	movePayload := map[string]string{"id": testBeadID, "stage": "soon"}
+	mBytes, _ := json.Marshal(movePayload)
+	req, _ = http.NewRequest("POST", "http://localhost:"+testPort+"/api/move", bytes.NewReader(mBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Auth-Request-Email", "mario@solartown.de")
+
+	resp, err = cl.Do(req)
+	if err != nil {
+		t.Fatalf("POST to move endpoint failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected move endpoint to return status 200, got %d", resp.StatusCode)
+	}
+
+	// Verify stage is updated
+	var currentStage string
+	err = pPool.QueryRow(ctx, "SELECT stage FROM portfolio.initiative WHERE id = $1", testBeadID).Scan(&currentStage)
+	if err != nil {
+		t.Fatalf("Failed to query stage: %v", err)
+	}
+	if currentStage != "soon" {
+		t.Errorf("Expected stage to be 'soon', got %q", currentStage)
+	}
+
+	// Verify move event was logged
+	var moveEventCount int
+	var fromStage, toStage string
+	err = pPool.QueryRow(ctx, "SELECT COUNT(*), from_stage, to_stage FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'moved' AND actor = 'mario@solartown.de' GROUP BY from_stage, to_stage", testBeadID).Scan(&moveEventCount, &fromStage, &toStage)
+	if err != nil {
+		t.Fatalf("Failed to query move event: %v", err)
+	}
+	if moveEventCount != 1 {
+		t.Errorf("Expected 1 move event with actor 'mario@solartown.de', got %d", moveEventCount)
+	}
+	if fromStage != "idea" || toStage != "soon" {
+		t.Errorf("Expected stage transition from 'idea' to 'soon', got from %q to %q", fromStage, toStage)
 	}
 }
