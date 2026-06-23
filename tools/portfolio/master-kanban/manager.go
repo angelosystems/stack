@@ -334,27 +334,42 @@ func runManagerSweep(p *pgxpool.Pool) error {
 					Type:           "stagnation",
 					Classification: "Stagnation: " + diagnosis,
 					Description:    desc,
-					Actions: []ProposalAction{
-						{
-							Label:    "Re-Dispatch",
-							Endpoint: "/api/dispatch",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":   init.id,
-								"lane": "hack",
-								"note": "Re-dispatch stagnant initiative via Flow Manager",
+					Actions: func() []ProposalAction {
+						if init.firma == "quantbot" {
+							return []ProposalAction{
+								{
+									Label:    "Eskalieren",
+									Endpoint: "/api/escalate",
+									Method:   "POST",
+									Payload: map[string]any{
+										"id":     init.id,
+										"reason": "Eskalation wegen Stagnation (Live-Geld-Schutz)",
+									},
+								},
+							}
+						}
+						return []ProposalAction{
+							{
+								Label:    "Re-Dispatch",
+								Endpoint: "/api/dispatch",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":   init.id,
+									"lane": "hack",
+									"note": "Re-dispatch stagnant initiative via Flow Manager",
+								},
 							},
-						},
-						{
-							Label:    "Eskalieren",
-							Endpoint: "/api/escalate",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":     init.id,
-								"reason": "Eskalation wegen Stagnation (Inaktivität)",
+							{
+								Label:    "Eskalieren",
+								Endpoint: "/api/escalate",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":     init.id,
+									"reason": "Eskalation wegen Stagnation (Inaktivität)",
+								},
 							},
-						},
-					},
+						}
+					}(),
 				})
 			}
 		}
@@ -375,17 +390,32 @@ func runManagerSweep(p *pgxpool.Pool) error {
 					Type:           "promote_ready",
 					Classification: "Promote-reif",
 					Description:    desc,
-					Actions: []ProposalAction{
-						{
-							Label:    "Ein-Klick-Promote",
-							Endpoint: "/api/move",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":    init.id,
-								"stage": targetStage,
+					Actions: func() []ProposalAction {
+						if init.firma == "quantbot" {
+							return []ProposalAction{
+								{
+									Label:    "Eskalieren",
+									Endpoint: "/api/escalate",
+									Method:   "POST",
+									Payload: map[string]any{
+										"id":     init.id,
+										"reason": "Eskalation wegen Promote-Reife (Live-Geld-Schutz)",
+									},
+								},
+							}
+						}
+						return []ProposalAction{
+							{
+								Label:    "Ein-Klick-Promote",
+								Endpoint: "/api/move",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":    init.id,
+									"stage": targetStage,
+								},
 							},
-						},
-					},
+						}
+					}(),
 				})
 			}
 		}
