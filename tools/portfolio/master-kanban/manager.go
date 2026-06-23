@@ -835,50 +835,39 @@ func sendFabricDigest(digest ManagerDigest) {
 
 // GetPromoteTargetStage computes the promote target stage from the current stage based on the P2.4 Stage-Übergangs-Map (L7)
 func GetPromoteTargetStage(ctx context.Context, p *pgxpool.Pool, sp *pgxpool.Pool, spErr error, currentStage string, firma string, nowCount int) string {
-	targetStage := "done"
-	switch currentStage {
-	case "idea":
-		hasCapacity := false
-		if spErr == nil && sp != nil {
-			firmaRig := map[string]string{
-				"stayawesome": "stayawesomeOS",
-				"solartown":   "testrig",
-				"quantbot":    "quantumshift",
-				"stack":       "stack",
-				"angeloos":    "clean",
-				"mariobrain":  "mariobrain",
-			}
-			rig := firmaRig[firma]
-			if rig != "" {
-				idlePolecats, err := getRigIdleCapacity(ctx, rig)
-				if err == nil && idlePolecats > 0 {
-					hasCapacity = true
-				} else {
-					var vkCount int
-					err = sp.QueryRow(ctx, "SELECT count(*) FROM beads.issues WHERE rig=$1 AND status='hooked' AND assignee LIKE 'vk/%'", rig).Scan(&vkCount)
-					if err == nil {
-						vkSlots := 5 - vkCount
-						if vkSlots > 0 {
-							hasCapacity = true
-						}
+	hasCapacity := false
+	if currentStage == "idea" && spErr == nil && sp != nil {
+		firmaRig := map[string]string{
+			"stayawesome": "stayawesomeOS",
+			"solartown":   "testrig",
+			"quantbot":    "quantumshift",
+			"stack":       "stack",
+			"angeloos":    "clean",
+			"mariobrain":  "mariobrain",
+		}
+		rig := firmaRig[firma]
+		if rig != "" {
+			idlePolecats, err := getRigIdleCapacity(ctx, rig)
+			if err == nil && idlePolecats > 0 {
+				hasCapacity = true
+			} else {
+				var vkCount int
+				err = sp.QueryRow(ctx, "SELECT count(*) FROM beads.issues WHERE rig=$1 AND status='hooked' AND assignee LIKE 'vk/%'", rig).Scan(&vkCount)
+				if err == nil {
+					vkSlots := 5 - vkCount
+					if vkSlots > 0 {
+						hasCapacity = true
 					}
 				}
 			}
 		}
-		nowLimit, _ := getWIPLimits(firma)
-		if hasCapacity && nowCount < nowLimit {
-			targetStage = "now"
-		} else {
-			targetStage = "soon"
-		}
-	case "soon":
-		targetStage = "now"
-	case "now":
-		targetStage = "watching"
-	case "watching":
-		targetStage = "done"
 	}
-	return targetStage
+	nowLimit, _ := getWIPLimits(firma)
+	target, err := GetPromoteTarget(currentStage, hasCapacity, nowCount, nowLimit)
+	if err != nil {
+		return "done"
+	}
+	return target
 }
 
 func isLowerLayerEngagedManager(ctx context.Context, p *pgxpool.Pool, initID string, beadRefs []string, vkRefs []string) (bool, error) {
