@@ -1,0 +1,8 @@
+repos:
+  angelosystems/stack:
+    path: /opt/stack
+    services:
+      - name: master-kanban-serve
+        deploy_script: tools/portfolio/master-kanban/deploy.sh
+        health_probe: http://127.0.0.1:7770/api/version
+        env: prod
