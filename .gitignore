@@ -4,6 +4,9 @@
 
 !.gitignore
 !README.md
+!.github/
+!.github/workflows/
+!.github/workflows/**
 !Makefile
 !apps/
 !docs/

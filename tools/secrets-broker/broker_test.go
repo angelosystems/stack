@@ -57,7 +57,7 @@ func TestCrossTenantAccessForbidden(t *testing.T) {
 
 	cases := []struct {
 		name, tenant, token, secret string
-		wantStatus                   int
+		wantStatus                  int
 	}{
 		{"wrong-token-for-own-tenant", "stayawesome", "qs-tok", "gmail_oauth", 403},
 		{"own-token-for-other-tenant-secret", "stayawesome", "saw-tok", "binance_api", 403},

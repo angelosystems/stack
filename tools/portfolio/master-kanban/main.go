@@ -14,8 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -2156,19 +2156,19 @@ func cmdServe() *cobra.Command {
 				if err == nil {
 					dbConnected = true
 					var cpuTime, ramTime, diskTime time.Time
-					_ = qbp.QueryRow(r.Context(), 
+					_ = qbp.QueryRow(r.Context(),
 						`SELECT (payload->>'value')::float, published_at 
 						 FROM public.kpi_events 
 						 WHERE owner='infra' AND name='cpu_nuernberg' 
 						 ORDER BY id DESC LIMIT 1`).Scan(&dbCPU, &cpuTime)
 
-					_ = qbp.QueryRow(r.Context(), 
+					_ = qbp.QueryRow(r.Context(),
 						`SELECT (payload->>'value')::float, published_at 
 						 FROM public.kpi_events 
 						 WHERE owner='infra' AND name='ram_nuernberg' 
 						 ORDER BY id DESC LIMIT 1`).Scan(&dbRAM, &ramTime)
 
-					_ = qbp.QueryRow(r.Context(), 
+					_ = qbp.QueryRow(r.Context(),
 						`SELECT (payload->>'value')::float, published_at 
 						 FROM public.kpi_events 
 						 WHERE owner='infra' AND name='disk_nuernberg' 
