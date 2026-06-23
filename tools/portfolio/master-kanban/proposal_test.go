@@ -63,7 +63,8 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 
 	// Cleanup any leftover test data
 	cleanup := func() {
-		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id IN ($1, $2)", "proposal-"+testBeadID, testBeadID)
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id LIKE 'proposal-%'")
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testBeadID)
 		_, _ = sPool.Exec(ctx, "UPDATE beads.labels SET deleted_at=now() WHERE issue_id=$1 AND label='lane:plan'", testBeadID)
 	}
 	cleanup()
