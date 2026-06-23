@@ -1988,6 +1988,67 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(resp)
 			})
 
+			// POST /api/sage/handover
+			// Defined and implemented handover path Manager -> vk-Sage for workspace-based stagnation (R-D)
+			http.HandleFunc("/api/sage/handover", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+
+				var body struct {
+					InitiativeID string `json:"initiative_id"`
+					WorkspaceID  string `json:"workspace_id"`
+					Reason       string `json:"reason"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				if body.InitiativeID == "" || body.WorkspaceID == "" {
+					http.Error(w, "missing initiative_id or workspace_id", 400)
+					return
+				}
+
+				// 1. Log card symptom by writing a 'sage_action' event with action='handover' on the Initiative
+				payloadMap := map[string]any{
+					"workspace_id":    body.WorkspaceID,
+					"action":          "handover",
+					"reason":          body.Reason,
+					"source":          "manager",
+				}
+				payloadBytes, err := json.Marshal(payloadMap)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				_, err = p.Exec(r.Context(), `
+					INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					VALUES ($1, 'sage_action', 'sage', $2, 'flow-manager')
+				`, body.InitiativeID, string(payloadBytes))
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed to log handover event: %v", err), 500)
+					return
+				}
+
+				// 2. Explicitly notify / trigger vk-Sage to run a sweep of the workspace and handle it
+				select {
+				case sageSweepChan <- struct{}{}:
+				default:
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"ok":true,"handover_status":"received"}`))
+			})
+
 			// POST /api/sage/simulate-outage
 			http.HandleFunc("/api/sage/simulate-outage", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -3687,6 +3748,8 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 					SELECT EXISTS(
 						SELECT 1 FROM portfolio.initiative_event 
 						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
+						  AND (payload->>'action' IS NULL OR payload->>'action' != 'handover')
+						  AND (payload->>'proposed_action' IS NULL OR payload->>'proposed_action' != 'handover')
 					)
 				`, initiativeID, ws.id).Scan(&exists)
 				if err != nil {
