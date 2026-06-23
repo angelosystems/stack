@@ -284,18 +284,14 @@ func scanForWorkspaceProcess(sessionsLogPath string, vkDB string) (int, string, 
 			continue
 		}
 
-		if strings.HasPrefix(target, "/var/tmp/vibe-kanban/worktrees/") {
-			dirName := filepath.Base(filepath.Dir(target))
-			trimmed := strings.TrimPrefix(target, "/var/tmp/vibe-kanban/worktrees/")
-			parts := strings.Split(trimmed, "/")
-			if len(parts) > 0 {
-				dirName = parts[0]
-			} else if dirName == "stack" || dirName == "solartown" || dirName == "quantbot" || dirName == "stayawesome" || dirName == "mariobrain" {
-				dirName = filepath.Base(filepath.Dir(filepath.Dir(target)))
-			}
-			wsID, _, _, err := findWorkspaceInSessionsLog(sessionsLogPath, dirName)
-			if err == nil {
-				if workspaceExistsInSQLite(vkDB, wsID) {
+		if strings.HasPrefix(target, "/var/tmp/vibe-kanban/worktrees/") && !strings.Contains(target, "(deleted)") {
+			if _, statErr := os.Stat(target); statErr == nil {
+				dirName := filepath.Base(filepath.Dir(target))
+				if dirName == "stack" || dirName == "solartown" || dirName == "quantbot" || dirName == "stayawesome" || dirName == "mariobrain" {
+					dirName = filepath.Base(filepath.Dir(filepath.Dir(target)))
+				}
+				_, _, _, err := findWorkspaceInSessionsLog(sessionsLogPath, dirName)
+				if err == nil {
 					return pid, target, nil
 				}
 			}

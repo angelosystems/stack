@@ -97,8 +97,12 @@ func TestManagerSweepAndEscalate(t *testing.T) {
 	}
 
 	// 5. Test the POST /api/escalate endpoint using httptest
+	http.DefaultServeMux = http.NewServeMux()
 	srvCmd := cmdServe()
-	testPort := "39821"
+	testPort, err := getFreePort()
+	if err != nil {
+		t.Fatalf("Failed to find free port: %v", err)
+	}
 	srvCmd.SetArgs([]string{"--port", testPort})
 	go func() {
 		_ = srvCmd.Execute()
@@ -498,4 +502,3 @@ func TestManagerLiveGeldSchutz(t *testing.T) {
 		t.Errorf("Expected is_live_geld to be true, got false")
 	}
 }
-

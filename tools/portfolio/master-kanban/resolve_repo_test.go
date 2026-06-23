@@ -244,14 +244,8 @@ func TestDispatchHack(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
-	// Create mock vk-delegate script
-	tmpDir, err := os.MkdirTemp("", "vk-mock")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	mockScriptPath := filepath.Join(tmpDir, "vk-delegate")
+	// Setup mock vk-delegate script
+	mockScriptPath := filepath.Join(t.TempDir(), "vk-delegate")
 	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440000"
 	scriptContent := fmt.Sprintf(`#!/bin/sh
 echo "workspace_id:        %s"
@@ -263,7 +257,7 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 		t.Fatalf("Failed to write mock script: %v", err)
 	}
 
-	// Override the vk-delegate path used by the handler
+	// Override vkDelegatePath
 	oldVkPath := vkDelegatePath
 	vkDelegatePath = mockScriptPath
 	defer func() {
@@ -271,7 +265,12 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 	}()
 
 	testID := "sk-test-dispatch-hack"
-	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+	cleanup := func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testID)
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+	}
+	cleanup()
+	defer cleanup()
 
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
@@ -279,7 +278,6 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}
-	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
 
 	// Setup payload
 	bodyMap := map[string]string{

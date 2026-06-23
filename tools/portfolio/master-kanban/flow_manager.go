@@ -107,6 +107,8 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		"angeloos":    2,
 	}
 
+	var diagnosedCards []DiagnosedCard
+
 	// 3. For each initiative, gather context and diagnose if flagged
 	for _, init := range initiatives {
 		// A. Get verlinked beads and their statuses
@@ -223,7 +225,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		// Stagnation Check
 		hasActiveWorkspace := false
 		for _, ws := range workspaces {
-			if ws.Status == "running" {
+			if ws.Status == "running" || ws.Status == "waiting" {
 				hasActiveWorkspace = true
 				break
 			}
@@ -250,6 +252,50 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 
 		// If flagged, run GLM diagnosis!
 		if len(flaggedReasons) > 0 {
+			// Eskalations-Leiter: Reactor -> vk-Sage -> Manager
+			// Check if any of the lower layers are engaged for this initiative.
+
+			// 1. Check for active/waiting Workspace
+			hasActiveWorkspace := false
+			for _, ws := range workspaces {
+				if ws.Status == "running" || ws.Status == "waiting" {
+					hasActiveWorkspace = true
+					break
+				}
+			}
+
+			// 2. Check for open Reactor attempt
+			openReactor := hasOpenReactorAttempt(events)
+
+			// 3. Check if in vk-Sage's queue (active lease)
+			hasSageLease := false
+			for _, b := range beads {
+				var lockedUntil time.Time
+				err := p.QueryRow(ctx, `
+					SELECT locked_until FROM portfolio.sage_lease WHERE bead_id = $1
+				`, b.Ref).Scan(&lockedUntil)
+				if err == nil && lockedUntil.After(time.Now()) {
+					hasSageLease = true
+					break
+				}
+			}
+
+			if hasActiveWorkspace || openReactor || hasSageLease {
+				var engaged []string
+				if hasActiveWorkspace {
+					engaged = append(engaged, "active Workspace")
+				}
+				if openReactor {
+					engaged = append(engaged, "open Reactor attempt")
+				}
+				if hasSageLease {
+					engaged = append(engaged, "vk-Sage's queue/lease")
+				}
+				fmt.Printf("Skipping flagged card %s (%s) because lower layers are engaged: %s\n\n",
+					init.ID, init.Title, strings.Join(engaged, ", "))
+				continue
+			}
+
 			fmt.Printf("Diagnosing flagged card %s (%s, Stage: %s, Firma: %s)\n", init.ID, init.Title, init.Stage, init.Firma)
 			fmt.Printf("  -> Flagged reasons: %s\n", strings.Join(flaggedReasons, " | "))
 
@@ -259,7 +305,9 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				continue
 			}
 
-			if diagnosis.Category == "Workspace-gescheitert" {
+			if init.Firma == "quantbot" {
+				diagnosis.ProposedAction = "escalate"
+			} else if diagnosis.Category == "Workspace-gescheitert" {
 				diagnosis.ProposedAction = "handover"
 			}
 
@@ -293,7 +341,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				}
 
 				// If category is "Workspace-gescheitert" (Workspace-bedingte Stagnation),
-				// execute the explicit handover path: log a 'sage_action' event with action='handover' on the Initiative.
+				// execute the explicit handover path: log a 'sage_action' event on the Initiative.
 				if diagnosis.Category == "Workspace-gescheitert" {
 					var targetWSID string
 					for _, ws := range workspaces {
@@ -310,10 +358,17 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 					}
 
 					if targetWSID != "" {
+						actionType := "handover"
+						reasonMsg := fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning)
+						if init.Firma == "quantbot" {
+							actionType = "escalate"
+							reasonMsg = fmt.Sprintf("Live-Geld-Schutz (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning)
+						}
+
 						handoverPayload := map[string]any{
 							"workspace_id":    targetWSID,
-							"action":          "handover",
-							"reason":          fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning),
+							"action":          actionType,
+							"reason":          reasonMsg,
 							"source":          "manager",
 						}
 						handoverBytes, err := json.Marshal(handoverPayload)
@@ -323,18 +378,160 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 								VALUES ($1, 'sage_action', 'sage', $2, 'flow-manager', now())
 							`, init.ID, string(handoverBytes))
 							if err != nil {
-								fmt.Fprintf(os.Stderr, "  ❌ Failed to write handover sage_action event for %s: %v\n", init.ID, err)
+								fmt.Fprintf(os.Stderr, "  ❌ Failed to write handover/escalate sage_action event for %s: %v\n", init.ID, err)
 							} else {
-								fmt.Printf("  ✓ Handed over stagnant workspace %s to vk-Sage (sage_action event logged)\n", targetWSID)
+								if init.Firma == "quantbot" {
+									fmt.Printf("  ✓ Escalated stagnant workspace %s to vk-Sage (sage_action event logged with action=escalate)\n", targetWSID)
+								} else {
+									fmt.Printf("  ✓ Handed over stagnant workspace %s to vk-Sage (sage_action event logged)\n", targetWSID)
+								}
 							}
 						}
 					}
 				}
 			}
+
+			// Accumulate for global digest report
+			diagnosedCards = append(diagnosedCards, DiagnosedCard{
+				Initiative:     init,
+				FlaggedReasons: flaggedReasons,
+				Diagnosis:      diagnosis,
+			})
 			fmt.Println()
+		} else {
+			// Card is not flagged. Check if the previous flow_action event was flagged, and clear it.
+			var lastPayloadStr string
+			err := p.QueryRow(ctx, `
+				SELECT payload::text FROM portfolio.initiative_event 
+				WHERE initiative_id = $1 AND kind = 'flow_action' 
+				ORDER BY at DESC LIMIT 1
+			`, init.ID).Scan(&lastPayloadStr)
+			if err == nil {
+				var lastPayload map[string]any
+				if json.Unmarshal([]byte(lastPayloadStr), &lastPayload) == nil {
+					reasons, _ := lastPayload["flagged_reasons"].([]any)
+					if len(reasons) > 0 {
+						// Previous state was flagged, now cleared! Log a clearing event.
+						if !dryRun {
+							payloadMap := map[string]any{
+								"flagged_reasons": []string{},
+								"category":        "",
+								"confidence":      "",
+								"reasoning":       "",
+								"proposed_action": "",
+							}
+							payloadBytes, _ := json.Marshal(payloadMap)
+							_, err = p.Exec(ctx, `
+								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+								VALUES ($1, 'flow_action', 'flow_manager', $2, 'flow-manager', now())
+							`, init.ID, string(payloadBytes))
+							if err == nil {
+								fmt.Printf("  ✓ Cleared stagnation flag for card %s\n", init.ID)
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
+	// 4. Generate and actively deliver Board-Review-Digest if we have diagnosed cards
+	if len(diagnosedCards) > 0 {
+		digest := generateDigestReport(diagnosedCards)
+		fmt.Println("=== 📨 Delivering Board-Review-Digest ===")
+		if err := deliverDigest(digest, dryRun); err != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ Failed to deliver digest: %v\n", err)
+		}
+	} else {
+		fmt.Println("No flagged cards found. Board is in perfect shape. No digest to deliver.")
+	}
+
+	return nil
+}
+
+type DiagnosedCard struct {
+	Initiative     FlowInitiative
+	FlaggedReasons []string
+	Diagnosis      FlowDiagnosis
+}
+
+func generateDigestReport(cards []DiagnosedCard) string {
+	var sb strings.Builder
+	sb.WriteString("# 🩺 KANBAN FLOW-MANAGER BOARD REVIEW DIGEST\n\n")
+	sb.WriteString(fmt.Sprintf("Generated at: %s\n\n", time.Now().Format(time.RFC1123)))
+
+	// Aggregate metrics
+	stagnantCount := 0
+	promoteCount := 0
+	rotCount := 0
+	wipCount := 0
+
+	for _, c := range cards {
+		for _, r := range c.FlaggedReasons {
+			rLower := strings.ToLower(r)
+			if strings.Contains(rLower, "stagnation") {
+				stagnantCount++
+			} else if strings.Contains(rLower, "promote") {
+				promoteCount++
+			} else if strings.Contains(rLower, "fäule") || strings.Contains(rLower, "backlog") {
+				rotCount++
+			} else if strings.Contains(rLower, "wip") {
+				wipCount++
+			}
+		}
+	}
+
+	sb.WriteString("## 📊 Summary Metrics\n")
+	sb.WriteString(fmt.Sprintf("- **Total Flagged Cards:** %d\n", len(cards)))
+	sb.WriteString(fmt.Sprintf("- **Stagnant cards (Stagnation):** %d\n", stagnantCount))
+	sb.WriteString(fmt.Sprintf("- **Promotion-ready cards (Promote-reif):** %d\n", promoteCount))
+	sb.WriteString(fmt.Sprintf("- **Backlog Rot cards (Backlog-Fäule):** %d\n", rotCount))
+	sb.WriteString(fmt.Sprintf("- **WIP Overflows (WIP-Überlauf):** %d\n\n", wipCount))
+
+	sb.WriteString("## 🔍 Detailed Diagnoses\n\n")
+	for i, c := range cards {
+		sb.WriteString(fmt.Sprintf("### %d. %s (`%s`)\n", i+1, c.Initiative.Title, c.Initiative.ID))
+		sb.WriteString(fmt.Sprintf("- **Company:** %s\n", c.Initiative.Firma))
+		sb.WriteString(fmt.Sprintf("- **Current Stage:** %s\n", c.Initiative.Stage))
+		sb.WriteString("- **Flagged Reasons:**\n")
+		for _, r := range c.FlaggedReasons {
+			sb.WriteString(fmt.Sprintf("  - %s\n", r))
+		}
+		sb.WriteString(fmt.Sprintf("- **Diagnosis Category:** `%s` (Confidence: %s)\n", c.Diagnosis.Category, c.Diagnosis.Confidence))
+		sb.WriteString(fmt.Sprintf("- **Diagnostic Reasoning:** %s\n", c.Diagnosis.Reasoning))
+		if c.Diagnosis.ProposedAction != "" {
+			sb.WriteString(fmt.Sprintf("- **Proposed Action:** `%s`\n", c.Diagnosis.ProposedAction))
+		} else {
+			sb.WriteString("- **Proposed Action:** *(None - Low Confidence)*\n")
+		}
+		sb.WriteString("\n---\n\n")
+	}
+
+	return sb.String()
+}
+
+func deliverDigest(digest string, dryRun bool) error {
+	recipient := os.Getenv("PORTFOLIO_DIGEST_RECIPIENT")
+	if recipient == "" {
+		recipient = "mariobrain/"
+	}
+
+	subject := "🩺 Flow-Manager Board-Review Digest"
+	if dryRun {
+		subject = "[DRY-RUN] " + subject
+		fmt.Printf("Dry-run mode: would send digest mail to %s\n", recipient)
+		return nil
+	}
+
+	cmd := exec.Command("gt", "mail", "send", recipient, "-s", subject, "--stdin")
+	cmd.Stdin = strings.NewReader(digest)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to run gt mail send: %w, output: %s", err, out.String())
+	}
+	fmt.Printf("✓ Digest successfully sent to %s via gt mail\n", recipient)
 	return nil
 }
 
@@ -481,3 +678,80 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 	return false, "", nil
 }
 
+func hasOpenReactorAttempt(events []FlowEvent) bool {
+	for _, ev := range events {
+		if ev.Kind == "deployed" {
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(ev.Payload), &payload); err == nil {
+				status, _ := payload["status"].(string)
+				if status != "healthy" && status != "failed" && status != "rolled-back" && status != "blocked_migrations" && status != "" {
+					return true
+				}
+			}
+		}
+		if ev.Kind == "dispatched" && time.Since(ev.At) < 15*time.Minute {
+			hasNewerActivity := false
+			for _, other := range events {
+				if other.At.After(ev.At) && (other.Kind == "deployed" || other.Kind == "workspace_started") {
+					hasNewerActivity = true
+					break
+				}
+			}
+			if !hasNewerActivity {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var flowManagerChan = make(chan struct{}, 1)
+
+func startFlowManagerSteward(p *pgxpool.Pool) {
+	// Initialize status in db on startup
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+		 VALUES ('flow-manager', now(), 'healthy', NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    error_message = EXCLUDED.error_message`)
+
+	go func() {
+		// Run a full check on startup to initialize and catch up
+		_ = runFlowManager(p, false)
+
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			var checkErr error
+
+			select {
+			case <-flowManagerChan:
+				// Edge-triggered: run flow manager
+				checkErr = runFlowManager(p, false)
+			case <-ticker.C:
+				// Periodic: run flow manager
+				checkErr = runFlowManager(p, false)
+			}
+
+			statusVal := "healthy"
+			var errMsgVal *string
+			if checkErr != nil {
+				statusVal = "alarm"
+				strErr := checkErr.Error()
+				errMsgVal = &strErr
+				fmt.Fprintf(os.Stderr, "Flow Manager Steward: check failed: %v\n", checkErr)
+			}
+
+			_, _ = p.Exec(context.Background(),
+				`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+				 VALUES ('flow-manager', now(), $1, $2)
+				 ON CONFLICT (id) DO UPDATE SET
+				    last_run = EXCLUDED.last_run,
+				    status = EXCLUDED.status,
+				    error_message = EXCLUDED.error_message`, statusVal, errMsgVal)
+		}
+	}()
+}
