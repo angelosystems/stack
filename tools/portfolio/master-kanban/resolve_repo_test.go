@@ -272,31 +272,6 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 	cleanup()
 	defer cleanup()
 
-	// Create mock vk-delegate script
-	tmpDir, err := os.MkdirTemp("", "vk-mock")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	mockScriptPath := tmpDir + "/vk-delegate"
-	scriptContent := `#!/bin/sh
-echo "workspace_id:        550e8400-e29b-41d4-a716-446655440000"
-echo "execution_process:   550e8400-e29b-41d4-a716-446655440001"
-echo "workspace_url:       http://localhost:54682/workspaces/550e8400-e29b-41d4-a716-446655440000"
-`
-
-	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
-		t.Fatalf("Failed to write mock script: %v", err)
-	}
-
-	// Override the vk-delegate path used by the handler
-	oldVkPath := vkDelegatePath
-	vkDelegatePath = mockScriptPath
-	defer func() {
-		vkDelegatePath = oldVkPath
-	}()
-
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
 		VALUES ($1, 'stack', 'idea', 'Test Dispatching Card Hack', 'Testing the dispatch endpoint for direct hacking lane', 'plan_file')`, testID)
@@ -311,32 +286,6 @@ echo "workspace_url:       http://localhost:54682/workspaces/550e8400-e29b-41d4-
 		"note": "A note about direct hack",
 	}
 	bodyBytes, _ := json.Marshal(bodyMap)
-
-	// 2. Create mock vk-delegate script
-	tmpDir, err := os.MkdirTemp("", "vk-mock")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440001"
-	mockScriptPath := filepath.Join(tmpDir, "vk-delegate")
-	scriptContent := fmt.Sprintf(`#!/bin/sh
-echo "workspace_id:        %s"
-echo "execution_process:   550e8400-e29b-41d4-a716-446655440001"
-echo "workspace_url:       http://localhost:54682/workspaces/%s"
-`, testWorkspaceID, testWorkspaceID)
-
-	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
-		t.Fatalf("Failed to write mock script: %v", err)
-	}
-
-	// Override the vk-delegate path used by the handler
-	oldVkPath := vkDelegatePath
-	vkDelegatePath = mockScriptPath
-	defer func() {
-		vkDelegatePath = oldVkPath
-	}()
 
 	// Create request
 	req := httptest.NewRequest(http.MethodPost, "/api/dispatch", bytes.NewReader(bodyBytes))
