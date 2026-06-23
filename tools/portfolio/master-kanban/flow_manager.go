@@ -246,6 +246,10 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				continue
 			}
 
+			if diagnosis.Category == "Workspace-gescheitert" {
+				diagnosis.ProposedAction = "handover"
+			}
+
 			fmt.Printf("  -> Result: Category=%s, Confidence=%s\n", diagnosis.Category, diagnosis.Confidence)
 			fmt.Printf("  -> Reasoning: %s\n", diagnosis.Reasoning)
 			if diagnosis.ProposedAction != "" {
@@ -273,6 +277,45 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 					fmt.Fprintf(os.Stderr, "  ❌ Failed to write event for %s: %v\n", init.ID, err)
 				} else {
 					fmt.Printf("  ✓ Event 'flow_action' logged on %s\n", init.ID)
+				}
+
+				// If category is "Workspace-gescheitert" (Workspace-bedingte Stagnation),
+				// execute the explicit handover path: log a 'sage_action' event with action='handover' on the Initiative.
+				if diagnosis.Category == "Workspace-gescheitert" {
+					var targetWSID string
+					for _, ws := range workspaces {
+						if ws.Status == "failed" || ws.Status == "killed" {
+							targetWSID = ws.ID
+							break
+						}
+					}
+					if targetWSID == "" && len(workspaces) > 0 {
+						targetWSID = workspaces[0].ID
+					}
+					if targetWSID == "" {
+						targetWSID = "00000000000000000000000000000000"
+					}
+
+					if targetWSID != "" {
+						handoverPayload := map[string]any{
+							"workspace_id":    targetWSID,
+							"action":          "handover",
+							"reason":          fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning),
+							"source":          "manager",
+						}
+						handoverBytes, err := json.Marshal(handoverPayload)
+						if err == nil {
+							_, err = p.Exec(ctx, `
+								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+								VALUES ($1, 'sage_action', 'sage', $2, 'flow-manager', now())
+							`, init.ID, string(handoverBytes))
+							if err != nil {
+								fmt.Fprintf(os.Stderr, "  ❌ Failed to write handover sage_action event for %s: %v\n", init.ID, err)
+							} else {
+								fmt.Printf("  ✓ Handed over stagnant workspace %s to vk-Sage (sage_action event logged)\n", targetWSID)
+							}
+						}
+					}
 				}
 			}
 			fmt.Println()
