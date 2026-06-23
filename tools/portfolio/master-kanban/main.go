@@ -2570,6 +2570,82 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if body.Lane == "hack" {
+			// Determine repo from plan_item or fallback to company default
+			var repo string
+			_ = p.QueryRow(r.Context(),
+				`SELECT repo FROM portfolio.plan_item WHERE initiative_id = $1 LIMIT 1`, body.Id).
+				Scan(&repo)
+
+			if repo == "" {
+				firmaRepo := map[string]string{
+					"stayawesome": "/root/stayawesomeOS",
+					"solartown":   "/root/solartown",
+					"quantbot":    "/opt/quantbot",
+					"mariobrain":  "/root/mario-brain",
+					"stack":       "/opt/stack",
+				}
+				repo = firmaRepo[info.Firma]
+			}
+			if repo == "" {
+				repo = "/root/solartown" // fallback
+			}
+
+			// Execute vk-delegate to spawn workspace
+			exe := findVkDelegate()
+
+			prompt := body.Note
+			if prompt == "" {
+				prompt = info.Title
+			}
+
+			cmd := exec.Command(exe,
+				"--repo", repo,
+				"--name", info.Title,
+				"--prompt", prompt,
+			)
+
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				errMsg := fmt.Sprintf("vk-delegate failed: %v, stderr: %s", err, stderr.String())
+				http.Error(w, errMsg, 500)
+				return
+			}
+
+			// Parse workspace_id from stdout
+			re := regexp.MustCompile(`workspace_id:\s+([a-f0-9\-]+)`)
+			matches := re.FindStringSubmatch(stdout.String())
+			if len(matches) < 2 {
+				http.Error(w, "failed to parse workspace_id from vk-delegate output: "+stdout.String(), 500)
+				return
+			}
+			wsID := matches[1]
+
+			// Write dispatched event to initiative_event
+			payloadBytes, _ := json.Marshal(map[string]string{
+				"lane": body.Lane,
+				"ref":  wsID,
+			})
+			_, err = p.Exec(r.Context(),
+				`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				 VALUES ($1, 'dispatched', 'vk', $2::jsonb, 'master-kanban')`,
+				body.Id, string(payloadBytes))
+			if err != nil {
+				http.Error(w, "failed to write initiative_event: "+err.Error(), 500)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"workspace_id": wsID,
+			})
+			return
+		}
+
 		var canonicalRef, filePath string
 		if body.Lane == "plan" || body.Lane == "plan-deep" {
 			// Check capacity governor for 429 stress admission criterion
@@ -3967,4 +4043,29 @@ func checkDoneProbe(p *pgxpool.Pool, vkDB string, wsID string, taskHex string, b
 	}
 
 	return false
+}
+
+var vkDelegatePath string
+
+func findVkDelegate() string {
+	if vkDelegatePath != "" {
+		return vkDelegatePath
+	}
+	paths := []string{
+		"/root/solartown/tools/vk-delegate/vk-delegate",
+		"./tools/vk-delegate/vk-delegate",
+		"vk-delegate",
+	}
+	for _, p := range paths {
+		if strings.HasPrefix(p, "/") {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		} else {
+			if lp, err := exec.LookPath(p); err == nil {
+				return lp
+			}
+		}
+	}
+	return "/root/solartown/tools/vk-delegate/vk-delegate"
 }
