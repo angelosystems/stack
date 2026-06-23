@@ -269,6 +269,27 @@ func slugify(s string) string {
 	return out
 }
 
+func parseTime(val any) time.Time {
+	if val == nil {
+		return time.Now()
+	}
+	s, ok := val.(string)
+	if !ok {
+		return time.Now()
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t, err = time.Parse("2006-01-02T15:04:05.999999Z07:00", s)
+		if err != nil {
+			t, err = time.Parse("2006-01-02 15:04:05.999999-07", s)
+			if err != nil {
+				return time.Now()
+			}
+		}
+	}
+	return t
+}
+
 func connect() *pgxpool.Pool {
 	if pool != nil {
 		return pool
@@ -492,7 +513,59 @@ func cmdServe() *cobra.Command {
 						}
 					}
 
-					// 4. Calculate majority lane for each initiative
+					// 4. Fetch status of all verlinked beads in bulk
+					beadStatuses := make(map[string]string)
+					if len(allBeadIDs) > 0 {
+						sp, err := solartownPool()
+						if err == nil {
+							statusRows, err := sp.Query(r.Context(), `
+								SELECT id, status 
+								FROM beads.issues 
+								WHERE id = ANY($1) AND deleted_at IS NULL
+							`, allBeadIDs)
+							if err == nil {
+								defer statusRows.Close()
+								for statusRows.Next() {
+									var bID, bStatus string
+									if statusRows.Scan(&bID, &bStatus) == nil {
+										beadStatuses[bID] = bStatus
+									}
+								}
+							}
+						}
+					}
+
+					// 5. Fetch latest stage-move events in bulk for Zeit-in-Stage
+					stageMoveTimes := make(map[string]time.Time)
+					eventRows, err := p.Query(r.Context(), `
+						SELECT initiative_id, to_stage, max(at) 
+						FROM portfolio.initiative_event 
+						WHERE kind = 'moved' AND initiative_id = ANY($1)
+						GROUP BY initiative_id, to_stage
+					`, initIDs)
+					if err == nil {
+						defer eventRows.Close()
+						for eventRows.Next() {
+							var initID, toStage string
+							var at time.Time
+							if eventRows.Scan(&initID, &toStage, &at) == nil {
+								key := initID + ":" + toStage
+								stageMoveTimes[key] = at
+							}
+						}
+					}
+
+					// 6. Calculate company WIP counts in 'now'
+					wipCounts := make(map[string]int)
+					for _, item := range items {
+						stage, _ := item["stage"].(string)
+						firma, _ := item["firma"].(string)
+						if stage == "now" {
+							wipCounts[firma]++
+						}
+					}
+
+					// 7. Calculate majority lane and flow signals for each initiative
 					for _, item := range items {
 						initID, _ := item["id"].(string)
 						beads := initToBeads[initID]
@@ -517,6 +590,61 @@ func cmdServe() *cobra.Command {
 							}
 						}
 						item["lane"] = majorityLane
+
+						// Calculate the 4 flow signals
+						currentStage, _ := item["stage"].(string)
+						firma, _ := item["firma"].(string)
+						updatedAt := parseTime(item["updated_at"])
+
+						// Signal 1: Zeit-in-Stage
+						var entryTime time.Time
+						if t, ok := stageMoveTimes[initID+":"+currentStage]; ok {
+							entryTime = t
+						} else {
+							entryTime = updatedAt
+						}
+						timeInStageDays := time.Since(entryTime).Hours() / 24.0
+						if timeInStageDays < 0 {
+							timeInStageDays = 0
+						}
+
+						// Signal 2: Aktivitäts-Stille
+						var lastActivityTime time.Time
+						if item["last_activity"] != nil {
+							lastActivityTime = parseTime(item["last_activity"])
+						} else {
+							lastActivityTime = updatedAt
+						}
+						activityStillnessDays := time.Since(lastActivityTime).Hours() / 24.0
+						if activityStillnessDays < 0 {
+							activityStillnessDays = 0
+						}
+
+						// Signal 3: Bead-Fortschritt
+						closedCount := 0
+						totalCount := len(beads)
+						for _, beadID := range beads {
+							if status, ok := beadStatuses[beadID]; ok && status == "closed" {
+								closedCount++
+							}
+						}
+
+						// Signal 4: WIP-vs-Limit
+						companyWip := wipCounts[firma]
+						companyLimit, _ := getWIPLimits(firma)
+
+						item["flow_signals"] = map[string]any{
+							"time_in_stage_days":      timeInStageDays,
+							"activity_stillness_days": activityStillnessDays,
+							"bead_progress": map[string]any{
+								"closed": closedCount,
+								"total":  totalCount,
+							},
+							"wip_vs_limit": map[string]any{
+								"wip":   companyWip,
+								"limit": companyLimit,
+							},
+						}
 					}
 				}
 
@@ -559,7 +687,119 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 500)
 					return
 				}
-				w.Write(j)
+
+				var rawObj map[string]any
+				if err := json.Unmarshal(j, &rawObj); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				// Extract initiative fields
+				initMap, _ := rawObj["initiative"].(map[string]any)
+				if initMap != nil {
+					initID, _ := initMap["id"].(string)
+					currentStage, _ := initMap["stage"].(string)
+					firma, _ := initMap["firma"].(string)
+					updatedAt := parseTime(initMap["updated_at"])
+
+					// 1. Zeit-in-Stage
+					var entryTime time.Time
+					err := p.QueryRow(r.Context(), `
+						SELECT at FROM portfolio.initiative_event 
+						WHERE initiative_id = $1 AND kind = 'moved' AND to_stage = $2 
+						ORDER BY at DESC LIMIT 1
+					`, initID, currentStage).Scan(&entryTime)
+					if err != nil {
+						entryTime = updatedAt
+					}
+					timeInStageDays := time.Since(entryTime).Hours() / 24.0
+					if timeInStageDays < 0 {
+						timeInStageDays = 0
+					}
+
+					// 2. Aktivitäts-Stille
+					var lastActivityTime time.Time
+					if initMap["last_activity"] != nil {
+						lastActivityTime = parseTime(initMap["last_activity"])
+					} else {
+						lastActivityTime = updatedAt
+					}
+					activityStillnessDays := time.Since(lastActivityTime).Hours() / 24.0
+					if activityStillnessDays < 0 {
+						activityStillnessDays = 0
+					}
+
+					// 3. Bead-Fortschritt
+					var beadIDs []string
+					if links, ok := rawObj["links"].([]any); ok {
+						for _, l := range links {
+							if lMap, ok := l.(map[string]any); ok {
+								if lMap["kind"] == "bead" {
+									if ref, ok := lMap["ref"].(string); ok {
+										beadIDs = append(beadIDs, ref)
+									}
+								}
+							}
+						}
+					}
+
+					beadStatuses := make(map[string]string)
+					if len(beadIDs) > 0 {
+						sp, err := solartownPool()
+						if err == nil {
+							statusRows, err := sp.Query(r.Context(), `
+								SELECT id, status 
+								FROM beads.issues 
+								WHERE id = ANY($1) AND deleted_at IS NULL
+							`, beadIDs)
+							if err == nil {
+								defer statusRows.Close()
+								for statusRows.Next() {
+									var bID, bStatus string
+									if statusRows.Scan(&bID, &bStatus) == nil {
+										beadStatuses[bID] = bStatus
+									}
+								}
+							}
+						}
+					}
+
+					closedCount := 0
+					totalCount := len(beadIDs)
+					for _, bID := range beadIDs {
+						if status, ok := beadStatuses[bID]; ok && status == "closed" {
+							closedCount++
+						}
+					}
+
+					// 4. WIP-vs-Limit
+					var companyWip int
+					_ = p.QueryRow(r.Context(), `
+						SELECT count(*) FROM portfolio.initiative 
+						WHERE stage = 'now' AND firma = $1 AND archived_at IS NULL
+					`, firma).Scan(&companyWip)
+					companyLimit, _ := getWIPLimits(firma)
+
+					signals := map[string]any{
+						"time_in_stage_days":      timeInStageDays,
+						"activity_stillness_days": activityStillnessDays,
+						"bead_progress": map[string]any{
+							"closed": closedCount,
+							"total":  totalCount,
+						},
+						"wip_vs_limit": map[string]any{
+							"wip":   companyWip,
+							"limit": companyLimit,
+						},
+					}
+
+					initMap["flow_signals"] = signals
+					rawObj["flow_signals"] = signals
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				json.NewEncoder(w).Encode(rawObj)
 			})
 			// P5 — Kommentar zur Karte: landet als 'commented'-Event in der Historie
 			http.HandleFunc("/api/comment", func(w http.ResponseWriter, r *http.Request) {
