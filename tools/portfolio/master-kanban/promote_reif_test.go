@@ -25,6 +25,16 @@ func TestPromoteReif_CompletenessCheckAndDamping(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
+	// Apply self-healing schema migration for promote_damped
+	_, _ = p.Exec(ctx, "ALTER TABLE portfolio.initiative_event DROP CONSTRAINT IF EXISTS initiative_event_kind_check")
+	_, _ = p.Exec(ctx, `ALTER TABLE portfolio.initiative_event ADD CONSTRAINT initiative_event_kind_check
+		CHECK (kind = ANY (ARRAY[
+			'created', 'moved', 'edited', 'linked', 'unlinked', 'activity',
+			'stage_proposed', 'completed', 'commented', 'archived', 'dispatched',
+			'deployed', 'workspace_started', 'ai_message', 'ai_action', 'sage_action',
+			'promote_damped'
+		]))`)
+
 	testInitID := "init-promote-test"
 	testBeadID := "bead-promote-test-1"
 

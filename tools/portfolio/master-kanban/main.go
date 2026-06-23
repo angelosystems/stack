@@ -3180,10 +3180,13 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 				"completeness": completeness,
 				"threshold":    60.0,
 			})
-			_, _ = p.Exec(ctx, `
+			_, err = p.Exec(ctx, `
 				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
-				VALUES ($1, 'promote_damped', 'master-kanban', $2, 'auto-stage')
+				VALUES ($1, 'promote_damped', 'master', $2::jsonb, 'auto-stage')
 			`, initiativeID, payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error inserting promote_damped event: %v\n", err)
+			}
 			return
 		}
 
