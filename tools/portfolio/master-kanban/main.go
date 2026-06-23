@@ -573,6 +573,317 @@ func cmdSync() *cobra.Command {
 	}
 }
 
+func parseTimestamp(val any) time.Time {
+	if val == nil {
+		return time.Time{}
+	}
+	switch v := val.(type) {
+	case time.Time:
+		return v
+	case string:
+		t, err := time.Parse(time.RFC3339, v)
+		if err == nil {
+			return t
+		}
+		t, err = time.Parse("2006-01-02T15:04:05Z07:00", v)
+		if err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func formatDuration(d time.Duration) string {
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+	seconds := int(d.Seconds()) % 60
+
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
+}
+
+func enrichLane(ctx context.Context, p *pgxpool.Pool, items []map[string]any) {
+	if len(items) == 0 {
+		return
+	}
+	// 1. Gather all initiative IDs
+	initIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if id, ok := item["id"].(string); ok {
+			initIDs = append(initIDs, id)
+		}
+	}
+
+	// 2. Fetch linked beads from portfolio.initiative_link
+	initToBeads := make(map[string][]string)
+	allBeadIDs := make([]string, 0)
+
+	linkRows, err := p.Query(ctx, `
+		SELECT initiative_id, ref 
+		FROM portfolio.initiative_link 
+		WHERE kind = 'bead' AND initiative_id = ANY($1)
+	`, initIDs)
+	if err == nil {
+		defer linkRows.Close()
+		for linkRows.Next() {
+			var initID, beadID string
+			if linkRows.Scan(&initID, &beadID) == nil {
+				initToBeads[initID] = append(initToBeads[initID], beadID)
+				allBeadIDs = append(allBeadIDs, beadID)
+			}
+		}
+	}
+
+	// 3. Fetch lane labels from beads.labels using solartownPool
+	beadLanes := make(map[string]string)
+	if len(allBeadIDs) > 0 {
+		sp, err := solartownPool()
+		if err == nil {
+			labelRows, err := sp.Query(ctx, `
+				SELECT issue_id, label 
+				FROM beads.labels 
+				WHERE label LIKE 'lane:%' AND deleted_at IS NULL AND issue_id = ANY($1)
+			`, allBeadIDs)
+			if err == nil {
+				defer labelRows.Close()
+				for labelRows.Next() {
+					var issueID, label string
+					if labelRows.Scan(&issueID, &label) == nil {
+						laneName := strings.TrimPrefix(label, "lane:")
+						beadLanes[issueID] = laneName
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Calculate majority lane for each initiative
+	for _, item := range items {
+		initID, _ := item["id"].(string)
+		beads := initToBeads[initID]
+
+		laneCounts := make(map[string]int)
+		for _, beadID := range beads {
+			if lane, ok := beadLanes[beadID]; ok {
+				laneCounts[lane]++
+			}
+		}
+
+		majorityLane := "untriagiert"
+		maxCount := 0
+		for lane, count := range laneCounts {
+			if count > maxCount {
+				maxCount = count
+				majorityLane = lane
+			} else if count == maxCount {
+				if lane < majorityLane {
+					majorityLane = lane
+				}
+			}
+		}
+		item["lane"] = majorityLane
+	}
+}
+
+func enrichFlowSignals(ctx context.Context, p *pgxpool.Pool, items []map[string]any) {
+	if len(items) == 0 {
+		return
+	}
+
+	now := time.Now()
+
+	// 1. Gather all initiative IDs
+	initIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if id, ok := item["id"].(string); ok {
+			initIDs = append(initIDs, id)
+		}
+	}
+
+	// 2. Fetch stage-move events for Zeit-in-Stage
+	// Maps: initID -> stage -> max(at)
+	stageEntryMap := make(map[string]map[string]time.Time)
+	eventRows, err := p.Query(ctx, `
+		SELECT initiative_id, to_stage, max(at) 
+		FROM portfolio.initiative_event 
+		WHERE kind = 'moved' AND initiative_id = ANY($1)
+		GROUP BY initiative_id, to_stage
+	`, initIDs)
+	if err == nil {
+		defer eventRows.Close()
+		for eventRows.Next() {
+			var initID, toStage string
+			var maxAt time.Time
+			if eventRows.Scan(&initID, &toStage, &maxAt) == nil {
+				if _, ok := stageEntryMap[initID]; !ok {
+					stageEntryMap[initID] = make(map[string]time.Time)
+				}
+				stageEntryMap[initID][toStage] = maxAt
+			}
+		}
+	}
+
+	// 3. Fetch linked beads and their closed/total counts
+	initToBeads := make(map[string][]string)
+	allBeadIDs := make([]string, 0)
+	linkRows, err := p.Query(ctx, `
+		SELECT initiative_id, ref 
+		FROM portfolio.initiative_link 
+		WHERE kind = 'bead' AND initiative_id = ANY($1)
+	`, initIDs)
+	if err == nil {
+		defer linkRows.Close()
+		for linkRows.Next() {
+			var initID, beadID string
+			if linkRows.Scan(&initID, &beadID) == nil {
+				initToBeads[initID] = append(initToBeads[initID], beadID)
+				allBeadIDs = append(allBeadIDs, beadID)
+			}
+		}
+	}
+
+	beadStatus := make(map[string]string)
+	if len(allBeadIDs) > 0 {
+		sp, err := solartownPool()
+		if err == nil {
+			statusRows, err := sp.Query(ctx, `
+				SELECT id, status 
+				FROM beads.issues 
+				WHERE deleted_at IS NULL AND id = ANY($1)
+			`, allBeadIDs)
+			if err == nil {
+				defer statusRows.Close()
+				for statusRows.Next() {
+					var issueID, status string
+					if statusRows.Scan(&issueID, &status) == nil {
+						beadStatus[issueID] = status
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Fetch NOW stage counts per firma
+	firmaNowCounts := make(map[string]int)
+	nowCountRows, err := p.Query(ctx, `
+		SELECT firma, count(*) 
+		FROM portfolio.initiative 
+		WHERE stage = 'now' AND archived_at IS NULL 
+		GROUP BY firma
+	`)
+	if err == nil {
+		defer nowCountRows.Close()
+		for nowCountRows.Next() {
+			var f string
+			var count int
+			if nowCountRows.Scan(&f, &count) == nil {
+				firmaNowCounts[f] = count
+			}
+		}
+	}
+
+	// 5. Enrich items with the four flow signals
+	for _, item := range items {
+		initID, _ := item["id"].(string)
+		currentStage, _ := item["stage"].(string)
+		firma, _ := item["firma"].(string)
+
+		// A) Zeit-in-Stage
+		var stageEntryTime time.Time
+		if m, ok := stageEntryMap[initID]; ok {
+			if t, ok := m[currentStage]; ok {
+				stageEntryTime = t
+			}
+		}
+
+		if stageEntryTime.IsZero() {
+			stageEntryTime = parseTimestamp(item["updated_at"])
+		}
+		if stageEntryTime.IsZero() {
+			stageEntryTime = parseTimestamp(item["created_at"])
+		}
+
+		timeInStageSec := int(now.Sub(stageEntryTime).Seconds())
+		if timeInStageSec < 0 {
+			timeInStageSec = 0
+		}
+		timeInStageStr := formatDuration(time.Duration(timeInStageSec) * time.Second)
+
+		// B) Aktivitäts-Stille
+		lastActTime := parseTimestamp(item["last_activity"])
+		if lastActTime.IsZero() {
+			lastActTime = parseTimestamp(item["updated_at"])
+		}
+		if lastActTime.IsZero() {
+			lastActTime = parseTimestamp(item["created_at"])
+		}
+
+		activitySilenceSec := int(now.Sub(lastActTime).Seconds())
+		if activitySilenceSec < 0 {
+			activitySilenceSec = 0
+		}
+		activitySilenceStr := formatDuration(time.Duration(activitySilenceSec) * time.Second)
+
+		// C) Bead-Fortschritt
+		beads := initToBeads[initID]
+		totalBeads := len(beads)
+		closedBeads := 0
+		for _, bID := range beads {
+			if status, ok := beadStatus[bID]; ok && status == "closed" {
+				closedBeads++
+			}
+		}
+		beadProgressPercentage := 0.0
+		if totalBeads > 0 {
+			beadProgressPercentage = float64(closedBeads) / float64(totalBeads) * 100.0
+		}
+		beadProgressStr := fmt.Sprintf("%d/%d", closedBeads, totalBeads)
+
+		// D) WIP-vs-Limit
+		nowLimit, _ := getWIPLimits(firma)
+		cardsInNow := firmaNowCounts[firma]
+		wipVsLimitStr := fmt.Sprintf("%d/%d", cardsInNow, nowLimit)
+
+		// Put everything into the map under "flow_signals" and top-level fields
+		flowSignals := map[string]any{
+			"time_in_stage_seconds":      timeInStageSec,
+			"time_in_stage":              timeInStageStr,
+			"activity_silence_seconds":   activitySilenceSec,
+			"activity_silence":           activitySilenceStr,
+			"bead_progress_closed":       closedBeads,
+			"bead_progress_total":        totalBeads,
+			"bead_progress_percentage":   beadProgressPercentage,
+			"bead_progress_str":          beadProgressStr,
+			"wip_cards_in_now":           cardsInNow,
+			"wip_limit":                  nowLimit,
+			"wip_vs_limit_str":           wipVsLimitStr,
+		}
+		item["flow_signals"] = flowSignals
+
+		// Add as top-level fields too for maximum compatibility
+		item["time_in_stage_seconds"] = timeInStageSec
+		item["time_in_stage"] = timeInStageStr
+		item["activity_silence_seconds"] = activitySilenceSec
+		item["activity_silence"] = activitySilenceStr
+		item["bead_progress_closed"] = closedBeads
+		item["bead_progress_total"] = totalBeads
+		item["bead_progress_percentage"] = beadProgressPercentage
+		item["bead_progress_str"] = beadProgressStr
+		item["wip_cards_in_now"] = cardsInNow
+		item["wip_limit"] = nowLimit
+		item["wip_vs_limit_str"] = wipVsLimitStr
+	}
+}
+
 func cmdServe() *cobra.Command {
 	var port string
 	c := &cobra.Command{
@@ -629,7 +940,6 @@ func cmdServe() *cobra.Command {
 					}
 				}
 
-				// Enrich items with lane information based on linked beads
 				if len(items) > 0 {
 					// 1. Gather all initiative IDs
 					initIDs := make([]string, 0, len(items))
@@ -847,7 +1157,7 @@ func cmdServe() *cobra.Command {
 					http.Error(w, "initiative nicht gefunden: "+id, 404)
 					return
 				}
-				var j json.RawMessage
+				var j []byte
 				err := p.QueryRow(r.Context(), `SELECT json_build_object(
 					'initiative', (SELECT row_to_json(s) FROM portfolio.initiative_summary s WHERE s.id=$1),
 					'links', COALESCE((SELECT json_agg(row_to_json(l) ORDER BY l.kind, l.added_at)
