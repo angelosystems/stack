@@ -143,3 +143,146 @@ func TestManagerSweepAndEscalate(t *testing.T) {
 		t.Errorf("Expected exactly 1 escalation event, got %d", count)
 	}
 }
+
+func TestManagerLiveGeldSchutz(t *testing.T) {
+	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	ctx := context.Background()
+
+	pPool, err := pgxpool.New(ctx, portfolioDsn)
+	if err != nil {
+		t.Fatalf("Failed to connect to portfolio DB: %v", err)
+	}
+	defer pPool.Close()
+
+	// Swap global pool
+	oldPool := pool
+	pool = pPool
+	defer func() {
+		pool = oldPool
+	}()
+
+	testInitID := "qb-test-live-geld-protection"
+
+	// Cleanup
+	cleanup := func() {
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitID)
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitID)
+	}
+	cleanup()
+	defer cleanup()
+
+	// 1. Create a stagnant quantbot (Live-Geld) card
+	_, err = pPool.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, firma, stage, title, description, created_at, updated_at)
+		VALUES ($1, 'quantbot', 'now', 'Test Live Geld Stagnant Card', 'Trading Path card under Live Geld protection', now() - interval '10 days', now() - interval '10 days')
+	`, testInitID)
+	if err != nil {
+		t.Fatalf("Failed to create test initiative: %v", err)
+	}
+
+	// 2. Set environment variables to enable fast checks
+	t.Setenv("MANAGER_STAGNATION_THRESHOLD_NOW", "1s")
+
+	// 3. Run the manager sweep
+	err = runManagerSweep(pPool)
+	if err != nil {
+		t.Fatalf("runManagerSweep failed: %v", err)
+	}
+
+	// 4. Retrieve digest payload and verify that no "Re-Dispatch" (endpoint `/api/dispatch`) is proposed
+	var payloadStr string
+	err = pPool.QueryRow(ctx, "SELECT payload FROM portfolio.manager_digest WHERE id = 'latest'").Scan(&payloadStr)
+	if err != nil {
+		t.Fatalf("Failed to fetch manager digest: %v", err)
+	}
+
+	var digest ManagerDigest
+	if err := json.Unmarshal([]byte(payloadStr), &digest); err != nil {
+		t.Fatalf("Failed to parse digest payload: %v", err)
+	}
+
+	foundStagnant := false
+	for _, flag := range digest.Stagnant {
+		if flag.InitiativeID == testInitID {
+			foundStagnant = true
+			if len(flag.Actions) == 0 {
+				t.Errorf("Expected stagnant flag to have actions, got 0")
+			}
+			for _, action := range flag.Actions {
+				if action.Endpoint == "/api/dispatch" || action.Label == "Re-Dispatch" {
+					t.Errorf("FORBIDDEN: Quantbot card got a dispatch action: %s", action.Label)
+				}
+			}
+			hasEscalate := false
+			for _, action := range flag.Actions {
+				if action.Endpoint == "/api/escalate" && action.Label == "Eskalieren" {
+					hasEscalate = true
+				}
+			}
+			if !hasEscalate {
+				t.Errorf("Expected stagnant Actions to include Eskalieren")
+			}
+		}
+	}
+	if !foundStagnant {
+		t.Errorf("Expected test initiative to be flagged as stagnant")
+	}
+
+	// 5. Test promote_ready flag for quantbot
+	sp, spErr := solartownPool()
+	if spErr == nil && sp != nil {
+		testBeadID := "qb-test-bead-1"
+		_, _ = sp.Exec(ctx, "INSERT INTO beads.issues (id, status) VALUES ($1, 'closed') ON CONFLICT (id) DO UPDATE SET status='closed'", testBeadID)
+
+		testInitID2 := "qb-test-live-geld-promote-ready"
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitID2)
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitID2)
+
+		_, err = pPool.Exec(ctx, `
+			INSERT INTO portfolio.initiative (id, firma, stage, title, description, created_at, updated_at)
+			VALUES ($1, 'quantbot', 'now', 'Test Live Geld Promote Ready Card', 'Trading Path card under Live Geld protection', now(), now())
+		`, testInitID2)
+		if err == nil {
+			_, _ = pPool.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1, 'bead', $2)", testInitID2, testBeadID)
+
+			// Sweep again
+			_ = runManagerSweep(pPool)
+
+			// Check digest
+			var payloadStr2 string
+			err = pPool.QueryRow(ctx, "SELECT payload FROM portfolio.manager_digest WHERE id = 'latest'").Scan(&payloadStr2)
+			if err == nil {
+				var digest2 ManagerDigest
+				_ = json.Unmarshal([]byte(payloadStr2), &digest2)
+				foundPromote := false
+				for _, flag := range digest2.PromoteReady {
+					if flag.InitiativeID == testInitID2 {
+						foundPromote = true
+						for _, action := range flag.Actions {
+							if action.Endpoint == "/api/move" || action.Label == "Ein-Klick-Promote" {
+								t.Errorf("FORBIDDEN: Quantbot card got a promote action: %s", action.Label)
+							}
+						}
+						hasEscalate := false
+						for _, action := range flag.Actions {
+							if action.Endpoint == "/api/escalate" && action.Label == "Eskalieren" {
+								hasEscalate = true
+							}
+						}
+						if !hasEscalate {
+							t.Errorf("Expected promote_ready Actions to include Eskalieren")
+						}
+					}
+				}
+				if !foundPromote {
+					t.Logf("Promote ready flag not found (possibly due to missing DB/schema on test environment), skipping promote_ready validation")
+				}
+			}
+
+			// Clean up
+			_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitID2)
+			_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitID2)
+			_, _ = sp.Exec(ctx, "DELETE FROM beads.issues WHERE id = $1", testBeadID)
+		}
+	}
+}

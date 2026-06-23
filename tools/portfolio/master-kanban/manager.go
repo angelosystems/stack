@@ -326,15 +326,21 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			// Log Event (manager_flag) with Cooldown (once every 24 hours per initiative & flag type)
 			err := logManagerFlagWithCooldown(p, init.id, "stagnation", "Stagnation: "+diagnosis, desc)
 			if err == nil {
-				stagnantFlags = append(stagnantFlags, ManagerFlag{
-					InitiativeID:   init.id,
-					Firma:          init.firma,
-					Stage:          init.stage,
-					Title:          init.title,
-					Type:           "stagnation",
-					Classification: "Stagnation: " + diagnosis,
-					Description:    desc,
-					Actions: []ProposalAction{
+				var actions []ProposalAction
+				if init.firma == "quantbot" {
+					actions = []ProposalAction{
+						{
+							Label:    "Eskalieren",
+							Endpoint: "/api/escalate",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":     init.id,
+								"reason": "Eskalation wegen Stagnation (Inaktivität)",
+							},
+						},
+					}
+				} else {
+					actions = []ProposalAction{
 						{
 							Label:    "Re-Dispatch",
 							Endpoint: "/api/dispatch",
@@ -354,7 +360,18 @@ func runManagerSweep(p *pgxpool.Pool) error {
 								"reason": "Eskalation wegen Stagnation (Inaktivität)",
 							},
 						},
-					},
+					}
+				}
+
+				stagnantFlags = append(stagnantFlags, ManagerFlag{
+					InitiativeID:   init.id,
+					Firma:          init.firma,
+					Stage:          init.stage,
+					Title:          init.title,
+					Type:           "stagnation",
+					Classification: "Stagnation: " + diagnosis,
+					Description:    desc,
+					Actions:        actions,
 				})
 			}
 		}
@@ -365,17 +382,23 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			desc := fmt.Sprintf("Alle %d verlinkten Beads sind geschlossen, aber die Karte befindet sich noch in Stage '%s'.", signal.TotalBeads, init.stage)
 			err := logManagerFlagWithCooldown(p, init.id, "promote_ready", "Promote-reif", desc)
 			if err == nil {
-				nowCount := wipCounts[init.firma]
-				targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
-				promoteReadyFlags = append(promoteReadyFlags, ManagerFlag{
-					InitiativeID:   init.id,
-					Firma:          init.firma,
-					Stage:          init.stage,
-					Title:          init.title,
-					Type:           "promote_ready",
-					Classification: "Promote-reif",
-					Description:    desc,
-					Actions: []ProposalAction{
+				var actions []ProposalAction
+				if init.firma == "quantbot" {
+					actions = []ProposalAction{
+						{
+							Label:    "Eskalieren",
+							Endpoint: "/api/escalate",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":     init.id,
+								"reason": "Eskalation wegen Promote-Reife (Live-Geld-Karten dürfen nicht autonom promotet werden)",
+							},
+						},
+					}
+				} else {
+					nowCount := wipCounts[init.firma]
+					targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
+					actions = []ProposalAction{
 						{
 							Label:    "Ein-Klick-Promote",
 							Endpoint: "/api/move",
@@ -385,7 +408,18 @@ func runManagerSweep(p *pgxpool.Pool) error {
 								"stage": targetStage,
 							},
 						},
-					},
+					}
+				}
+
+				promoteReadyFlags = append(promoteReadyFlags, ManagerFlag{
+					InitiativeID:   init.id,
+					Firma:          init.firma,
+					Stage:          init.stage,
+					Title:          init.title,
+					Type:           "promote_ready",
+					Classification: "Promote-reif",
+					Description:    desc,
+					Actions:        actions,
 				})
 			}
 		}
@@ -396,15 +430,21 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			desc := fmt.Sprintf("Karte befindet sich seit %.1f Tagen ohne Aktivität in Stage 'idea' (Backlog-Fäule).", signal.ActivityStaleHrs/24.0)
 			err := logManagerFlagWithCooldown(p, init.id, "stale", "Veraltet (Backlog-Fäule)", desc)
 			if err == nil {
-				staleFlags = append(staleFlags, ManagerFlag{
-					InitiativeID:   init.id,
-					Firma:          init.firma,
-					Stage:          init.stage,
-					Title:          init.title,
-					Type:           "stale",
-					Classification: "Veraltet (Backlog-Fäule)",
-					Description:    desc,
-					Actions: []ProposalAction{
+				var actions []ProposalAction
+				if init.firma == "quantbot" {
+					actions = []ProposalAction{
+						{
+							Label:    "Eskalieren",
+							Endpoint: "/api/escalate",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":     init.id,
+								"reason": "Eskalation wegen Backlog-Fäule",
+							},
+						},
+					}
+				} else {
+					actions = []ProposalAction{
 						{
 							Label:    "Review",
 							Endpoint: "/api/comment",
@@ -422,7 +462,18 @@ func runManagerSweep(p *pgxpool.Pool) error {
 								"id": init.id,
 							},
 						},
-					},
+					}
+				}
+
+				staleFlags = append(staleFlags, ManagerFlag{
+					InitiativeID:   init.id,
+					Firma:          init.firma,
+					Stage:          init.stage,
+					Title:          init.title,
+					Type:           "stale",
+					Classification: "Veraltet (Backlog-Fäule)",
+					Description:    desc,
+					Actions:        actions,
 				})
 			}
 		}
