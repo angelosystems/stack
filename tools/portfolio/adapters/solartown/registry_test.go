@@ -113,8 +113,8 @@ func TestLoadRegistry_Defaults(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected default 'mb' registered")
 	}
-	if mb.Dir != "/root/mario-brain" {
-		t.Errorf("mb dir should be /root/mario-brain (corrected from /root/solartown/mariobrain), got %q", mb.Dir)
+	if mb.Dir != "/root/solartown/mario-brain" {
+		t.Errorf("mb dir should be /root/solartown/mario-brain, got %q", mb.Dir)
 	}
 }
 

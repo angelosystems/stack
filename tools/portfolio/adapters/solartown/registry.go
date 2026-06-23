@@ -47,7 +47,7 @@ func LoadRegistry(configStr string) (*Registry, error) {
 			{Prefix: "sa", Dir: "/root/stayawesomeOS"},
 			{Prefix: "cl", Dir: "/opt/angeloos"},
 			{Prefix: "ag", Dir: "/opt/angeloos"},
-			{Prefix: "mb", Dir: "/root/mario-brain"},
+			{Prefix: "mb", Dir: "/root/solartown/mario-brain"},
 		}
 		for _, r := range defaults {
 			if err := addRig(r); err != nil {

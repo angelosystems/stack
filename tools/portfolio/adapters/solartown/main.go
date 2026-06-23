@@ -264,6 +264,10 @@ func readBead(id string) (*beadStatus, error) {
 		}
 	}
 
+	if reason, reachable := rigReachable(rigDir); !reachable {
+		return nil, fmt.Errorf("rig unreachable (%s)", reason)
+	}
+
 	cmd := exec.Command("bd", "show", id, "--json")
 	cmd.Dir = rigDir
 	out, err := cmd.Output()

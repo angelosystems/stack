@@ -119,3 +119,21 @@ func TestClassifyBeads_ExcludesClosedAndEphemeral(t *testing.T) {
 		t.Fatalf("expected open bead st-open, got %q", got[0].Ref)
 	}
 }
+
+// TestReadBead_UnreachableRig verifies that readBead returns a clean error when the rig is unreachable.
+func TestReadBead_UnreachableRig(t *testing.T) {
+	// Temporarily set a custom registry mapping prefix 'mb' to a nonexistent dir
+	oldReg := reg
+	defer func() { reg = oldReg }()
+
+	var err error
+	reg, err = LoadRegistry("mb=/nonexistent/mariobrain=postgres://fake")
+	if err != nil {
+		t.Fatalf("failed to setup test registry: %v", err)
+	}
+
+	_, err = readBead("mb-123")
+	if err == nil {
+		t.Fatal("expected error for nonexistent rig dir, got nil")
+	}
+}
