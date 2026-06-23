@@ -132,7 +132,7 @@ func runManagerSweep(p *pgxpool.Pool) error {
 
 	// 1. Fetch all unarchived initiatives
 	rows, err := p.Query(ctx, `
-		SELECT id, firma, stage, title, created_at, updated_at
+		SELECT id, firma, stage, title, COALESCE(description, ''), created_at, updated_at
 		FROM portfolio.initiative
 		WHERE archived_at IS NULL
 	`)
@@ -142,13 +142,13 @@ func runManagerSweep(p *pgxpool.Pool) error {
 	defer rows.Close()
 
 	type initRow struct {
-		id, firma, stage, title string
-		created, updated        time.Time
+		id, firma, stage, title, description string
+		created, updated                     time.Time
 	}
 	var initiatives []initRow
 	for rows.Next() {
 		var i initRow
-		if err := rows.Scan(&i.id, &i.firma, &i.stage, &i.title, &i.created, &i.updated); err == nil {
+		if err := rows.Scan(&i.id, &i.firma, &i.stage, &i.title, &i.description, &i.created, &i.updated); err == nil {
 			initiatives = append(initiatives, i)
 		}
 	}
@@ -167,27 +167,6 @@ func runManagerSweep(p *pgxpool.Pool) error {
 	for _, init := range initiatives {
 		if init.stage == "now" {
 			wipCounts[init.firma]++
-		}
-	}
-
-	// Thresholds configurable via environment variables
-	stagnationThresholdNow := 48 * time.Hour
-	stagnationThresholdSoon := 168 * time.Hour
-	staleThresholdIdea := 720 * time.Hour // 30 days
-
-	if val := os.Getenv("MANAGER_STAGNATION_THRESHOLD_NOW"); val != "" {
-		if d, err := time.ParseDuration(val); err == nil {
-			stagnationThresholdNow = d
-		}
-	}
-	if val := os.Getenv("MANAGER_STAGNATION_THRESHOLD_SOON"); val != "" {
-		if d, err := time.ParseDuration(val); err == nil {
-			stagnationThresholdSoon = d
-		}
-	}
-	if val := os.Getenv("MANAGER_STALE_THRESHOLD_IDEA"); val != "" {
-		if d, err := time.ParseDuration(val); err == nil {
-			staleThresholdIdea = d
 		}
 	}
 
@@ -224,81 +203,94 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		}
 		signal.ActivityStaleHrs = time.Since(signal.LastActivity).Hours()
 
-		// Fetch bead count details if Dolt is reachable
+		// Gather verlinked beads and active/waiting workspaces
+		var beads []LinkedBead
+		var beadRefs []string
+		linkRows, err := p.Query(ctx, `
+			SELECT ref FROM portfolio.initiative_link
+			WHERE initiative_id = $1 AND kind = 'bead'
+		`, init.id)
+		if err == nil {
+			for linkRows.Next() {
+				var ref string
+				if linkRows.Scan(&ref) == nil {
+					beadRefs = append(beadRefs, ref)
+				}
+			}
+			linkRows.Close()
+		}
 		if spErr == nil && sp != nil {
-			var beadRefs []string
-			linkRows, err := p.Query(ctx, `
-				SELECT ref FROM portfolio.initiative_link
-				WHERE initiative_id = $1 AND kind = 'bead'
-			`, init.id)
-			if err == nil {
-				defer linkRows.Close()
-				for linkRows.Next() {
-					var ref string
-					if linkRows.Scan(&ref) == nil {
-						beadRefs = append(beadRefs, ref)
-					}
-				}
-			}
-
-			if len(beadRefs) > 0 {
-				signal.TotalBeads = len(beadRefs)
-				// Query beads status in Dolt
-				beadRows, err := sp.Query(ctx, `
-					SELECT status FROM beads.issues
-					WHERE id = ANY($1)
-				`, beadRefs)
+			for _, ref := range beadRefs {
+				var status string
+				err := sp.QueryRow(ctx, "SELECT status FROM beads.issues WHERE id = $1 AND deleted_at IS NULL", ref).Scan(&status)
 				if err == nil {
-					defer beadRows.Close()
-					for beadRows.Next() {
-						var status string
-						if beadRows.Scan(&status) == nil {
-							if status == "closed" {
-								signal.ClosedBeads++
-							} else if status == "open" || status == "in_progress" || status == "hooked" {
-								signal.ActiveBeads++
-							}
-						}
-					}
+					beads = append(beads, LinkedBead{Ref: ref, Status: status})
+				} else {
+					beads = append(beads, LinkedBead{Ref: ref, Status: "unknown"})
 				}
 			}
+		}
 
-			// Check Vibe Kanban links for running executions/workspaces
-			var vkRefs []string
-			vkLinkRows, err := p.Query(ctx, `
-				SELECT ref FROM portfolio.initiative_link
-				WHERE initiative_id = $1 AND kind = 'vk_workspace'
+		var workspaces []LinkedWorkspace
+		vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+		if _, err := os.Stat(vkDB); err == nil {
+			wsQuery := fmt.Sprintf(`
+				SELECT hex(w.id), COALESCE(ep.status, '')
+				FROM workspaces w
+				JOIN sessions s ON s.workspace_id = w.id
+				LEFT JOIN execution_processes ep ON ep.session_id = s.id
+				WHERE w.name LIKE '%%%s%%' AND w.archived = 0
+				ORDER BY ep.created_at DESC;
 			`, init.id)
-			if err == nil {
-				defer vkLinkRows.Close()
-				for vkLinkRows.Next() {
-					var ref string
-					if vkLinkRows.Scan(&ref) == nil {
-						vkRefs = append(vkRefs, ref)
+			sqliteCmd := exec.Command("sqlite3", "-readonly", vkDB, wsQuery)
+			var wsOut bytes.Buffer
+			sqliteCmd.Stdout = &wsOut
+			if err := sqliteCmd.Run(); err == nil {
+				wsLines := strings.Split(strings.TrimSpace(wsOut.String()), "\n")
+				for _, line := range wsLines {
+					parts := strings.Split(line, "|")
+					if len(parts) >= 2 {
+						workspaces = append(workspaces, LinkedWorkspace{ID: parts[0], Status: parts[1]})
 					}
 				}
 			}
+		}
 
-			if len(vkRefs) > 0 {
-				// Query Vibe Kanban SQLite DB for active running executions
-				vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
-				if _, statErr := os.Stat(vkDB); statErr == nil {
-					for _, ref := range vkRefs {
-						hexID := strings.ToUpper(strings.ReplaceAll(ref, "-", ""))
-						query := fmt.Sprintf(`
-							SELECT count(*) 
-							FROM workspaces w
-							JOIN sessions s ON s.workspace_id = w.id
-							JOIN execution_processes ep ON ep.session_id = s.id
-							WHERE hex(w.id)='%s' AND ep.status='running';
-						`, hexID)
-						cmd := exec.Command("sqlite3", "-readonly", vkDB, query)
-						var out bytes.Buffer
-						cmd.Stdout = &out
-						if cmd.Run() == nil {
-							var count int
-							if _, scanErr := fmt.Sscanf(strings.TrimSpace(out.String()), "%d", &count); scanErr == nil && count > 0 {
-								signal.HasActiveWork = true
+		var vkRefs []string
+		vkLinkRows, err := p.Query(ctx, `
+			SELECT ref FROM portfolio.initiative_link
+			WHERE initiative_id = $1 AND kind = 'vk_workspace'
+		`, init.id)
+		if err == nil {
+			for vkLinkRows.Next() {
+				var ref string
+				if vkLinkRows.Scan(&ref) == nil {
+					vkRefs = append(vkRefs, ref)
+				}
+			}
+			vkLinkRows.Close()
+		}
+
+		if len(vkRefs) > 0 {
+			if _, statErr := os.Stat(vkDB); statErr == nil {
+				for _, ref := range vkRefs {
+					hexID := strings.ToUpper(strings.ReplaceAll(ref, "-", ""))
+					query := fmt.Sprintf(`
+						SELECT hex(w.id), COALESCE(ep.status, '')
+						FROM workspaces w
+						LEFT JOIN sessions s ON s.workspace_id = w.id
+						LEFT JOIN execution_processes ep ON ep.session_id = s.id
+						WHERE hex(w.id)='%s' AND w.archived = 0;
+					`, hexID)
+					cmd := exec.Command("sqlite3", "-readonly", vkDB, query)
+					var out bytes.Buffer
+					cmd.Stdout = &out
+					if cmd.Run() == nil {
+						wsLines := strings.Split(strings.TrimSpace(out.String()), "\n")
+						for _, line := range wsLines {
+							parts := strings.Split(line, "|")
+							if len(parts) >= 2 {
+								workspaces = append(workspaces, LinkedWorkspace{ID: parts[0], Status: parts[1]})
 							}
 						}
 					}
@@ -306,26 +298,124 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			}
 		}
 
+		// Calculate signal values based on gathered beads & workspaces
+		signal.TotalBeads = len(beads)
+		for _, b := range beads {
+			if b.Status == "closed" {
+				signal.ClosedBeads++
+			} else if b.Status == "open" || b.Status == "in_progress" || b.Status == "hooked" {
+				signal.ActiveBeads++
+			}
+		}
+		for _, ws := range workspaces {
+			if ws.Status == "running" {
+				signal.HasActiveWork = true
+			}
+		}
 		if signal.ActiveBeads > 0 {
 			signal.HasActiveWork = true
 		}
 
+		// Check if lower layer (Reactor, vk-Sage, or running/waiting workspaces) is engaged.
+		// Establishing escalation ladder Reactor -> vk-Sage -> Manager: Manager only acts if lower layers are not engaged.
+		engaged, err := isLowerLayerEngagedManager(ctx, p, init.id, beadRefs, vkRefs)
+		if err == nil && engaged {
+			signal.HasActiveWork = true
+		}
+
 		// 1. Detection: Stagnation (stockend)
-		// NOW threshold: 48h, SOON threshold: 168h
+		stgThresh := GetStageThreshold(init.firma, init.stage)
 		isStagnant := false
-		if (init.stage == "now" && signal.ActivityStaleHrs > stagnationThresholdNow.Hours() && !signal.HasActiveWork) ||
-			(init.stage == "soon" && signal.ActivityStaleHrs > stagnationThresholdSoon.Hours() && !signal.HasActiveWork) {
+		if (init.stage == "now" || init.stage == "soon") && stgThresh > 0 && signal.ActivityStaleHrs > stgThresh.Hours() && !signal.HasActiveWork {
 			isStagnant = true
 		}
 
 		if isStagnant {
-			// Rule-based Diagnosis
+			// Rule-based Diagnosis fallback
 			diagnosis := "wartet-auf-Mensch"
 			desc := fmt.Sprintf("Inaktivität seit %.1f Stunden in Stage '%s' ohne aktive Beads/Workspaces.", signal.ActivityStaleHrs, init.stage)
+			proposedAction := ""
+			confidence := "High"
+
+			// Try to load the latest GLM diagnosis from portfolio.initiative_event
+			var flowActionPayload string
+			err := p.QueryRow(ctx, `
+				SELECT payload::text FROM portfolio.initiative_event
+				WHERE initiative_id = $1 AND kind = 'flow_action'
+				ORDER BY at DESC LIMIT 1
+			`, init.id).Scan(&flowActionPayload)
+			if err == nil {
+				var parsed struct {
+					Category       string `json:"category"`
+					Confidence     string `json:"confidence"`
+					Reasoning      string `json:"reasoning"`
+					ProposedAction string `json:"proposed_action"`
+				}
+				if json.Unmarshal([]byte(flowActionPayload), &parsed) == nil {
+					if parsed.Category != "" {
+						diagnosis = parsed.Category
+					}
+					if parsed.Reasoning != "" {
+						desc = parsed.Reasoning
+					}
+					proposedAction = parsed.ProposedAction
+					confidence = parsed.Confidence
+				}
+			}
 
 			// Log Event (manager_flag) with Cooldown (once every 24 hours per initiative & flag type)
-			err := logManagerFlagWithCooldown(p, init.id, "stagnation", "Stagnation: "+diagnosis, desc)
+			err = logManagerFlagWithCooldown(p, init.id, "stagnation", "Stagnation: "+diagnosis, desc)
 			if err == nil {
+				var actions []ProposalAction
+				// Low-Confidence underdrückt Aktions-Vorschläge (R-B / Acceptanz-Kriterium)
+				if strings.ToLower(confidence) != "low" {
+					if proposedAction != "" && proposedAction != "handover" {
+						actions = append(actions, ProposalAction{
+							Label:    proposedAction,
+							Endpoint: "/api/dispatch",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":   init.id,
+								"note": fmt.Sprintf("Proposed action '%s' via Flow Manager", proposedAction),
+							},
+						})
+					} else if init.firma == "quantbot" {
+						actions = []ProposalAction{
+							{
+								Label:    "Eskalieren",
+								Endpoint: "/api/escalate",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":     init.id,
+									"reason": "Eskalation wegen Stagnation (Live-Geld-Schutz)",
+								},
+							},
+						}
+					} else {
+						actions = []ProposalAction{
+							{
+								Label:    "Re-Dispatch",
+								Endpoint: "/api/dispatch",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":   init.id,
+									"lane": "hack",
+									"note": "Re-dispatch stagnant initiative via Flow Manager",
+								},
+							},
+							{
+								Label:    "Eskalieren",
+								Endpoint: "/api/escalate",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":     init.id,
+									"reason": "Eskalation wegen Stagnation (Inaktivität)",
+								},
+							},
+						}
+					}
+				}
+
 				stagnantFlags = append(stagnantFlags, ManagerFlag{
 					InitiativeID:   init.id,
 					Firma:          init.firma,
@@ -334,27 +424,7 @@ func runManagerSweep(p *pgxpool.Pool) error {
 					Type:           "stagnation",
 					Classification: "Stagnation: " + diagnosis,
 					Description:    desc,
-					Actions: []ProposalAction{
-						{
-							Label:    "Re-Dispatch",
-							Endpoint: "/api/dispatch",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":   init.id,
-								"lane": "hack",
-								"note": "Re-dispatch stagnant initiative via Flow Manager",
-							},
-						},
-						{
-							Label:    "Eskalieren",
-							Endpoint: "/api/escalate",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":     init.id,
-								"reason": "Eskalation wegen Stagnation (Inaktivität)",
-							},
-						},
-					},
+					Actions:        actions,
 				})
 			}
 		}
@@ -362,37 +432,64 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		// 2. Detection: Promote-reif (promote-ready)
 		// All linked beads closed, but stage is not 'done'
 		if init.stage != "done" && signal.TotalBeads > 0 && signal.ClosedBeads == signal.TotalBeads {
-			desc := fmt.Sprintf("Alle %d verlinkten Beads sind geschlossen, aber die Karte befindet sich noch in Stage '%s'.", signal.TotalBeads, init.stage)
-			err := logManagerFlagWithCooldown(p, init.id, "promote_ready", "Promote-reif", desc)
+originalDesc := fmt.Sprintf("Alle %d verlinkten Beads sind geschlossen, aber die Karte befindet sich noch in Stage '%s'.", signal.TotalBeads, init.stage)
+			originalClassification := "Promote-reif"
+
+			nowCount := wipCounts[init.firma]
+			targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
+
+			originalActions := []ProposalAction{
+				{
+					Label:    "Ein-Klick-Promote",
+					Endpoint: "/api/move",
+					Method:   "POST",
+					Payload: map[string]any{
+						"id":    init.id,
+						"stage": targetStage,
+					},
+				},
+			}
+			// Live-Geld-Schutz: quantbot niemals promoten, immer eskalieren
+			if init.firma == "quantbot" {
+				originalActions = []ProposalAction{{
+					Label:    "Eskalieren",
+					Endpoint: "/api/escalate",
+					Method:   "POST",
+					Payload: map[string]any{
+						"id":     init.id,
+						"reason": "Eskalation wegen Promote-Reife (Live-Geld-Schutz)",
+					},
+				}}
+			}
+
+			classification, description, actions, err := getOrRunDiagnosis(ctx, p, init.id, "promote_ready", originalDesc, originalClassification, originalActions, signal, init.title, init.description, init.stage, init.firma)
+			// Live-Geld-Schutz: enforce Eskalieren even if GLM returned low-confidence
+			if init.firma == "quantbot" {
+				actions = []ProposalAction{{
+					Label:    "Eskalieren",
+					Endpoint: "/api/escalate",
+					Method:   "POST",
+					Payload:  map[string]any{"id": init.id, "reason": "Eskalation wegen Promote-Reife (Live-Geld-Schutz)"},
+				}}
+			}
 			if err == nil {
-				nowCount := wipCounts[init.firma]
-				targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
 				promoteReadyFlags = append(promoteReadyFlags, ManagerFlag{
 					InitiativeID:   init.id,
 					Firma:          init.firma,
 					Stage:          init.stage,
 					Title:          init.title,
 					Type:           "promote_ready",
-					Classification: "Promote-reif",
-					Description:    desc,
-					Actions: []ProposalAction{
-						{
-							Label:    "Ein-Klick-Promote",
-							Endpoint: "/api/move",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":    init.id,
-								"stage": targetStage,
-							},
-						},
-					},
+					Classification: classification,
+					Description:    description,
+					Actions:        actions,
 				})
 			}
 		}
 
 		// 3. Detection: Backlog-Fäule / Veraltet (stale)
 		// Stage is 'idea' and stale threshold exceeded
-		if init.stage == "idea" && signal.ActivityStaleHrs > staleThresholdIdea.Hours() {
+		staleThresh := GetStageThreshold(init.firma, "idea")
+		if init.stage == "idea" && staleThresh > 0 && signal.ActivityStaleHrs > staleThresh.Hours() {
 			desc := fmt.Sprintf("Karte befindet sich seit %.1f Tagen ohne Aktivität in Stage 'idea' (Backlog-Fäule).", signal.ActivityStaleHrs/24.0)
 			err := logManagerFlagWithCooldown(p, init.id, "stale", "Veraltet (Backlog-Fäule)", desc)
 			if err == nil {
@@ -782,5 +879,347 @@ func GetPromoteTargetStage(ctx context.Context, p *pgxpool.Pool, sp *pgxpool.Poo
 		targetStage = "done"
 	}
 	return targetStage
+}
+
+func isLowerLayerEngagedManager(ctx context.Context, p *pgxpool.Pool, initID string, beadRefs []string, vkRefs []string) (bool, error) {
+	// 1. Check for Active/Waiting Workspace in Vibe Kanban SQLite
+	vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+	if _, statErr := os.Stat(vkDB); statErr == nil {
+		var whereParts []string
+		for _, ref := range vkRefs {
+			hexID := strings.ToUpper(strings.ReplaceAll(ref, "-", ""))
+			whereParts = append(whereParts, fmt.Sprintf("hex(w.id)='%s'", hexID))
+		}
+		for _, ref := range beadRefs {
+			whereParts = append(whereParts, fmt.Sprintf("w.name LIKE '%%%s%%'", ref))
+		}
+
+		if len(whereParts) > 0 {
+			sqliteQuery := fmt.Sprintf(`
+				SELECT count(*)
+				FROM workspaces w
+				LEFT JOIN sessions s ON s.workspace_id = w.id
+				LEFT JOIN execution_processes ep ON ep.session_id = s.id
+				WHERE (ep.status = 'running' OR (w.created_at > datetime('now', '-15 minutes') AND w.archived = 0))
+				  AND (%s);
+			`, strings.Join(whereParts, " OR "))
+
+			cmd := exec.Command("sqlite3", "-readonly", vkDB, sqliteQuery)
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			if cmd.Run() == nil {
+				var count int
+				if _, scanErr := fmt.Sscanf(strings.TrimSpace(out.String()), "%d", &count); scanErr == nil && count > 0 {
+					return true, nil
+				}
+			}
+		}
+	}
+
+	// 2. Check for Open Reactor/Dispatch Attempt in PostgreSQL
+	var hasRecentDispatch bool
+	err := p.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM portfolio.initiative_event
+			WHERE initiative_id = $1 AND kind = 'dispatched'
+			  AND at > now() - interval '30 minutes'
+		)
+	`, initID).Scan(&hasRecentDispatch)
+	if err == nil && hasRecentDispatch {
+		return true, nil
+	}
+
+	// 3. Check if in vk-Sage's queue (healing or retry in progress)
+	if len(beadRefs) > 0 {
+		// A. Check active sage_lease
+		var hasActiveLease bool
+		err = p.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM portfolio.sage_lease
+				WHERE bead_id = ANY($1) AND locked_until > now()
+			)
+		`, beadRefs).Scan(&hasActiveLease)
+		if err == nil && hasActiveLease {
+			return true, nil
+		}
+
+		// B. Check sage_heal_count (healing retries in progress: heal_count > 0 and heal_count < 2)
+		var hasActiveHeals bool
+		err = p.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM portfolio.sage_heal_count
+				WHERE bead_id = ANY($1) AND heal_count > 0 AND heal_count < 2
+			)
+		`, beadRefs).Scan(&hasActiveHeals)
+		if err == nil && hasActiveHeals {
+			// Double check if an escalation event has already been logged.
+			var hasEscalated bool
+			err = p.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM portfolio.initiative_event
+					WHERE initiative_id = $1 AND kind = 'sage_action'
+					  AND payload->>'action' = 'escalate'
+				)
+			`, initID).Scan(&hasEscalated)
+			if err == nil && !hasEscalated {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+const diagnosisSystemPrompt = `You are the Kanban-Flow-Manager Diagnosis Agent. Your job is to analyze a flagged Kanban card (initiative) on a master board and determine the root cause of its issue (the "Warum").
+
+Analyze the card's details, metadata, linked beads progress, and the chronological timeline of recent card events (Kontext & Outcome) to determine why it is stagnant, promote-ready, stale, or overflowing WIP limits.
+
+You must categorize the diagnosis into exactly one of these four categories:
+1. "wartet-auf-Mensch" - The task is waiting for a human developer, reviewer, or operator. E.g., PR is waiting for review, manual feedback is required, a task stagnates with no active beads/errors, or a WIP limit overflow occurs because of slow manual progress.
+2. "Workspace-gescheitert" - A workspace run or agent execution failed, exited with errors, or hit a blockade. E.g., tests failed, build crashed, or setup/provisioning error.
+3. "fertig-nicht-promotet" - All linked beads are done or closed, but the card remains in an active stage (e.g. NOW or SOON) and has not been moved to DONE.
+4. "verlassen" - The card is stale or abandoned. E.g., extremely long inactivity in the IDEA/backlog stage, or no updates/activity in a long time.
+
+Provide a detailed explanation in German ("justification") describing the specific situation based on the event timeline and metadata.
+
+Assess your confidence:
+- "high": You are highly confident in this diagnosis.
+- "low": There is high ambiguity, conflicting signals, or insufficient context to be sure. (Note: Low confidence will suppress automated action proposals, acting as an advisory-only warning).
+
+You MUST return a JSON object with the following fields:
+{
+  "category": "wartet-auf-Mensch" | "Workspace-gescheitert" | "fertig-nicht-promotet" | "verlassen",
+  "justification": "German explanation...",
+  "confidence": "high" | "low"
+}
+
+Do NOT output any markdown formatting other than optionally wrapping the JSON in a "json" code block. Only return the JSON object.`
+
+func getFallbackCategory(flagType string) string {
+	switch flagType {
+	case "stagnation":
+		return "wartet-auf-Mensch"
+	case "promote_ready":
+		return "fertig-nicht-promotet"
+	case "stale":
+		return "verlassen"
+	case "wip_overflow":
+		return "wartet-auf-Mensch"
+	default:
+		return "wartet-auf-Mensch"
+	}
+}
+
+func getOrRunDiagnosis(
+	ctx context.Context,
+	p *pgxpool.Pool,
+	initiativeID string,
+	flagType string,
+	originalDesc string,
+	originalClassification string,
+	originalActions []ProposalAction,
+	signal FlowSignal,
+	title string,
+	cardDescription string,
+	stage string,
+	firma string,
+) (string, string, []ProposalAction, error) {
+	// 1. Try to find an existing event of kind 'manager_flag' and payload type = flagType within the last 24 hours
+	var payloadBytes []byte
+	err := p.QueryRow(ctx, `
+		SELECT payload FROM portfolio.initiative_event
+		WHERE initiative_id = $1 AND kind = 'manager_flag'
+		  AND payload->>'type' = $2
+		  AND at > now() - interval '24 hours'
+		ORDER BY at DESC LIMIT 1
+	`, initiativeID, flagType).Scan(&payloadBytes)
+
+	if err == nil {
+		var payloadMap map[string]any
+		if json.Unmarshal(payloadBytes, &payloadMap) == nil {
+			classification, _ := payloadMap["classification"].(string)
+			description, _ := payloadMap["description"].(string)
+			confidence, _ := payloadMap["confidence"].(string)
+
+			actions := originalActions
+			if confidence == "low" {
+				actions = []ProposalAction{}
+			}
+			return classification, description, actions, nil
+		}
+	}
+
+	// 2. No recent event found: run the GLM-5.1 diagnosis
+	rows, err := p.Query(ctx, `
+		SELECT kind, source_backend, from_stage, to_stage, payload, actor, at
+		FROM portfolio.initiative_event
+		WHERE initiative_id = $1
+		ORDER BY at DESC
+		LIMIT 15
+	`, initiativeID)
+
+	var events []string
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var kind, sourceBackend string
+			var fromStage, toStage, actor *string
+			var payloadB []byte
+			var at time.Time
+			if rows.Scan(&kind, &sourceBackend, &fromStage, &toStage, &payloadB, &actor, &at) == nil {
+				fromStr := ""
+				if fromStage != nil {
+					fromStr = *fromStage
+				}
+				toStr := ""
+				if toStage != nil {
+					toStr = *toStage
+				}
+				actorStr := ""
+				if actor != nil {
+					actorStr = *actor
+				}
+				payloadStr := ""
+				if len(payloadB) > 0 {
+					payloadStr = string(payloadB)
+				}
+				events = append(events, fmt.Sprintf("- [%s] Event: %s (Backend: %s, Actor: %s) From: '%s' To: '%s' Payload: %s",
+					at.Format("2006-01-02 15:04:05"), kind, sourceBackend, actorStr, fromStr, toStr, payloadStr))
+			}
+		}
+	}
+
+	// Reverse events to be chronological (oldest to newest)
+	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+		events[i], events[j] = events[j], events[i]
+	}
+
+	var promptBuilder strings.Builder
+	promptBuilder.WriteString("Analyze this flagged Kanban card and diagnose the issue:\n\n")
+	promptBuilder.WriteString(fmt.Sprintf("Card ID: %s\n", initiativeID))
+	promptBuilder.WriteString(fmt.Sprintf("Title: %s\n", title))
+	promptBuilder.WriteString(fmt.Sprintf("Description: %s\n", cardDescription))
+	promptBuilder.WriteString(fmt.Sprintf("Stage: %s\n", stage))
+	promptBuilder.WriteString(fmt.Sprintf("Company (Firma): %s\n", firma))
+	promptBuilder.WriteString(fmt.Sprintf("Flag Type: %s\n", flagType))
+	promptBuilder.WriteString(fmt.Sprintf("Original Flag Description: %s\n\n", originalDesc))
+
+	promptBuilder.WriteString("--- BEADS & WORKSPACE SIGNALS ---\n")
+	promptBuilder.WriteString(fmt.Sprintf("Total linked beads: %d\n", signal.TotalBeads))
+	promptBuilder.WriteString(fmt.Sprintf("Closed beads: %d\n", signal.ClosedBeads))
+	promptBuilder.WriteString(fmt.Sprintf("Active beads: %d\n", signal.ActiveBeads))
+	promptBuilder.WriteString(fmt.Sprintf("Has active work (workspace running): %v\n", signal.HasActiveWork))
+	promptBuilder.WriteString(fmt.Sprintf("Inactivity time: %.1f hours\n\n", signal.ActivityStaleHrs))
+
+	promptBuilder.WriteString("--- RECENT EVENT HISTORY TIMELINE (CHRONOLOGICAL) ---\n")
+	if len(events) == 0 {
+		promptBuilder.WriteString("(No recent events found in database)\n")
+	} else {
+		for _, ev := range events {
+			promptBuilder.WriteString(ev + "\n")
+		}
+	}
+
+	category := ""
+	justification := ""
+	confidence := "low"
+
+	key := envOr("ZAI_KEY", "")
+	if key == "" {
+		// Default fallback for test environment or missing key - retain high confidence to preserve actions
+		fmt.Fprintln(os.Stderr, "Flow Manager: ZAI_KEY not set, using default offline fallback")
+		category = getFallbackCategory(flagType)
+		justification = "Automatische Diagnose-Vorschau (LLM-Verbindung nicht verfügbar)."
+		confidence = "high"
+	} else {
+		resp, glmErr := callGlm(diagnosisSystemPrompt, []map[string]string{
+			{"role": "user", "content": promptBuilder.String()},
+		})
+
+		if glmErr != nil {
+			fmt.Fprintf(os.Stderr, "Flow Manager: GLM call failed for %s: %v\n", initiativeID, glmErr)
+			category = getFallbackCategory(flagType)
+			justification = "Automatische Diagnose-Vorschau (LLM-Verbindung fehlgeschlagen)."
+			confidence = "high"
+		} else {
+			cleanResp := strings.TrimSpace(resp)
+			if strings.HasPrefix(cleanResp, "```") {
+				if idx := strings.Index(cleanResp, "\n"); idx != -1 {
+					cleanResp = cleanResp[idx+1:]
+				}
+				if idx := strings.LastIndex(cleanResp, "```"); idx != -1 {
+					cleanResp = cleanResp[:idx]
+				}
+				cleanResp = strings.TrimSpace(cleanResp)
+			}
+
+			type DiagnosisResult struct {
+				Category      string `json:"category"`
+				Justification string `json:"justification"`
+				Confidence    string `json:"confidence"`
+			}
+			var res DiagnosisResult
+			if unmarshalErr := json.Unmarshal([]byte(cleanResp), &res); unmarshalErr != nil {
+				fmt.Fprintf(os.Stderr, "Flow Manager: Failed to parse GLM JSON: %v, raw: %s\n", unmarshalErr, resp)
+				category = getFallbackCategory(flagType)
+				justification = "Automatische Diagnose-Vorschau (Diagnose JSON-Format fehlerhaft)."
+				confidence = "high"
+			} else {
+				category = res.Category
+				justification = res.Justification
+				confidence = strings.ToLower(strings.TrimSpace(res.Confidence))
+
+				if category != "wartet-auf-Mensch" && category != "Workspace-gescheitert" && category != "fertig-nicht-promotet" && category != "verlassen" {
+					fmt.Fprintf(os.Stderr, "Flow Manager: Invalid GLM category: %s, falling back\n", category)
+					category = getFallbackCategory(flagType)
+				}
+				if confidence != "high" && confidence != "low" {
+					confidence = "low"
+				}
+			}
+		}
+	}
+
+	classification := ""
+	switch flagType {
+	case "stagnation":
+		classification = "Stagnation: " + category
+	case "promote_ready":
+		classification = "Promote-reif: " + category
+	case "stale":
+		classification = "Veraltet (Backlog-Fäule): " + category
+	case "wip_overflow":
+		classification = "WIP-Überlauf: " + category
+	default:
+		classification = originalClassification
+	}
+
+	description := fmt.Sprintf("%s\n\n**Diagnose-Begründung**: %s", originalDesc, justification)
+
+	actions := originalActions
+	if confidence == "low" {
+		actions = []ProposalAction{}
+	}
+
+	// Insert event into portfolio.initiative_event so it's cached for 24h
+	payloadMap := map[string]any{
+		"type":           flagType,
+		"classification": classification,
+		"description":    description,
+		"category":       category,
+		"justification":  justification,
+		"confidence":     confidence,
+	}
+	payloadBytes, _ = json.Marshal(payloadMap)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+		VALUES ($1, 'manager_flag', 'master', $2::jsonb, 'flow-manager')
+	`, initiativeID, string(payloadBytes))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Flow Manager: Failed to log manager_flag event: %v\n", err)
+	}
+
+	return classification, description, actions, nil
 }
 

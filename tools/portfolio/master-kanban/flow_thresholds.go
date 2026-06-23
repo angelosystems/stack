@@ -26,10 +26,25 @@ func GetStageThreshold(firma string, stage string) time.Duration {
 	switch stage {
 	case "now":
 		def = 3 * 24 * time.Hour // 3 days
+		if val := os.Getenv("MANAGER_STAGNATION_THRESHOLD_NOW"); val != "" {
+			if d, err := ParseThresholdDuration(val); err == nil {
+				def = d
+			}
+		}
 	case "soon":
 		def = 14 * 24 * time.Hour // 14 days
+		if val := os.Getenv("MANAGER_STAGNATION_THRESHOLD_SOON"); val != "" {
+			if d, err := ParseThresholdDuration(val); err == nil {
+				def = d
+			}
+		}
 	case "idea":
 		def = 90 * 24 * time.Hour // 90 days
+		if val := os.Getenv("MANAGER_STALE_THRESHOLD_IDEA"); val != "" {
+			if d, err := ParseThresholdDuration(val); err == nil {
+				def = d
+			}
+		}
 	case "watching":
 		def = 30 * 24 * time.Hour // 30 days
 	case "done":
@@ -134,12 +149,15 @@ func ParseThresholdDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// GetPromoteTarget returns the target stage when promoting a card from the given stage
-// as specified in the non-linear Stage-Übergangs-Map (P2.4).
-func GetPromoteTarget(stage string) (string, error) {
+// GetPromoteTarget returns the target stage when promoting a card from the given stage,
+// taking into account capacity constraints for the 'idea' stage as specified in the non-linear Stage-Übergangs-Map (P2.4).
+func GetPromoteTarget(stage string, hasCapacity bool, nowCount, nowLimit int) (string, error) {
 	stage = strings.ToLower(strings.TrimSpace(stage))
 	switch stage {
 	case "idea":
+		if hasCapacity && nowCount < nowLimit {
+			return "now", nil
+		}
 		return "soon", nil
 	case "soon":
 		return "now", nil
