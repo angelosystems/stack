@@ -531,26 +531,10 @@ func TestSageSteward_Sweep(t *testing.T) {
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
-	// Backup existing links for testBeadID to ensure our test link is the only one/first one found
-	var existingInits []string
-	rows, err := p.Query(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref = $1 AND kind = 'bead'", testBeadID)
-	if err == nil {
-		for rows.Next() {
-			var initID string
-			if rows.Scan(&initID) == nil {
-				existingInits = append(existingInits, initID)
-			}
-		}
-		rows.Close()
-	}
-	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE ref = $1 AND kind = 'bead'", testBeadID)
-
-	// Defer restoring them at the end of the test
-	defer func() {
-		for _, initID := range existingInits {
-			_, _ = p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1, 'bead', $2) ON CONFLICT DO NOTHING", initID, testBeadID)
-		}
-	}()
+	// Back up and clean up production links/events for the same bead during the test
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1", testBeadID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE (payload->>'workspace_id') = 'B842765043A04994B61AACF51E019956'")
+	defer p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ('sk-deck-operationalisierung', 'bead', $1) ON CONFLICT DO NOTHING", testBeadID)
 
 	// Create test initiative
 	_, err = p.Exec(ctx, `
@@ -573,8 +557,66 @@ func TestSageSteward_Sweep(t *testing.T) {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
-	// Trigger runSageSweepEx with onlyStuck = false
-	runSageSweepEx(ctx, p, false)
+	// 1. Create a temporary SQLite database for vibe-kanban
+	tmpFile, err := os.CreateTemp("", "vibe-kanban-sweep-test-*.sqlite")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	dbPath := tmpFile.Name()
+
+	// 2. Initialize schema
+	schema := `
+	CREATE TABLE workspaces (
+		id         BLOB PRIMARY KEY,
+		name       TEXT,
+		created_at TEXT,
+		task_id    BLOB,
+		archived   INTEGER DEFAULT 0
+	);
+	CREATE TABLE sessions (
+		id           BLOB PRIMARY KEY,
+		workspace_id BLOB
+	);
+	CREATE TABLE execution_processes (
+		id         BLOB PRIMARY KEY,
+		session_id BLOB,
+		status     TEXT,
+		exit_code  INTEGER,
+		started_at TEXT,
+		updated_at TEXT,
+		created_at TEXT,
+		run_reason TEXT
+	);
+	`
+	if err := exec.Command("sqlite3", dbPath, schema).Run(); err != nil {
+		t.Fatalf("failed to initialize sqlite schema: %v", err)
+	}
+
+	// 3. Insert SQLite fixtures
+	now := time.Now()
+	timeStr := now.UTC().Format("2006-01-02 15:04:05")
+
+	fixtures := fmt.Sprintf(`
+	INSERT INTO workspaces (id, name, created_at, task_id, archived) VALUES (x'B842765043A04994B61AACF51E019956', 'sol-st-ib5e', '%[1]s', x'cccccccc', 0);
+	INSERT INTO sessions (id, workspace_id) VALUES (x'31313131', x'B842765043A04994B61AACF51E019956');
+	INSERT INTO execution_processes (id, session_id, status, exit_code, started_at, updated_at, created_at, run_reason)
+	VALUES (x'32323232', x'31313131', 'failed', 1, '%[1]s', '%[1]s', '%[1]s', 'codingagent');
+	`, timeStr)
+
+	if err := exec.Command("sqlite3", dbPath, fixtures).Run(); err != nil {
+		t.Fatalf("failed to insert test fixtures: %v", err)
+	}
+
+	// Set VIBE_KANBAN_DB env variable
+	origVkDB := os.Getenv("VIBE_KANBAN_DB")
+	defer os.Setenv("VIBE_KANBAN_DB", origVkDB)
+	os.Setenv("VIBE_KANBAN_DB", dbPath)
+
+	// Trigger runSageSweep
+	_ = runSageSweep(p, true, false)
 
 	// Verify that the sage_action event was logged!
 	var exists bool
@@ -618,26 +660,10 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
-	// Backup existing links for testBeadID to ensure our test link is the only one/first one found
-	var existingInitsStuck []string
-	rows, err := p.Query(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref = $1 AND kind = 'bead'", testBeadID)
-	if err == nil {
-		for rows.Next() {
-			var initID string
-			if rows.Scan(&initID) == nil {
-				existingInitsStuck = append(existingInitsStuck, initID)
-			}
-		}
-		rows.Close()
-	}
-	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE ref = $1 AND kind = 'bead'", testBeadID)
-
-	// Defer restoring them at the end of the test
-	defer func() {
-		for _, initID := range existingInitsStuck {
-			_, _ = p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1, 'bead', $2) ON CONFLICT DO NOTHING", initID, testBeadID)
-		}
-	}()
+	// Back up and clean up production links/events for the same bead during the test
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE kind='bead' AND ref=$1", testBeadID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE (payload->>'workspace_id') = 'B842765043A04994B61AACF51E019956'")
+	defer p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ('sk-deck-operationalisierung', 'bead', $1) ON CONFLICT DO NOTHING", testBeadID)
 
 	// Create test initiative
 	_, err = p.Exec(ctx, `
@@ -660,9 +686,67 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
-	// Trigger runSageSweepEx with onlyStuck = true.
+	// 1. Create a temporary SQLite database for vibe-kanban
+	tmpFile, err := os.CreateTemp("", "vibe-kanban-sweep-test-*.sqlite")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	dbPath := tmpFile.Name()
+
+	// 2. Initialize schema
+	schema := `
+	CREATE TABLE workspaces (
+		id         BLOB PRIMARY KEY,
+		name       TEXT,
+		created_at TEXT,
+		task_id    BLOB,
+		archived   INTEGER DEFAULT 0
+	);
+	CREATE TABLE sessions (
+		id           BLOB PRIMARY KEY,
+		workspace_id BLOB
+	);
+	CREATE TABLE execution_processes (
+		id         BLOB PRIMARY KEY,
+		session_id BLOB,
+		status     TEXT,
+		exit_code  INTEGER,
+		started_at TEXT,
+		updated_at TEXT,
+		created_at TEXT,
+		run_reason TEXT
+	);
+	`
+	if err := exec.Command("sqlite3", dbPath, schema).Run(); err != nil {
+		t.Fatalf("failed to initialize sqlite schema: %v", err)
+	}
+
+	// 3. Insert SQLite fixtures
+	now := time.Now()
+	timeStr := now.UTC().Format("2006-01-02 15:04:05")
+
+	fixtures := fmt.Sprintf(`
+	INSERT INTO workspaces (id, name, created_at, task_id, archived) VALUES (x'B842765043A04994B61AACF51E019956', 'sol-st-ib5e', '%[1]s', x'cccccccc', 0);
+	INSERT INTO sessions (id, workspace_id) VALUES (x'31313131', x'B842765043A04994B61AACF51E019956');
+	INSERT INTO execution_processes (id, session_id, status, exit_code, started_at, updated_at, created_at, run_reason)
+	VALUES (x'32323232', x'31313131', 'failed', 1, '%[1]s', '%[1]s', '%[1]s', 'codingagent');
+	`, timeStr)
+
+	if err := exec.Command("sqlite3", dbPath, fixtures).Run(); err != nil {
+		t.Fatalf("failed to insert test fixtures: %v", err)
+	}
+
+	// Set VIBE_KANBAN_DB env variable
+	origVkDB := os.Getenv("VIBE_KANBAN_DB")
+	defer os.Setenv("VIBE_KANBAN_DB", origVkDB)
+	os.Setenv("VIBE_KANBAN_DB", dbPath)
+
+	// Trigger runSageSweep with onlyStuck = true.
 	// Since st-ib5e is failed (not running-and-stuck), no event should be logged.
-	runSageSweepEx(ctx, p, true)
+	_ = runSageSweep(p, true, true)
 
 	var exists bool
 	err = p.QueryRow(ctx, `
@@ -676,12 +760,12 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 	}
 
 	if exists {
-		t.Errorf("expected NO sage_action event to be logged for initiative %s after runSageSweepEx(onlyStuck=true) on a failed workspace, but one was logged", testInitiativeID)
+		t.Errorf("expected NO sage_action event to be logged for initiative %s after runSageSweep(onlyStuck=true) on a failed workspace, but one was logged", testInitiativeID)
 	}
 
-	// Trigger runSageSweepEx with onlyStuck = false.
+	// Trigger runSageSweep with onlyStuck = false.
 	// This should log the event since it processes everything.
-	runSageSweepEx(ctx, p, false)
+	_ = runSageSweep(p, true, false)
 
 	err = p.QueryRow(ctx, `
 		SELECT EXISTS(
