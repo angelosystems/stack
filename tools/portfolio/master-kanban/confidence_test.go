@@ -112,7 +112,7 @@ func TestLinkageConfidenceAndPromoteReady(t *testing.T) {
 
 	// 6. Test checkAndMoveToWatching Damping behavior
 	// (a) With low linkage confidence threshold forced to 100%, and completeness is < 100%:
-	// It should skip transitioning from 'now' to 'watching'.
+	// It should skip transitioning or proposing promotion.
 	os.Setenv("PORTFOLIO_CONFIDENCE_THRESHOLD", "100.0")
 	defer os.Unsetenv("PORTFOLIO_CONFIDENCE_THRESHOLD")
 
@@ -126,29 +126,52 @@ func TestLinkageConfidenceAndPromoteReady(t *testing.T) {
 		t.Errorf("expected initial stage to be 'now', got %q", currentStage)
 	}
 
+	// Clean up old events for this initiative first
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitID)
+
 	// Run checkAndMoveToWatching
 	checkAndMoveToWatching(ctx, p, testInitID)
 
-	// Verify that the stage remains 'now' (transition bypassed because confidence < 100.0%)
-	err = p.QueryRow(ctx, "SELECT stage FROM portfolio.initiative WHERE id = $1", testInitID).Scan(&currentStage)
+	// Verify that no sage_action or promote_damped event was logged for low confidence
+	var exists bool
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event
+			WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = 'all-beads-closed'
+		)
+	`, testInitID).Scan(&exists)
 	if err != nil {
-		t.Fatalf("failed to query initiative stage: %v", err)
+		t.Fatalf("failed to query initiative events: %v", err)
 	}
-	if pct < 100.0 && currentStage != "now" {
-		t.Errorf("expected stage to remain 'now' due to bypassed/damped transition (pct=%.2f%%, threshold=100%%), got %q", pct, currentStage)
+	if exists {
+		t.Errorf("expected no 'sage_action' event when threshold is 100%% and completeness < 100%%")
 	}
 
 	// (b) With linkage confidence threshold forced to 0.0%:
-	// It should proceed and move the stage to 'watching'.
+	// It should proceed and propose stage promotion (or log promote_damped if global completeness is low).
 	os.Setenv("PORTFOLIO_CONFIDENCE_THRESHOLD", "0.0")
+
+	// Set getCaptureCompletenessFunc to high so it proposes stage promotion
+	origFunc := getCaptureCompletenessFunc
+	getCaptureCompletenessFunc = func(ctx context.Context, p *pgxpool.Pool) (float64, error) {
+		return 85.0, nil
+	}
+	defer func() { getCaptureCompletenessFunc = origFunc }()
+
 	checkAndMoveToWatching(ctx, p, testInitID)
 
-	err = p.QueryRow(ctx, "SELECT stage FROM portfolio.initiative WHERE id = $1", testInitID).Scan(&currentStage)
+	// Verify that a sage_action with classification 'all-beads-closed' was logged
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event
+			WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = 'all-beads-closed'
+		)
+	`, testInitID).Scan(&exists)
 	if err != nil {
-		t.Fatalf("failed to query initiative stage: %v", err)
+		t.Fatalf("failed to query initiative events: %v", err)
 	}
-	if currentStage != "watching" {
-		t.Errorf("expected stage to become 'watching' when threshold is 0.0%%, got %q", currentStage)
+	if !exists {
+		t.Errorf("expected 'sage_action' event with 'all-beads-closed' when threshold is 0.0%%")
 	}
 }
 
