@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -522,18 +523,42 @@ func TestSageSteward_Sweep(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
-	// Setup mock initiative and link for testing the sweep
 	testBeadID := "st-ib5e"
 	testInitiativeID := "init-sage-test-sweep"
 
-	// Clean up any old test data
+	// Clean up other test data
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
-	// Clean up other links to st-ib5e during this test to avoid non-deterministic SELECT in runSageSweep
+	// Clean up any existing sage_action events for the target workspace ID so the exists check doesn't skip logging
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE kind = 'sage_action' AND (payload->>'workspace_id') = 'B842765043A04994B61AACF51E019956'")
+
+	// Save existing links for st-ib5e to restore them later
+	rows, err := p.Query(ctx, "SELECT initiative_id, kind FROM portfolio.initiative_link WHERE ref = $1", testBeadID)
+	type savedLink struct {
+		initID string
+		kind   string
+	}
+	var saved []savedLink
+	if err == nil {
+		for rows.Next() {
+			var sl savedLink
+			if rows.Scan(&sl.initID, &sl.kind) == nil {
+				saved = append(saved, sl)
+			}
+		}
+		rows.Close()
+	}
+	// Delete other links temporarily
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE ref = $1", testBeadID)
-	defer p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ('sk-deck-operationalisierung', 'bead', 'st-ib5e') ON CONFLICT DO NOTHING")
+
+	defer func() {
+		// Restore saved links
+		for _, sl := range saved {
+			_, _ = p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", sl.initID, sl.kind, testBeadID)
+		}
+	}()
 
 	// Create test initiative
 	_, err = p.Exec(ctx, `
@@ -556,8 +581,8 @@ func TestSageSteward_Sweep(t *testing.T) {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
-	// Trigger runSageSweep
-	_ = runSageSweep(p, false, false)
+	// Trigger runSageSweepEx with onlyStuck = false
+	runSageSweepEx(ctx, p, false)
 
 	// Verify that the sage_action event was logged!
 	var exists bool
@@ -596,14 +621,39 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 	testBeadID := "st-ib5e"
 	testInitiativeID := "init-sage-test-sweep-stuck"
 
-	// Clean up any old test data
+	// Clean up other test data
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
-	// Clean up other links to st-ib5e during this test to avoid non-deterministic SELECT in runSageSweep
+	// Clean up any existing sage_action events for the target workspace ID so the exists check doesn't skip logging
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE kind = 'sage_action' AND (payload->>'workspace_id') = 'B842765043A04994B61AACF51E019956'")
+
+	// Save existing links for st-ib5e to restore them later
+	rows, err := p.Query(ctx, "SELECT initiative_id, kind FROM portfolio.initiative_link WHERE ref = $1", testBeadID)
+	type savedLink struct {
+		initID string
+		kind   string
+	}
+	var saved []savedLink
+	if err == nil {
+		for rows.Next() {
+			var sl savedLink
+			if rows.Scan(&sl.initID, &sl.kind) == nil {
+				saved = append(saved, sl)
+			}
+		}
+		rows.Close()
+	}
+	// Delete other links temporarily
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE ref = $1", testBeadID)
-	defer p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ('sk-deck-operationalisierung', 'bead', 'st-ib5e') ON CONFLICT DO NOTHING")
+
+	defer func() {
+		// Restore saved links
+		for _, sl := range saved {
+			_, _ = p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", sl.initID, sl.kind, testBeadID)
+		}
+	}()
 
 	// Create test initiative
 	_, err = p.Exec(ctx, `
@@ -663,3 +713,314 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 		t.Errorf("expected sage_action event to be logged for initiative %s after runSageSweepEx(onlyStuck=false), but it was not", testInitiativeID)
 	}
 }
+
+func TestInitiativeChecks(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	// 1. Setup mock initiative and link for testing the all-beads-closed promotion proposal
+	testBeadID := "st-ib5e" // st-ib5e is already closed in beads DB!
+	testInitiativeID := "init-test-all-beads-closed"
+
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
+		VALUES ($1, 'Test All Beads Closed Initiative', 'now', false, 'stayawesome', 'plan_file')
+	`, testInitiativeID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	// Create test link to the bead
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+		VALUES ($1, 'bead', $2)
+	`, testInitiativeID, testBeadID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative link: %v", err)
+	}
+
+	// 2. Setup mock initiative for backlog-faeule (rot) check
+	rotInitiativeID := "init-test-backlog-rot"
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", rotInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", rotInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", rotInitiativeID)
+
+	// Create backlog-rot initiative with updated_at/created_at set to 15 days ago
+	oldTime := time.Now().Add(-15 * 24 * time.Hour)
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend, created_at, updated_at)
+		VALUES ($1, 'Test Backlog Rot Initiative', 'idea', false, 'stayawesome', 'plan_file', $2, $2)
+	`, rotInitiativeID, oldTime)
+	if err != nil {
+		t.Fatalf("failed to insert test backlog rot initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", rotInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", rotInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", rotInitiativeID)
+
+	// 3. Trigger runInitiativeChecks
+	runInitiativeChecks(ctx, p, false)
+
+	// Verify all-beads-closed proposed stage-promotion event was logged!
+	var exists bool
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event 
+			WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'classification' = 'all-beads-closed'
+		)
+	`, testInitiativeID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("failed to query all-beads-closed event: %v", err)
+	}
+	if !exists {
+		t.Errorf("expected sage_action (classification=all-beads-closed) event to be logged for initiative %s, but it was not", testInitiativeID)
+	}
+
+	// Verify backlog-faeule proposed archive event was logged!
+	var rotExists bool
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event 
+			WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'classification' = 'backlog-faeule'
+		)
+	`, rotInitiativeID).Scan(&rotExists)
+	if err != nil {
+		t.Fatalf("failed to query backlog-faeule event: %v", err)
+	}
+	if !rotExists {
+		t.Errorf("expected sage_action (classification=backlog-faeule) event to be logged for initiative %s, but it was not", rotInitiativeID)
+	}
+
+	// Verify backlog-faeule commented event was logged!
+	var commentExists bool
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event 
+			WHERE initiative_id = $1 AND kind = 'commented' AND payload->>'title' LIKE '%Backlog-Fäule%'
+		)
+	`, rotInitiativeID).Scan(&commentExists)
+	if err != nil {
+		t.Fatalf("failed to query backlog-faeule comment: %v", err)
+	}
+	if !commentExists {
+		t.Errorf("expected commented event to be logged for initiative %s, but it was not", rotInitiativeID)
+	}
+
+	// 4. Cooldown Check
+	// A second run of runInitiativeChecks should NOT create duplicate events due to the cooldown mechanism
+	runInitiativeChecks(ctx, p, false)
+
+	var allBeadsClosedEventCount int
+	err = p.QueryRow(ctx, `
+		SELECT count(*) FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'classification' = 'all-beads-closed'
+	`, testInitiativeID).Scan(&allBeadsClosedEventCount)
+	if err != nil {
+		t.Fatalf("failed to query all-beads-closed event count: %v", err)
+	}
+	if allBeadsClosedEventCount != 1 {
+		t.Errorf("expected exactly 1 sage_action event due to cooldown, got %d", allBeadsClosedEventCount)
+	}
+
+	var backlogRotEventCount int
+	err = p.QueryRow(ctx, `
+		SELECT count(*) FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'classification' = 'backlog-faeule'
+	`, rotInitiativeID).Scan(&backlogRotEventCount)
+	if err != nil {
+		t.Fatalf("failed to query backlog-faeule event count: %v", err)
+	}
+	if backlogRotEventCount != 1 {
+		t.Errorf("expected exactly 1 backlog-faeule sage_action event due to cooldown, got %d", backlogRotEventCount)
+	}
+	}
+
+	func TestLiveGeldSchutz_SC7(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	testBeadID := "st-ib5e" // already closed in beads DB
+	testInitiativeID := "init-test-live-geld-protection"
+
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
+		VALUES ($1, 'Test Live Geld Protection Initiative', 'now', false, 'quantbot', 'plan_file')
+	`, testInitiativeID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+		VALUES ($1, 'bead', $2)
+	`, testInitiativeID, testBeadID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative link: %v", err)
+	}
+
+	// Trigger checks
+	runInitiativeChecks(ctx, p, false)
+
+	// Verify that stage-promotion WAS NOT logged
+	var promoExists bool
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event
+			WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'proposed_action' = 'stage-promotion'
+		)
+	`, testInitiativeID).Scan(&promoExists)
+	if err != nil {
+		t.Fatalf("failed to query stage-promotion: %v", err)
+	}
+	if promoExists {
+		t.Errorf("expected NO stage-promotion event to be logged for quantbot initiative under Live-Geld-Schutz")
+	}
+
+	// Verify that escalate WAS logged instead
+	var proposedAction, classification, reason string
+	err = p.QueryRow(ctx, `
+		SELECT 
+			payload->>'proposed_action',
+			payload->>'classification',
+			payload->>'reason'
+		FROM portfolio.initiative_event
+		WHERE initiative_id = $1 AND kind = 'sage_action'
+		ORDER BY at DESC LIMIT 1
+	`, testInitiativeID).Scan(&proposedAction, &classification, &reason)
+	if err != nil {
+		t.Fatalf("failed to query escalation event: %v", err)
+	}
+
+	if proposedAction != "escalate" {
+		t.Errorf("expected proposed_action to be 'escalate', got %q", proposedAction)
+	}
+	if classification != "all-beads-closed-live-geld" {
+		t.Errorf("expected classification to be 'all-beads-closed-live-geld', got %q", classification)
+	}
+	if !strings.Contains(reason, "Live-Geld-Schutz") {
+		t.Errorf("expected reason to contain 'Live-Geld-Schutz', got %q", reason)
+	}
+}
+
+func TestStageTransitionMap(t *testing.T) {
+	// 1. Test getPromoteTarget helper function
+	testCases := []struct {
+		stage    string
+		expected string
+	}{
+		{"idea", "soon"},
+		{"soon", "now"},
+		{"now", "watching"},
+		{"watching", "done"},
+		{"done", ""},
+		{"invalid", ""},
+	}
+
+	for _, tc := range testCases {
+		got := getPromoteTarget(tc.stage)
+		if got != tc.expected {
+			t.Errorf("getPromoteTarget(%q) = %q; expected %q", tc.stage, got, tc.expected)
+		}
+	}
+
+	// 2. Integration test for promoting from 'watching' to 'done'
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	testBeadID := "st-ib5e" // st-ib5e is already closed in beads DB!
+	testInitiativeID := "init-test-watching-to-done"
+
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
+		VALUES ($1, 'Test Watching to Done Initiative', 'watching', false, 'stayawesome', 'plan_file')
+	`, testInitiativeID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+		VALUES ($1, 'bead', $2)
+	`, testInitiativeID, testBeadID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative link: %v", err)
+	}
+
+	// Trigger runInitiativeChecks
+	runInitiativeChecks(ctx, p, false)
+
+	// Verify all-beads-closed proposed stage-promotion event was logged with 'done' target!
+	var toStage string
+	err = p.QueryRow(ctx, `
+		SELECT payload->>'to_stage' FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'classification' = 'all-beads-closed'
+		ORDER BY at DESC LIMIT 1
+	`, testInitiativeID).Scan(&toStage)
+	if err != nil {
+		t.Fatalf("failed to query logged event for watching-to-done: %v", err)
+	}
+	if toStage != "done" {
+		t.Errorf("expected to_stage to be 'done' for watching-to-done promotion, got %q", toStage)
+	}
+}
+

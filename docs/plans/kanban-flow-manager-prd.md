@@ -89,6 +89,15 @@ alle Beads closed              →  Stage-Promotion vorschlagen (move-Endpoint)
 Backlog-Fäule / veraltet       →  „Review: noch relevant?"-Event, ggf. Archiv-Vorschlag
 ```
 Jede Aktion = ein Karten-Event. Mensch bestätigt jede Mutation per Klick.
+
+#### Stage-Übergangs-Map (nicht-lineare Förderung)
+Da die Stages nicht rein linear bzw. sequentiell verlaufen (z.B. kann von verschiedenen Vorstufen gearbeitet werden), ist das genaue Promote-Ziel (`to_stage`) abhängig von der aktuellen Stage der Initiative:
+- `idea`       → `soon`       (Idee wird zu einer konkret eingeplanten Initiative)
+- `soon`       → `now`        (Eingeplante Initiative wird aktiv in Arbeit genommen)
+- `now`        → `watching`   (Aktive Arbeit beendet, Ergebnisse werden beobachtet/verifiziert)
+- `watching`   → `done`       (Beobachtung erfolgreich abgeschlossen, Initiative ist done)
+- `done`       → (kein weiteres Ziel, bereits am Endpunkt)
+
 **Alternative verworfen:** Auto-Promote bei 100% Bead-Close ohne Confirm —
 verworfen, weil „alle Beads closed" nicht immer „Ziel erreicht" heißt (Beads
 können als no-changes/Duplikat geschlossen sein, wie diese Session mehrfach

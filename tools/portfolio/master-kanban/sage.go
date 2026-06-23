@@ -272,6 +272,14 @@ func cmdSage() *cobra.Command {
 						continue
 					}
 
+					var firma string
+					_ = p.QueryRow(ctx, `SELECT firma FROM portfolio.initiative WHERE id=$1`, initiativeID).Scan(&firma)
+
+					if firma == "quantbot" && (proposedAction == "re-dispatch" || proposedAction == "stage-promotion") {
+						proposedAction = "escalate"
+						reason = "Live-Geld-Schutz: Re-dispatch verweigert. Trading-Path-Beads dürfen nur eskaliert werden."
+					}
+
 					// Define atomic action callback
 					actionFn := func(tx pgx.Tx, healCount int) error {
 						// Build payload

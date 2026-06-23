@@ -46,139 +46,6 @@ func quantbotPool() (*pgxpool.Pool, error) {
 	return p, nil
 }
 
-type HostCapacityGo struct {
-	CPU             float64 `json:"cpu"`
-	RAM             float64 `json:"ram"`
-	Disk            float64 `json:"disk"`
-	Swap            float64 `json:"swap"`
-	PSICPU          float64 `json:"psi_cpu"`
-	PSIMemory       float64 `json:"psi_memory"`
-	PSIIO           float64 `json:"psi_io"`
-	Headroom        float64 `json:"headroom"`
-	GovernorVerdict string  `json:"governor_verdict"`
-	CommittedRatio  float64 `json:"committed_ratio"`
-	SwapTrend       string  `json:"swap_trend"`
-	AgeSeconds      int     `json:"age_seconds"`
-	Liveness        string  `json:"liveness"`
-}
-
-func getHostCapacityGo(ctx context.Context) (*HostCapacityGo, error) {
-	qbp, err := quantbotPool()
-	if err != nil {
-		return nil, fmt.Errorf("quantbot database connection failed: %w", err)
-	}
-
-	rows, err := qbp.Query(ctx, `
-		SELECT DISTINCT ON (name) name, published_at, payload->>'value' AS value 
-		FROM public.kpi_events 
-		WHERE owner='infra' AND name IN ('cpu_nuernberg', 'ram_nuernberg', 'disk_nuernberg') 
-		ORDER BY name, published_at DESC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query kpi_events: %w", err)
-	}
-	defer rows.Close()
-
-	var cpu, ram, disk float64
-	var maxPublishedAt time.Time
-
-	for rows.Next() {
-		var name string
-		var pubAt time.Time
-		var valStr string
-		if err := rows.Scan(&name, &pubAt, &valStr); err != nil {
-			return nil, fmt.Errorf("failed to scan kpi_event row: %w", err)
-		}
-		var val float64
-		fmt.Sscanf(valStr, "%f", &val)
-
-		if pubAt.After(maxPublishedAt) {
-			maxPublishedAt = pubAt
-		}
-
-		switch name {
-		case "cpu_nuernberg":
-			cpu = val
-		case "ram_nuernberg":
-			ram = val
-		case "disk_nuernberg":
-			disk = val
-		}
-	}
-
-	// Falls keine Metriken gefunden wurden, Fallback auf plausible Standardwerte
-	if maxPublishedAt.IsZero() {
-		cpu = 42.5
-		ram = 71.2
-		disk = 82.1
-		maxPublishedAt = time.Now()
-	}
-
-	// Berechnungen für abgeleitete Werte
-	headroom := 100.0 - ram
-
-	// Governor Verdict
-	governorVerdict := "healthy"
-	if ram >= 90.0 || cpu >= 95.0 {
-		governorVerdict = "freeze"
-	}
-
-	// Swap
-	swap := (ram - 55.0) * 1.8
-	if swap < 5.0 {
-		swap = 5.0
-	} else if swap > 85.0 {
-		swap = 85.0
-	}
-
-	// PSI
-	psiCpu := cpu * 0.12
-	psiMem := (ram - 45.0) * 0.35
-	if psiMem < 0 {
-		psiMem = 0
-	}
-	psiIo := (disk - 50.0) * 0.08
-	if psiIo < 0 {
-		psiIo = 0
-	}
-
-	// Freeze Marge (committed_ratio, swap_trend)
-	committedRatio := ram * 1.05 / 100.0
-	swapTrend := "stable"
-	if ram > 75.0 {
-		swapTrend = "rising"
-	} else if ram < 60.0 {
-		swapTrend = "falling"
-	}
-
-	// Liveness & Age
-	ageSec := int(time.Now().Sub(maxPublishedAt).Seconds())
-	if ageSec < 0 {
-		ageSec = 0
-	}
-	liveness := "alive"
-	if ageSec >= 60 {
-		liveness = "dead"
-	}
-
-	return &HostCapacityGo{
-		CPU:             cpu,
-		RAM:             ram,
-		Disk:            disk,
-		Swap:            swap,
-		PSICPU:          psiCpu,
-		PSIMemory:       psiMem,
-		PSIIO:           psiIo,
-		Headroom:        headroom,
-		GovernorVerdict: governorVerdict,
-		CommittedRatio:  committedRatio,
-		SwapTrend:       swapTrend,
-		AgeSeconds:      ageSec,
-		Liveness:        liveness,
-	}, nil
-}
-
-// pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
 type pgxRows interface {
 	Next() bool
 	Scan(dest ...any) error
@@ -2070,20 +1937,51 @@ func cmdServe() *cobra.Command {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 
-				var lastRun time.Time
-				var status string
-				var errMsg *string
+				var stewardLastRun, managerLastRun time.Time
+				var stewardStatus, managerStatus string
+				var stewardErrMsg, managerErrMsg *string
+
 				err := p.QueryRow(r.Context(),
 					`SELECT last_run, status, error_message FROM portfolio.sage_status WHERE id = 'sage-steward'`).
-					Scan(&lastRun, &status, &errMsg)
+					Scan(&stewardLastRun, &stewardStatus, &stewardErrMsg)
 				if err != nil {
-					lastRun = time.Now()
-					status = "unknown"
+					stewardLastRun = time.Now()
+					stewardStatus = "unknown"
 				}
 
-				// If last run is older than 30 seconds, it's an alarm!
-				if time.Since(lastRun) > 30*time.Second {
-					status = "alarm"
+				err = p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.sage_status WHERE id = 'kanban-flow-manager'`).
+					Scan(&managerLastRun, &managerStatus, &managerErrMsg)
+				if err != nil {
+					managerLastRun = time.Now()
+					managerStatus = "unknown"
+				}
+
+				// If either last run is older than 30 seconds, it's an alarm!
+				stewardStale := time.Since(stewardLastRun) > 30*time.Second
+				managerStale := time.Since(managerLastRun) > 30*time.Second
+
+				aggregateStatus := "healthy"
+				if stewardStatus == "alarm" || managerStatus == "alarm" || stewardStale || managerStale {
+					aggregateStatus = "alarm"
+				}
+
+				oldestLastRun := stewardLastRun
+				if managerLastRun.Before(oldestLastRun) {
+					oldestLastRun = managerLastRun
+				}
+
+				var aggregateErrMsg *string
+				if stewardErrMsg != nil {
+					aggregateErrMsg = stewardErrMsg
+				} else if managerErrMsg != nil {
+					aggregateErrMsg = managerErrMsg
+				} else if stewardStale {
+					staleStr := "sage-steward run is stale"
+					aggregateErrMsg = &staleStr
+				} else if managerStale {
+					staleStr := "kanban-flow-manager run is stale"
+					aggregateErrMsg = &staleStr
 				}
 
 				dangling, err := getDanglingWorkspaces()
@@ -2092,9 +1990,9 @@ func cmdServe() *cobra.Command {
 				}
 
 				resp := map[string]any{
-					"last_run":            lastRun,
-					"status":              status,
-					"error_message":       errMsg,
+					"last_run":            oldestLastRun,
+					"status":              aggregateStatus,
+					"error_message":       aggregateErrMsg,
 					"dangling_count":      len(dangling),
 					"dangling_baseline":   4,
 					"outage_simulated":    sageOutageSimulated,
@@ -2130,14 +2028,14 @@ func cmdServe() *cobra.Command {
 					_, _ = p.Exec(r.Context(),
 						`UPDATE portfolio.sage_status 
 						 SET last_run = now() - interval '10 minutes', status = 'alarm' 
-						 WHERE id = 'sage-steward'`)
+						 WHERE id IN ('sage-steward', 'kanban-flow-manager')`)
 				} else {
 					sageOutageSimulated = false
 					// Restore healthy status
 					_, _ = p.Exec(r.Context(),
 						`UPDATE portfolio.sage_status 
 						 SET last_run = now(), status = 'healthy', error_message = NULL 
-						 WHERE id = 'sage-steward'`)
+						 WHERE id IN ('sage-steward', 'kanban-flow-manager')`)
 				}
 
 				w.Header().Set("Content-Type", "application/json")
@@ -2971,6 +2869,21 @@ func getWIPLimits(firma string) (int, int) {
 	return nowLimit, soonLimit
 }
 
+func getPromoteTarget(currentStage string) string {
+	switch currentStage {
+	case "idea":
+		return "soon"
+	case "soon":
+		return "now"
+	case "now":
+		return "watching"
+	case "watching":
+		return "done"
+	default:
+		return ""
+	}
+}
+
 func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID string) {
 	rows, err := p.Query(ctx, `SELECT ref FROM portfolio.initiative_link WHERE initiative_id=$1 AND kind='bead'`, initiativeID)
 	if err != nil {
@@ -3002,11 +2915,55 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 	}
 
 	if openCount == 0 {
-		_, err := p.Exec(ctx, `UPDATE portfolio.initiative SET stage='watching' WHERE id=$1 AND stage='now'`, initiativeID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error updating stage to watching: %v\n", err)
-		} else {
-			fmt.Printf("✓ Auto-Stage: %s moved to watching (all beads closed)\n", initiativeID)
+		var firma string
+		var currentStage string
+		_ = p.QueryRow(ctx, `SELECT firma, stage FROM portfolio.initiative WHERE id=$1`, initiativeID).Scan(&firma, &currentStage)
+
+		classification := "all-beads-closed"
+		proposedAction := "stage-promotion"
+		toStage := getPromoteTarget(currentStage)
+		if toStage == "" {
+			return
+		}
+		reason := fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu %q).", toStage)
+
+		if firma == "quantbot" {
+			classification = "all-beads-closed-live-geld"
+			proposedAction = "escalate"
+			toStage = ""
+			reason = "Live-Geld-Schutz: Alle verknüpften Beads geschlossen, autonomer Promote-Vorschlag verweigert — Karte wird geflaggt und eskaliert."
+		}
+
+		var exists bool
+		_ = p.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM portfolio.initiative_event
+				WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = $2
+			)
+		`, initiativeID, classification).Scan(&exists)
+		if !exists {
+			payloadMap := map[string]any{
+				"classification":  classification,
+				"proposed_action": proposedAction,
+				"reason":          reason,
+			}
+			if toStage != "" {
+				payloadMap["to_stage"] = toStage
+			}
+			payloadBytes, _ := json.Marshal(payloadMap)
+			_, err = p.Exec(ctx, `
+				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+			`, initiativeID, string(payloadBytes))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error logging sage_action for all beads closed: %v\n", err)
+			} else {
+				if firma == "quantbot" {
+					fmt.Printf("✓ Live-Geld-Schutz: Escalated initiative %s because all beads are closed\n", initiativeID)
+				} else {
+					fmt.Printf("✓ Proposed stage promotion for initiative %s because all beads are closed\n", initiativeID)
+				}
+			}
 		}
 	}
 }
@@ -3802,6 +3759,10 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 		}
 	}
 
+	if !onlyStuckCheck {
+		runInitiativeChecks(ctx, p, printToStdout)
+	}
+
 	return nil
 }
 
@@ -3809,11 +3770,226 @@ func runSageSweepEx(ctx context.Context, p *pgxpool.Pool, onlyStuck bool) {
 	_ = runSageSweep(p, false, onlyStuck)
 }
 
+func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout bool) {
+	var runErr error
+
+	cooldownHours := 1
+	if envVal := os.Getenv("MANAGER_COOLDOWN_HOURS"); envVal != "" {
+		if val, err := strconv.Atoi(envVal); err == nil {
+			cooldownHours = val
+		}
+	}
+
+	// 1. "alle Beads closed" check:
+	rows, err := p.Query(ctx, `
+		SELECT id, stage, title, firma FROM portfolio.initiative 
+		WHERE stage <> 'done' AND archived_at IS NULL
+	`)
+	if err != nil {
+		runErr = fmt.Errorf("query active initiatives failed: %w", err)
+	} else {
+		type InitInfo struct {
+			ID, Stage, Title, Firma string
+		}
+		var activeInits []InitInfo
+		for rows.Next() {
+			var ii InitInfo
+			if rows.Scan(&ii.ID, &ii.Stage, &ii.Title, &ii.Firma) == nil {
+				activeInits = append(activeInits, ii)
+			}
+		}
+		rows.Close()
+
+		for _, init := range activeInits {
+			linkRows, err := p.Query(ctx, "SELECT ref FROM portfolio.initiative_link WHERE initiative_id=$1 AND kind='bead'", init.ID)
+			if err != nil {
+				continue
+			}
+			var beads []string
+			for linkRows.Next() {
+				var ref string
+				if linkRows.Scan(&ref) == nil {
+					beads = append(beads, ref)
+				}
+			}
+			linkRows.Close()
+
+			if len(beads) == 0 {
+				continue
+			}
+
+			sp, err := solartownPool()
+			if err != nil {
+				continue
+			}
+			var openCount int
+			err = sp.QueryRow(ctx, `SELECT count(*) FROM beads.issues WHERE id=ANY($1) AND status<>'closed' AND deleted_at IS NULL`, beads).Scan(&openCount)
+			if err == nil && openCount == 0 {
+				classification := "all-beads-closed"
+				proposedAction := "stage-promotion"
+				toStage := getPromoteTarget(init.Stage)
+				if toStage == "" {
+					continue
+				}
+				reason := fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu %q).", toStage)
+
+				if init.Firma == "quantbot" {
+					classification = "all-beads-closed-live-geld"
+					proposedAction = "escalate"
+					toStage = ""
+					reason = "Live-Geld-Schutz: Alle verknüpften Beads geschlossen, autonomer Promote-Vorschlag verweigert — Karte wird geflaggt und eskaliert."
+				}
+
+				var exists bool
+				_ = p.QueryRow(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM portfolio.initiative_event
+						WHERE initiative_id = $1 
+						  AND kind = 'sage_action' 
+						  AND (payload->>'classification') = $2
+						  AND at > now() - ($3 * interval '1 hour')
+					)
+				`, init.ID, classification, cooldownHours).Scan(&exists)
+				if !exists {
+					payloadMap := map[string]any{
+						"classification":  classification,
+						"proposed_action": proposedAction,
+						"reason":          reason,
+					}
+					if toStage != "" {
+						payloadMap["to_stage"] = toStage
+					}
+					payloadBytes, _ := json.Marshal(payloadMap)
+					_, err = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+					`, init.ID, string(payloadBytes))
+					if err != nil {
+						if printToStdout {
+							fmt.Fprintf(os.Stderr, " -> Error logging sage_action for all beads closed: %v\n", err)
+						}
+					} else {
+						if printToStdout {
+							if init.Firma == "quantbot" {
+								fmt.Printf(" -> Live-Geld-Schutz: Escalated initiative %s because all beads are closed\n", init.ID)
+							} else {
+								fmt.Printf(" -> Proposed stage promotion for initiative %s because all beads are closed\n", init.ID)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. "Backlog-Fäule" check:
+	backlogRows, err := p.Query(ctx, `
+		SELECT id, title, COALESCE(updated_at, created_at) FROM portfolio.initiative
+		WHERE stage = 'idea' AND archived_at IS NULL
+	`)
+	if err != nil && runErr == nil {
+		runErr = fmt.Errorf("query backlog initiatives failed: %w", err)
+	} else if err == nil {
+		type BacklogInfo struct {
+			ID, Title string
+			BaseTime  time.Time
+		}
+		var backlogItems []BacklogInfo
+		for backlogRows.Next() {
+			var bi BacklogInfo
+			if backlogRows.Scan(&bi.ID, &bi.Title, &bi.BaseTime) == nil {
+				backlogItems = append(backlogItems, bi)
+			}
+		}
+		backlogRows.Close()
+
+		for _, item := range backlogItems {
+			latestEventTime := item.BaseTime
+			var maxEventTime *time.Time
+			_ = p.QueryRow(ctx, "SELECT max(at) FROM portfolio.initiative_event WHERE initiative_id = $1", item.ID).Scan(&maxEventTime)
+			if maxEventTime != nil && maxEventTime.After(latestEventTime) {
+				latestEventTime = *maxEventTime
+			}
+
+			if time.Since(latestEventTime) > 14*24*time.Hour {
+				var exists bool
+				_ = p.QueryRow(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM portfolio.initiative_event
+						WHERE initiative_id = $1 
+						  AND kind = 'sage_action' 
+						  AND (payload->>'classification') = 'backlog-faeule'
+						  AND at > now() - ($2 * interval '1 hour')
+					)
+				`, item.ID, cooldownHours).Scan(&exists)
+				if !exists {
+					payloadBytes, _ := json.Marshal(map[string]any{
+						"classification":  "backlog-faeule",
+						"proposed_action": "archive",
+						"reason":          "Review: noch relevant? (Backlog-Fäule nach 14 Tagen Inaktivität)",
+					})
+					_, err = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+					`, item.ID, string(payloadBytes))
+					
+					commentPayload, _ := json.Marshal(map[string]any{
+						"title": "Review: noch relevant? (Backlog-Fäule nach 14 Tagen Inaktivität)",
+					})
+					_, _ = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						VALUES ($1, 'commented', 'sage', $2, 'sage')
+					`, item.ID, string(commentPayload))
+
+					if err != nil {
+						if printToStdout {
+							fmt.Fprintf(os.Stderr, " -> Error logging backlog-faeule for %s: %v\n", item.ID, err)
+						}
+					} else {
+						if printToStdout {
+							fmt.Printf(" -> Logged backlog-faeule for initiative %s\n", item.ID)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Update Kanban Flow Manager heartbeat in database
+	statusVal := "healthy"
+	var errMsg *string
+	if runErr != nil {
+		statusVal = "alarm"
+		errStr := runErr.Error()
+		errMsg = &errStr
+	}
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+		VALUES ('kanban-flow-manager', now(), $1, $2)
+		ON CONFLICT (id) DO UPDATE SET
+			last_run = EXCLUDED.last_run,
+			status = EXCLUDED.status,
+			error_message = EXCLUDED.error_message
+	`, statusVal, errMsg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error updating kanban-flow-manager status: %v\n", err)
+	}
+}
+
 func startSageSteward(p *pgxpool.Pool) {
 	// Initialize status in db on startup
 	_, _ = p.Exec(context.Background(),
 		`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
 		 VALUES ('sage-steward', now(), 'healthy', NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    error_message = EXCLUDED.error_message`)
+
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+		 VALUES ('kanban-flow-manager', now(), 'healthy', NULL)
 		 ON CONFLICT (id) DO UPDATE SET
 		    last_run = EXCLUDED.last_run,
 		    status = EXCLUDED.status,
@@ -3846,6 +4022,8 @@ func startSageSteward(p *pgxpool.Pool) {
 				// Periodic: run stuck-only sweep
 				isStuckSweep = true
 				sweepErr = runSageSweep(p, false, true)
+				// Periodischer Lauf des Managers
+				runInitiativeChecks(context.Background(), p, false)
 			}
 
 			statusVal := "healthy"
