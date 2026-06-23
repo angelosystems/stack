@@ -457,16 +457,30 @@ func runManagerSweep(p *pgxpool.Pool) error {
 				if strings.ToLower(confidence) != "low" {
 					nowCount := wipCounts[init.firma]
 					targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
-					actions = []ProposalAction{
-						{
-							Label:    proposedAction,
-							Endpoint: "/api/move",
-							Method:   "POST",
-							Payload: map[string]any{
-								"id":    init.id,
-								"stage": targetStage,
+					if init.firma == "quantbot" {
+						actions = []ProposalAction{
+							{
+								Label:    "Eskalieren",
+								Endpoint: "/api/escalate",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":     init.id,
+									"reason": "Eskalation wegen Promote-Reife (Live-Geld-Schutz)",
+								},
 							},
-						},
+						}
+					} else {
+						actions = []ProposalAction{
+							{
+								Label:    proposedAction,
+								Endpoint: "/api/move",
+								Method:   "POST",
+								Payload: map[string]any{
+									"id":    init.id,
+									"stage": targetStage,
+								},
+							},
+						}
 					}
 				}
 
