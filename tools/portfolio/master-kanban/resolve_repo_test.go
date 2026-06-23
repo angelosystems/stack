@@ -244,9 +244,9 @@ func TestDispatchHack(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
-	// Setup mock vk-delegate script
+	// Create mock vk-delegate script
+	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440001"
 	mockScriptPath := filepath.Join(t.TempDir(), "vk-delegate")
-	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440000"
 	scriptContent := fmt.Sprintf(`#!/bin/sh
 echo "workspace_id:        %s"
 echo "execution_process:   550e8400-e29b-41d4-a716-446655440001"
@@ -257,7 +257,7 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 		t.Fatalf("Failed to write mock script: %v", err)
 	}
 
-	// Override vkDelegatePath
+	// Override the vk-delegate path used by the handler
 	oldVkPath := vkDelegatePath
 	vkDelegatePath = mockScriptPath
 	defer func() {
@@ -298,7 +298,7 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		t.Fatalf("expected status 200, got %d, body: %s", resp.StatusCode, w.Body.String())
 	}
 
 	var result struct {
