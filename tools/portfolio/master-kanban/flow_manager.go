@@ -166,6 +166,17 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			}
 		}
 
+		// Check if lower layers (Reactor, vk-Sage) are engaged (MUST-FIX Nygard/Newman)
+		engaged, reason, err := isLowerLayerEngaged(ctx, p, init.ID, beads, workspaces)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ Error checking lower layer engagement for card %s: %v\n", init.ID, err)
+			continue
+		}
+		if engaged {
+			fmt.Printf("Skipping card %s (%s, Stage: %s, Firma: %s) because lower layers are engaged: %s\n\n", init.ID, init.Title, init.Stage, init.Firma, reason)
+			continue
+		}
+
 		// C. Get recent events
 		eventRows, err := p.Query(ctx, `
 			SELECT kind, source_backend, COALESCE(from_stage, ''), COALESCE(to_stage, ''), COALESCE(payload::text, '{}'), COALESCE(actor, ''), at 
@@ -383,3 +394,45 @@ CRITICAL RULES:
 
 	return diagnosis, nil
 }
+
+// isLowerLayerEngaged checks if lower layers (Reactor, vk-Sage) are currently engaged on an initiative.
+// These are:
+// - active/waiting workspaces (kein aktiver/wartender Workspace)
+// - open Reactor attempts or active/waiting beads in the queue (kein offener Reactor-Versuch, nicht in vk-Sages Queue)
+// - active vk-Sage lease/lock on any verlinked beads
+func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, beads []LinkedBead, workspaces []LinkedWorkspace) (bool, string, error) {
+	// 1. Check for active or waiting workspaces (kein aktiver/wartender Workspace).
+	// A workspace is active or waiting if its status is running, queued, waiting, pending, or empty (freshly setup).
+	for _, ws := range workspaces {
+		status := strings.ToLower(ws.Status)
+		if status == "running" || status == "queued" || status == "waiting" || status == "pending" || status == "" {
+			return true, fmt.Sprintf("active/waiting workspace exists (ID: %s, Status: '%s')", ws.ID, ws.Status), nil
+		}
+	}
+
+	// 2. Check for open Reactor attempts or active/waiting beads in the queue.
+	// If any verlinked bead is in progress or open or hooked (i.e. status is not 'closed'), the lower layers are engaged.
+	for _, b := range beads {
+		status := strings.ToLower(b.Status)
+		if status != "closed" && status != "unknown" {
+			return true, fmt.Sprintf("bead %s has active/pending status: '%s'", b.Ref, b.Status), nil
+		}
+	}
+
+	// 3. Check for active vk-Sage lease/lock on any verlinked beads.
+	for _, b := range beads {
+		var activeLeaseExists bool
+		err := p.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM portfolio.sage_lease 
+				WHERE bead_id = $1 AND locked_until > NOW()
+			)
+		`, b.Ref).Scan(&activeLeaseExists)
+		if err == nil && activeLeaseExists {
+			return true, fmt.Sprintf("active vk-Sage lease exists for bead %s", b.Ref), nil
+		}
+	}
+
+	return false, "", nil
+}
+
