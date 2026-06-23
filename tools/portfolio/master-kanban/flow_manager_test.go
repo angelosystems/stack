@@ -486,4 +486,3 @@ func TestFlowManager_API(t *testing.T) {
 		t.Errorf("test initiative not found in flagged cards")
 	}
 }
-

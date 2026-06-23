@@ -3155,10 +3155,10 @@ func cmdServe() *cobra.Command {
 
 				// 1. Log card symptom by writing a 'sage_action' event with action='handover' on the Initiative
 				payloadMap := map[string]any{
-					"workspace_id":    body.WorkspaceID,
-					"action":          "handover",
-					"reason":          body.Reason,
-					"source":          "manager",
+					"workspace_id": body.WorkspaceID,
+					"action":       "handover",
+					"reason":       body.Reason,
+					"source":       "manager",
 				}
 				payloadBytes, err := json.Marshal(payloadMap)
 				if err != nil {
@@ -5339,7 +5339,7 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
 						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
 					`, item.ID, string(payloadBytes))
-					
+
 					commentPayload, _ := json.Marshal(map[string]any{
 						"title": "Review: noch relevant? (Backlog-Fäule nach 14 Tagen Inaktivität)",
 					})

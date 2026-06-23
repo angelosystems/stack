@@ -272,6 +272,3 @@ func TestGetPromoteTargetStage(t *testing.T) {
 		_, _ = pPool.Exec(ctx, "DELETE FROM beads.issues WHERE id = $1", testAgentID)
 	}
 }
-
-
-

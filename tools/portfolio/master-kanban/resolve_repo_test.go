@@ -283,6 +283,32 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 	}
 	bodyBytes, _ := json.Marshal(bodyMap)
 
+	// 2. Create mock vk-delegate script
+	tmpDir, err := os.MkdirTemp("", "vk-mock")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440001"
+	mockScriptPath := filepath.Join(tmpDir, "vk-delegate")
+	scriptContent := fmt.Sprintf(`#!/bin/sh
+echo "workspace_id:        %s"
+echo "execution_process:   550e8400-e29b-41d4-a716-446655440001"
+echo "workspace_url:       http://localhost:54682/workspaces/%s"
+`, testWorkspaceID, testWorkspaceID)
+
+	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write mock script: %v", err)
+	}
+
+	// Override the vk-delegate path used by the handler
+	oldVkPath := vkDelegatePath
+	vkDelegatePath = mockScriptPath
+	defer func() {
+		vkDelegatePath = oldVkPath
+	}()
+
 	// Create request
 	req := httptest.NewRequest(http.MethodPost, "/api/dispatch", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
