@@ -339,6 +339,40 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				Diagnosis:      diagnosis,
 			})
 			fmt.Println()
+		} else {
+			// Card is not flagged. Check if the previous flow_action event was flagged, and clear it.
+			var lastPayloadStr string
+			err := p.QueryRow(ctx, `
+				SELECT payload::text FROM portfolio.initiative_event 
+				WHERE initiative_id = $1 AND kind = 'flow_action' 
+				ORDER BY at DESC LIMIT 1
+			`, init.ID).Scan(&lastPayloadStr)
+			if err == nil {
+				var lastPayload map[string]any
+				if json.Unmarshal([]byte(lastPayloadStr), &lastPayload) == nil {
+					reasons, _ := lastPayload["flagged_reasons"].([]any)
+					if len(reasons) > 0 {
+						// Previous state was flagged, now cleared! Log a clearing event.
+						if !dryRun {
+							payloadMap := map[string]any{
+								"flagged_reasons": []string{},
+								"category":        "",
+								"confidence":      "",
+								"reasoning":       "",
+								"proposed_action": "",
+							}
+							payloadBytes, _ := json.Marshal(payloadMap)
+							_, err = p.Exec(ctx, `
+								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+								VALUES ($1, 'flow_action', 'flow_manager', $2, 'flow-manager', now())
+							`, init.ID, string(payloadBytes))
+							if err == nil {
+								fmt.Printf("  ✓ Cleared stagnation flag for card %s\n", init.ID)
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -584,4 +618,56 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 
 	return false, "", nil
 }
+
+var flowManagerChan = make(chan struct{}, 1)
+
+func startFlowManagerSteward(p *pgxpool.Pool) {
+	// Initialize status in db on startup
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+		 VALUES ('flow-manager', now(), 'healthy', NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    error_message = EXCLUDED.error_message`)
+
+	go func() {
+		// Run a full check on startup to initialize and catch up
+		_ = runFlowManager(p, false)
+
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			var checkErr error
+
+			select {
+			case <-flowManagerChan:
+				// Edge-triggered: run flow manager
+				checkErr = runFlowManager(p, false)
+			case <-ticker.C:
+				// Periodic: run flow manager
+				checkErr = runFlowManager(p, false)
+			}
+
+			statusVal := "healthy"
+			var errMsgVal *string
+			if checkErr != nil {
+				statusVal = "alarm"
+				strErr := checkErr.Error()
+				errMsgVal = &strErr
+				fmt.Fprintf(os.Stderr, "Flow Manager Steward: check failed: %v\n", checkErr)
+			}
+
+			_, _ = p.Exec(context.Background(),
+				`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+				 VALUES ('flow-manager', now(), $1, $2)
+				 ON CONFLICT (id) DO UPDATE SET
+				    last_run = EXCLUDED.last_run,
+				    status = EXCLUDED.status,
+				    error_message = EXCLUDED.error_message`, statusVal, errMsgVal)
+		}
+	}()
+}
+
 

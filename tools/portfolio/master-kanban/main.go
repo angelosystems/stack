@@ -1975,6 +1975,12 @@ func cmdServe() *cobra.Command {
 				default:
 				}
 
+				// Trigger Flow Manager on incoming events (edge-trigger)
+				select {
+				case flowManagerChan <- struct{}{}:
+				default:
+				}
+
 				if ev.Kind == "stage_proposed" {
 					var pLoad struct {
 						Stage string `json:"stage"`
@@ -2439,7 +2445,155 @@ func cmdServe() *cobra.Command {
 			startStageChangeListener(p)
 			startProposalAgentListener(p)
 			startSageSteward(p)
-			startManagerSteward(p)
+			startFlowManagerSteward(p)
+
+			// GET /api/manager
+			http.HandleFunc("/api/manager", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				// 1. Get flow manager status
+				var lastRun time.Time
+				var status string
+				var errMsg *string
+				err := p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.sage_status WHERE id = 'flow-manager'`).
+					Scan(&lastRun, &status, &errMsg)
+				if err != nil {
+					lastRun = time.Now()
+					status = "unknown"
+				}
+
+				// 2. Fetch unarchived initiatives and their latest flow_action payload (if any)
+				rows, err := p.Query(r.Context(), `
+					WITH latest_flow_action AS (
+						SELECT DISTINCT ON (initiative_id) initiative_id, payload, at
+						FROM portfolio.initiative_event
+						WHERE kind = 'flow_action'
+						ORDER BY initiative_id, at DESC
+					)
+					SELECT i.id, i.title, i.stage, i.firma, COALESCE(fa.payload::text, '{}')
+					FROM portfolio.initiative i
+					LEFT JOIN latest_flow_action fa ON fa.initiative_id = i.id
+					WHERE i.archived_at IS NULL
+					ORDER BY i.id
+				`)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer rows.Close()
+
+				type FlaggedCard struct {
+					ID             string   `json:"id"`
+					Title          string   `json:"title"`
+					Stage          string   `json:"stage"`
+					Firma          string   `json:"firma"`
+					FlaggedReasons []string `json:"flagged_reasons"`
+					Category       string   `json:"category"`
+					Confidence     string   `json:"confidence"`
+					Reasoning      string   `json:"reasoning"`
+					ProposedAction string   `json:"proposed_action"`
+				}
+
+				var flaggedCards []FlaggedCard
+				stockendCount := 0
+				promoteCount := 0
+				veraltetCount := 0
+				wipOverflowsMap := make(map[string]bool)
+
+				for rows.Next() {
+					var id, title, stage, firma, payloadStr string
+					if err := rows.Scan(&id, &title, &stage, &firma, &payloadStr); err == nil {
+						var payload map[string]any
+						if json.Unmarshal([]byte(payloadStr), &payload) == nil {
+							reasonsRaw, ok := payload["flagged_reasons"].([]any)
+							if ok && len(reasonsRaw) > 0 {
+								var reasons []string
+								for _, rVal := range reasonsRaw {
+									if rStr, ok := rVal.(string); ok {
+										reasons = append(reasons, rStr)
+										if strings.Contains(strings.ToLower(rStr), "wip-überlauf") {
+											wipOverflowsMap[firma] = true
+										}
+									}
+								}
+
+								category, _ := payload["category"].(string)
+								confidence, _ := payload["confidence"].(string)
+								reasoning, _ := payload["reasoning"].(string)
+								proposedAction, _ := payload["proposed_action"].(string)
+
+								card := FlaggedCard{
+									ID:             id,
+									Title:          title,
+									Stage:          stage,
+									Firma:          firma,
+									FlaggedReasons: reasons,
+									Category:       category,
+									Confidence:     confidence,
+									Reasoning:      reasoning,
+									ProposedAction: proposedAction,
+								}
+								flaggedCards = append(flaggedCards, card)
+
+								if category == "wartet-auf-Mensch" || category == "Workspace-gescheitert" {
+									stockendCount++
+								} else if category == "fertig-nicht-promotet" {
+									promoteCount++
+								} else if category == "verlassen" {
+									veraltetCount++
+								}
+							}
+						}
+					}
+				}
+
+				var wipOverflows []string
+				for f := range wipOverflowsMap {
+					wipOverflows = append(wipOverflows, f)
+				}
+
+				// 3. Build summary text
+				totalFlagged := stockendCount + promoteCount + veraltetCount
+				var summaryParts []string
+				if totalFlagged > 0 {
+					if stockendCount > 0 {
+						summaryParts = append(summaryParts, fmt.Sprintf("%d stockt", stockendCount))
+					}
+					if promoteCount > 0 {
+						summaryParts = append(summaryParts, fmt.Sprintf("%d promote-reif", promoteCount))
+					}
+					if veraltetCount > 0 {
+						summaryParts = append(summaryParts, fmt.Sprintf("%d veraltet", veraltetCount))
+					}
+				}
+
+				summaryText := ""
+				if totalFlagged > 0 {
+					summaryText = fmt.Sprintf("%d auffällige Karten: %s", totalFlagged, strings.Join(summaryParts, ", "))
+					if len(wipOverflows) > 0 {
+						summaryText += fmt.Sprintf(" · WIP-Überlauf bei %s", strings.Join(wipOverflows, ", "))
+					}
+				} else {
+					summaryText = "Keine auffälligen Karten auf dem Board. Hervorragender Fluss! 🚀"
+				}
+
+				resp := map[string]any{
+					"status":        status,
+					"last_run":      lastRun,
+					"flagged_cards": flaggedCards,
+					"summary": map[string]any{
+						"stockend":      stockendCount,
+						"promote_reif":  promoteCount,
+						"veraltet":      veraltetCount,
+						"wip_overflows": wipOverflows,
+					},
+					"summary_text": summaryText,
+				}
+
+				json.NewEncoder(w).Encode(resp)
+			})
 
 			// GET /api/manager/digest
 			http.HandleFunc("/api/manager/digest", func(w http.ResponseWriter, r *http.Request) {

@@ -345,6 +345,176 @@
       </section>
     </template>
 
+    <!-- ════ MANAGER-VIEW (Kanban Flow Manager, P1.6 / Phase 1) ════ -->
+    <template x-if="view==='manager'">
+      <section class="space-y-6">
+        <!-- Header / status row -->
+        <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-5 flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <h2 class="font-bold uppercase tracking-wide text-sm flex items-center gap-1.5 text-slate-800">
+              <span>🩺</span> Kanban Flow-Manager
+            </h2>
+            <p class="text-xs text-slate-400 mt-1">Überwacht den Kartenfluss, diagnostiziert Stagnation und schlägt Aktionen vor.</p>
+          </div>
+          <div class="text-xs flex items-center gap-3">
+            <span class="text-slate-500 font-medium font-semibold">Status:</span>
+            <span class="px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider text-[10px]"
+              :class="managerStatus === 'healthy' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800 border border-red-200'"
+              x-text="managerStatus"></span>
+            <span class="text-slate-400">|</span>
+            <span class="text-slate-500 font-semibold">Letzter Lauf:</span>
+            <span class="font-medium text-slate-700" x-text="managerLastRun ? fmtDateTime(managerLastRun) : 'nie'"></span>
+          </div>
+        </div>
+
+        <!-- Digest box -->
+        <div class="bg-gradient-to-r from-sky-500 to-indigo-600 rounded-lg shadow-sm p-6 text-white flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div class="space-y-1 bg-transparent">
+            <span class="text-xs font-semibold uppercase tracking-wider text-sky-100 bg-transparent">Aktueller Review-Digest</span>
+            <h3 class="text-lg font-bold leading-tight bg-transparent" x-text="managerSummaryText || 'Keine blockierten Karten auf dem Board. Hervorragender Fluss! 🚀'"></h3>
+          </div>
+          <div class="flex gap-4 shrink-0 bg-transparent">
+            <div class="bg-white/10 px-4 py-2.5 rounded-lg text-center backdrop-blur-sm min-w-[80px]">
+              <div class="text-2xl font-black bg-transparent" x-text="managerSummary.stockend || 0"></div>
+              <div class="text-[10px] uppercase font-bold tracking-wider text-sky-100 bg-transparent">Stockend</div>
+            </div>
+            <div class="bg-white/10 px-4 py-2.5 rounded-lg text-center backdrop-blur-sm min-w-[80px]">
+              <div class="text-2xl font-black bg-transparent" x-text="managerSummary.promote_reif || 0"></div>
+              <div class="text-[10px] uppercase font-bold tracking-wider text-sky-100 bg-transparent">Promote-reif</div>
+            </div>
+            <div class="bg-white/10 px-4 py-2.5 rounded-lg text-center backdrop-blur-sm min-w-[80px]">
+              <div class="text-2xl font-black bg-transparent" x-text="managerSummary.veraltet || 0"></div>
+              <div class="text-[10px] uppercase font-bold tracking-wider text-sky-100 bg-transparent">Veraltet</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Flagged Cards Grid / Sections -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          <!-- Column 1: Stockend (Stagnation / Failed Workspaces) -->
+          <div class="space-y-4">
+            <h3 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center justify-between border-b border-slate-200 pb-2">
+              <span class="flex items-center gap-1.5 text-red-600">⚠️ Stockend / Stagnation</span>
+              <span class="bg-red-100 text-red-800 rounded-full px-2 py-0.5 text-[10px] font-black" x-text="managerFlaggedCards.filter(c => c.category === 'wartet-auf-Mensch' || c.category === 'Workspace-gescheitert').length"></span>
+            </h3>
+            <div class="space-y-3">
+              <template x-for="c in managerFlaggedCards.filter(c => c.category === 'wartet-auf-Mensch' || c.category === 'Workspace-gescheitert')" :key="c.id">
+                <div class="bg-white border border-red-100 rounded-xl p-4 shadow-sm space-y-3 relative overflow-hidden">
+                  <div class="absolute top-0 left-0 w-1 h-full bg-red-500"></div>
+                  <div class="flex items-center justify-between text-[10px]">
+                    <span class="font-mono font-bold text-slate-400" x-text="c.id"></span>
+                    <span class="px-2 py-0.5 rounded-full font-bold uppercase" 
+                          :class="c.category === 'Workspace-gescheitert' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-amber-50 text-amber-700 border border-amber-100'"
+                          x-text="c.category"></span>
+                  </div>
+                  <div>
+                    <h4 class="font-bold text-slate-800 text-sm leading-snug" x-text="c.title"></h4>
+                    <span class="text-[10px] text-slate-400 mt-1 block">Firma: <b class="text-slate-600" x-text="c.firma"></b> · Stage: <b class="text-slate-600" x-text="c.stage"></b></span>
+                  </div>
+                  <!-- Flagged Reasons -->
+                  <div class="flex flex-wrap gap-1">
+                    <template x-for="r in c.flagged_reasons" :key="r">
+                      <span class="bg-slate-100 text-slate-600 text-[9px] font-medium px-2 py-0.5 rounded" x-text="r"></span>
+                    </template>
+                  </div>
+                  <!-- Diagnosis Reasoning -->
+                  <div class="p-2.5 bg-slate-50 rounded-lg text-xs text-slate-600 leading-relaxed border border-slate-100" x-text="c.reasoning"></div>
+                  <!-- Proposed Action -->
+                  <div x-show="c.proposed_action" class="text-xs bg-red-50 text-red-950 p-2.5 rounded-lg border border-red-100 flex items-center gap-1.5 font-semibold">
+                    <span>⚡ Actionable:</span>
+                    <span x-text="c.proposed_action"></span>
+                  </div>
+                </div>
+              </template>
+              <div x-show="managerFlaggedCards.filter(c => c.category === 'wartet-auf-Mensch' || c.category === 'Workspace-gescheitert').length === 0" class="text-center py-8 text-xs text-slate-400 bg-white rounded-lg border border-dashed border-slate-200">
+                Keine stagnierenden Karten 🎉
+              </div>
+            </div>
+          </div>
+
+          <!-- Column 2: Promote-reif (All verlinked beads closed) -->
+          <div class="space-y-4">
+            <h3 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center justify-between border-b border-slate-200 pb-2">
+              <span class="flex items-center gap-1.5 text-emerald-600">🚀 Promote-reif</span>
+              <span class="bg-emerald-100 text-emerald-800 rounded-full px-2 py-0.5 text-[10px] font-black" x-text="managerFlaggedCards.filter(c => c.category === 'fertig-nicht-promotet').length"></span>
+            </h3>
+            <div class="space-y-3">
+              <template x-for="c in managerFlaggedCards.filter(c => c.category === 'fertig-nicht-promotet')" :key="c.id">
+                <div class="bg-white border border-emerald-100 rounded-xl p-4 shadow-sm space-y-3 relative overflow-hidden">
+                  <div class="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
+                  <div class="flex items-center justify-between text-[10px]">
+                    <span class="font-mono font-bold text-slate-400" x-text="c.id"></span>
+                    <span class="px-2 py-0.5 rounded-full font-bold uppercase bg-emerald-50 text-emerald-700 border border-emerald-100" x-text="c.category"></span>
+                  </div>
+                  <div>
+                    <h4 class="font-bold text-slate-800 text-sm leading-snug" x-text="c.title"></h4>
+                    <span class="text-[10px] text-slate-400 mt-1 block">Firma: <b class="text-slate-600" x-text="c.firma"></b> · Stage: <b class="text-slate-600" x-text="c.stage"></b></span>
+                  </div>
+                  <!-- Flagged Reasons -->
+                  <div class="flex flex-wrap gap-1">
+                    <template x-for="r in c.flagged_reasons" :key="r">
+                      <span class="bg-slate-100 text-slate-600 text-[9px] font-medium px-2 py-0.5 rounded" x-text="r"></span>
+                    </template>
+                  </div>
+                  <!-- Diagnosis Reasoning -->
+                  <div class="p-2.5 bg-slate-50 rounded-lg text-xs text-slate-600 leading-relaxed border border-slate-100" x-text="c.reasoning"></div>
+                  <!-- Proposed Action -->
+                  <div x-show="c.proposed_action" class="text-xs bg-emerald-50 text-emerald-950 p-2.5 rounded-lg border border-emerald-100 flex items-center gap-1.5 font-semibold">
+                    <span>⚡ Actionable:</span>
+                    <span x-text="c.proposed_action"></span>
+                  </div>
+                </div>
+              </template>
+              <div x-show="managerFlaggedCards.filter(c => c.category === 'fertig-nicht-promotet').length === 0" class="text-center py-8 text-xs text-slate-400 bg-white rounded-lg border border-dashed border-slate-200">
+                Keine promote-reifen Karten 💸
+              </div>
+            </div>
+          </div>
+
+          <!-- Column 3: Backlog-Fäule / Veraltet (Backlog rot) -->
+          <div class="space-y-4">
+            <h3 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center justify-between border-b border-slate-200 pb-2">
+              <span class="flex items-center gap-1.5 text-amber-600">🗃 Veraltet / Backlog-Fäule</span>
+              <span class="bg-amber-100 text-amber-800 rounded-full px-2 py-0.5 text-[10px] font-black" x-text="managerFlaggedCards.filter(c => c.category === 'verlassen').length"></span>
+            </h3>
+            <div class="space-y-3">
+              <template x-for="c in managerFlaggedCards.filter(c => c.category === 'verlassen')" :key="c.id">
+                <div class="bg-white border border-amber-100 rounded-xl p-4 shadow-sm space-y-3 relative overflow-hidden">
+                  <div class="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>
+                  <div class="flex items-center justify-between text-[10px]">
+                    <span class="font-mono font-bold text-slate-400" x-text="c.id"></span>
+                    <span class="px-2 py-0.5 rounded-full font-bold uppercase bg-amber-50 text-amber-700 border border-amber-100" x-text="c.category"></span>
+                  </div>
+                  <div>
+                    <h4 class="font-bold text-slate-800 text-sm leading-snug" x-text="c.title"></h4>
+                    <span class="text-[10px] text-slate-400 mt-1 block">Firma: <b class="text-slate-600" x-text="c.firma"></b> · Stage: <b class="text-slate-600" x-text="c.stage"></b></span>
+                  </div>
+                  <!-- Flagged Reasons -->
+                  <div class="flex flex-wrap gap-1">
+                    <template x-for="r in c.flagged_reasons" :key="r">
+                      <span class="bg-slate-100 text-slate-600 text-[9px] font-medium px-2 py-0.5 rounded" x-text="r"></span>
+                    </template>
+                  </div>
+                  <!-- Diagnosis Reasoning -->
+                  <div class="p-2.5 bg-slate-50 rounded-lg text-xs text-slate-600 leading-relaxed border border-slate-100" x-text="c.reasoning"></div>
+                  <!-- Proposed Action -->
+                  <div x-show="c.proposed_action" class="text-xs bg-amber-50 text-amber-950 p-2.5 rounded-lg border border-amber-100 flex items-center gap-1.5 font-semibold">
+                    <span>⚡ Actionable:</span>
+                    <span x-text="c.proposed_action"></span>
+                  </div>
+                </div>
+              </template>
+              <div x-show="managerFlaggedCards.filter(c => c.category === 'verlassen').length === 0" class="text-center py-8 text-xs text-slate-400 bg-white rounded-lg border border-dashed border-slate-200">
+                Keine veralteten Karten 🍃
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+    </template>
+
     <!-- ════ UNLINKED-VIEW (Capture-Completeness, L1) ════ -->
     <template x-if="view==='unlinked'">
       <section class="bg-white rounded-lg shadow-sm">
@@ -1175,6 +1345,7 @@ function liveKanban() {
       { id: 'pipeline', label: 'Pipeline' },
       { id: 'backlog',  label: 'Backlog' },
       { id: 'unlinked', label: '⚠ Unlinked — braucht Zuhause' },
+      { id: 'manager',  label: '🩺 Manager' },
 <<<<<<< HEAD
       { id: 'capacity_host', label: '⚡ Kapazität (Host)' },
 =======
@@ -1239,6 +1410,11 @@ function liveKanban() {
       collector_liveness: ''
     },
     lastFetched: '',
+    managerStatus: 'unknown',
+    managerLastRun: null,
+    managerFlaggedCards: [],
+    managerSummary: { stockend: 0, promote_reif: 0, veraltet: 0, wip_overflows: [] },
+    managerSummaryText: '',
 
     dispatchOpen: false,
     dispatchBead: null,
@@ -1622,6 +1798,7 @@ function liveKanban() {
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
         if (this.view === 'unlinked') await this.loadUnlinked();
+        if (this.view === 'manager') await this.loadManager();
 <<<<<<< HEAD
         if (this.view === 'capacity_host') await this.loadCapacityHost();
 =======
@@ -1640,6 +1817,7 @@ function liveKanban() {
       if (v === 'pipeline') await this.loadAllPlans();
       if (v === 'backlog') await this.loadBacklog();
       if (v === 'unlinked') await this.loadUnlinked();
+      if (v === 'manager') await this.loadManager();
 <<<<<<< HEAD
       if (v === 'capacity_host') await this.loadCapacityHost();
 =======
@@ -1657,6 +1835,22 @@ function liveKanban() {
         }
       } catch (e) {
         console.error('unlinked fetch error:', e);
+      }
+    },
+
+    async loadManager() {
+      try {
+        const r = await fetch(this.apiBase + '/api/manager');
+        if (r.ok) {
+          const res = await r.json();
+          this.managerStatus = res.status || 'unknown';
+          this.managerLastRun = res.last_run;
+          this.managerFlaggedCards = res.flagged_cards || [];
+          this.managerSummary = res.summary || { stockend: 0, promote_reif: 0, veraltet: 0, wip_overflows: [] };
+          this.managerSummaryText = res.summary_text || '';
+        }
+      } catch (e) {
+        console.error('manager fetch error:', e);
       }
     },
     unlinkedItemsByFirma(firmaId) {
