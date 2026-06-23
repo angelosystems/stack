@@ -142,3 +142,37 @@ func TestFlowThresholdsAPI(t *testing.T) {
 	}
 }
 
+func TestGetPromoteTarget(t *testing.T) {
+	tests := []struct {
+		stage    string
+		expected string
+		hasError bool
+	}{
+		{"idea", "soon", false},
+		{"soon", "now", false},
+		{"now", "watching", false},
+		{"watching", "done", false},
+		{"done", "", true},
+		{"IDEA ", "soon", false},
+		{" watching", "done", false},
+		{"unknown", "", true},
+	}
+
+	for _, tc := range tests {
+		actual, err := GetPromoteTarget(tc.stage)
+		if tc.hasError {
+			if err == nil {
+				t.Errorf("expected error promoting from stage %q, but got none", tc.stage)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("unexpected error promoting from stage %q: %v", tc.stage, err)
+			}
+			if actual != tc.expected {
+				t.Errorf("GetPromoteTarget(%q) = %q; expected %q", tc.stage, actual, tc.expected)
+			}
+		}
+	}
+}
+
+
