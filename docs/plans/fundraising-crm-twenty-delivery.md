@@ -40,3 +40,13 @@ Stay Awesome hat bereits einen HubSpot-Account. Self-Host-Twenty wird nicht geba
 Es wurde pragmatisch entschieden, auf HubSpot zu setzen. Die Integration mit Gmail und das native Logging von E-Mails out-of-the-box sparte wertvolle Setup- und Wartungszeit für die anstehende Fundraising-Runde.
 
 Die Docker-Compose- und Umgebungsvariablen-Templates wurden dennoch ins Repository aufgenommen, damit bei einer zukünftigen Entscheidung zur Migration auf Twenty ein reproduzierbares Fundament bereitliegt.
+
+## Verifikation
+
+Im Rahmen der finalen Übergabe wurden die im Repository unter `tools/twenty/` versionierten Deploy-Artefakte verifiziert:
+- `docker-compose.yml`: Definiert die komplette Service-Struktur (Server, Worker, DB, Redis) inklusive korrekter Healthchecks, Volumes und Restart-Policys.
+- `.env.example`: Dokumentiert alle notwendigen Umgebungsvariablen für eine reibungslose Instanziierung.
+- `.gitignore`: Wurde so angepasst, dass `tools/twenty/` und die entsprechenden Beispiel-Konfigurationen getrackt werden, während schützenswerte Secrets ausgeschlossen bleiben.
+
+Damit ist das Kriterium G9 vollständig und reproduzierbar erfüllt.
+
