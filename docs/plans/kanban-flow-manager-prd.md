@@ -107,6 +107,18 @@ Der Manager hat einen eigenen Heartbeat (ein ausgefallener Lauf ist sichtbar,
 nicht still — Lehre aus capture-completeness) und ein Pro-Karte-Budget: dieselbe
 Karte wird nicht jeden Zyklus neu geflaggt (Cooldown gegen Flag-Müdigkeit).
 
+### L7 — Stage-Übergangs-Map (P2.4)
+Da die Stages nicht linear sind, wird das Promote-Ziel über eine dynamische Entscheidungsmatrix ermittelt, die die Kapazitätsanzeige (P2.2) nutzt:
+
+| Von Stage | Bedingung | Ziel-Stage | Logik / Begründung |
+|---|---|---|---|
+| **idea** | Freie Kapazität (idle Polecats > 0 ODER vk-Slots > 0) UND `nowCount < nowLimit` | **now** | Überspringt `soon`, da sofortige Ausführung möglich ist (Pull-System). |
+| **idea** | Keine Kapazität ODER `nowCount >= nowLimit` | **soon** | Wandert in die Warteschlange. |
+| **soon** | Keine zusätzlichen Bedingungen | **now** | Wird in die aktive Umsetzung überführt. |
+| **now** | Keine zusätzlichen Bedingungen | **watching** | Aktive Entwicklung abgeschlossen, Beobachtung von Reviews/Tests. |
+| **watching** | Keine zusätzlichen Bedingungen | **done** | Erfolgreich abgeschlossen und archiviert. |
+| **done** | Bereits am Ende | *(keine)* | Endzustand. Keine weitere Promotion möglich. |
+
 ## Success-Criteria
 
 - SC1: Eine Karte in NOW mit Aktivitäts-Stille > Schwelle und ohne aktiven
