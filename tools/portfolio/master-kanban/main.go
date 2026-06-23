@@ -589,6 +589,24 @@ func cmdServe() *cobra.Command {
 				}
 				defer rows.Close()
 
+				completenessPct, err := getLinkageCompleteness(r.Context(), p)
+				if err != nil {
+					completenessPct = 0.0
+				}
+
+				threshold := 90.0
+				if envThreshold := os.Getenv("PORTFOLIO_CONFIDENCE_THRESHOLD"); envThreshold != "" {
+					var t float64
+					if _, err := fmt.Sscanf(envThreshold, "%f", &t); err == nil {
+						threshold = t
+					}
+				}
+
+				promoteReadyMap, err := getPromoteReadyInitiatives(r.Context(), p)
+				if err != nil {
+					promoteReadyMap = make(map[string]bool)
+				}
+
 				var items []map[string]any
 				for rows.Next() {
 					var j []byte
@@ -597,6 +615,16 @@ func cmdServe() *cobra.Command {
 					}
 					var item map[string]any
 					if err := json.Unmarshal(j, &item); err == nil {
+						initID, _ := item["id"].(string)
+						pr := promoteReadyMap[initID]
+						item["promote_ready"] = pr
+						item["linkage_confidence_percentage"] = completenessPct
+
+						if pr && completenessPct < threshold {
+							item["confidence_caveat"] = fmt.Sprintf("Confidence-Vorbehalt: Niedrige Linkage-Abdeckung (%.1f%%).", completenessPct)
+						} else {
+							item["confidence_caveat"] = ""
+						}
 						items = append(items, item)
 					}
 				}
@@ -944,10 +972,40 @@ func cmdServe() *cobra.Command {
 					// Also enrich with promote ready/damped
 					enrichList := []map[string]any{initMap}
 					if err := enrichInitiativesWithPromoteReady(r.Context(), p, enrichList); err == nil {
-						rawObj["initiative"] = enrichList[0]
+						initMap = enrichList[0]
 					} else {
 						fmt.Fprintf(os.Stderr, "Error enriching initiative with promote ready: %v\n", err)
 					}
+
+					completenessPct, err := getLinkageCompleteness(r.Context(), p)
+					if err != nil {
+						completenessPct = 0.0
+					}
+
+					threshold := 90.0
+					if envThreshold := os.Getenv("PORTFOLIO_CONFIDENCE_THRESHOLD"); envThreshold != "" {
+						var t float64
+						if _, err := fmt.Sscanf(envThreshold, "%f", &t); err == nil {
+							threshold = t
+						}
+					}
+
+					promoteReadyMap, err := getPromoteReadyInitiatives(r.Context(), p)
+					if err != nil {
+						promoteReadyMap = make(map[string]bool)
+					}
+
+					pr := promoteReadyMap[id]
+					initMap["promote_ready"] = pr
+					initMap["linkage_confidence_percentage"] = completenessPct
+
+					if pr && completenessPct < threshold {
+						initMap["confidence_caveat"] = fmt.Sprintf("Confidence-Vorbehalt: Niedrige Linkage-Abdeckung (%.1f%%).", completenessPct)
+					} else {
+						initMap["confidence_caveat"] = ""
+					}
+
+					rawObj["initiative"] = initMap
 				}
 
 				w.Header().Set("Content-Type", "application/json")
@@ -2306,6 +2364,9 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
+				// 3b. Clear proposal cooldown if any
+				_, _ = tx.Exec(r.Context(), `DELETE FROM portfolio.proposal_cooldown WHERE bead_id = $1`, cardID)
+
 				// Commit transaction so portfolio state is stored
 				if err := tx.Commit(r.Context()); err != nil {
 					http.Error(w, err.Error(), 500)
@@ -2395,6 +2456,15 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 500)
 					return
 				}
+
+				// Enforce cooldown: extract bead_id from proposal ID (proposal-<bead_id>)
+				beadID := strings.TrimPrefix(body.Id, "proposal-")
+				_, _ = p.Exec(r.Context(),
+					`INSERT INTO portfolio.proposal_cooldown (bead_id, rejected_at)
+					 VALUES ($1, now())
+					 ON CONFLICT (bead_id) DO UPDATE SET rejected_at = now()`,
+					beadID)
+
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
 
@@ -2707,6 +2777,30 @@ func cmdServe() *cobra.Command {
 					dangling = []DanglingWorkspace{}
 				}
 
+				// Query Flow Manager Status
+				var mgrLastRun time.Time
+				var mgrStatus string
+				var mgrErrMsg *string
+				err = p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.manager_status WHERE id = 'flow-manager'`).
+					Scan(&mgrLastRun, &mgrStatus, &mgrErrMsg)
+				if err != nil {
+					mgrLastRun = time.Now()
+					mgrStatus = "unknown"
+				}
+
+				// If last run is older than 30 seconds, it's an alarm!
+				if time.Since(mgrLastRun) > 30*time.Second {
+					mgrStatus = "alarm"
+				}
+
+				mgrResp := map[string]any{
+					"last_run":         mgrLastRun,
+					"status":           mgrStatus,
+					"error_message":    mgrErrMsg,
+					"outage_simulated": managerOutageSimulated,
+				}
+
 				resp := map[string]any{
 					"last_run":            oldestLastRun,
 					"status":              aggregateStatus,
@@ -2715,6 +2809,7 @@ func cmdServe() *cobra.Command {
 					"dangling_baseline":   4,
 					"outage_simulated":    sageOutageSimulated,
 					"dangling_workspaces": dangling,
+					"manager_status":    mgrResp,
 				}
 				json.NewEncoder(w).Encode(resp)
 			})
@@ -3003,6 +3098,47 @@ func cmdServe() *cobra.Command {
 				}
 
 				json.NewEncoder(w).Encode(resp)
+			})
+
+			// POST /api/manager/simulate-outage
+			http.HandleFunc("/api/manager/simulate-outage", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+
+				var body struct {
+					Simulate bool `json:"simulate"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				if body.Simulate {
+					managerOutageSimulated = true
+					// Back-date last_run to 10 minutes ago to trigger alarm instantly
+					_, _ = p.Exec(r.Context(),
+						`UPDATE portfolio.manager_status 
+						 SET last_run = now() - interval '10 minutes', status = 'alarm' 
+						 WHERE id = 'flow-manager'`)
+				} else {
+					managerOutageSimulated = false
+					// Restore healthy status
+					_, _ = p.Exec(r.Context(),
+						`UPDATE portfolio.manager_status 
+						 SET last_run = now(), status = 'healthy', error_message = NULL 
+						 WHERE id = 'flow-manager'`)
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, `{"ok":true}`)
 			})
 
 			// Bootup Catchup — both Pull-Regel and Proposal-Agent
@@ -3756,6 +3892,22 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 	}
 
 	if openCount == 0 {
+		// Enforce Linkage Confidence threshold (SC-confidence / damping)
+		completenessPct, err := getLinkageCompleteness(ctx, p)
+		if err == nil {
+			threshold := 90.0
+			if envThreshold := os.Getenv("PORTFOLIO_CONFIDENCE_THRESHOLD"); envThreshold != "" {
+				var t float64
+				if _, err := fmt.Sscanf(envThreshold, "%f", &t); err == nil {
+					threshold = t
+				}
+			}
+			if completenessPct < threshold {
+				fmt.Printf("⚠ Auto-Stage: %s promote transition to watching bypassed/damped due to low linkage completeness (%.1f%% < %.1f%%)\n", initiativeID, completenessPct, threshold)
+				return
+			}
+		}
+
 		completeness, err := getCaptureCompletenessFunc(ctx, p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error checking completeness: %v\n", err)
@@ -4154,6 +4306,18 @@ func checkFirmaProposals(p *pgxpool.Pool, firma string) {
 		return
 	}
 
+	cooldowns := make(map[string]bool)
+	cRows, err := p.Query(context.Background(), `SELECT bead_id FROM portfolio.proposal_cooldown WHERE rejected_at > now() - interval '7 days'`)
+	if err == nil {
+		defer cRows.Close()
+		for cRows.Next() {
+			var bid string
+			if cRows.Scan(&bid) == nil {
+				cooldowns[bid] = true
+			}
+		}
+	}
+
 	rows, err := sp.Query(context.Background(), `
 		SELECT i.id, i.title, COALESCE(i.description, '')
 		FROM beads.issues i
@@ -4186,6 +4350,10 @@ func checkFirmaProposals(p *pgxpool.Pool, firma string) {
 	for rows.Next() {
 		var b Bead
 		if err := rows.Scan(&b.ID, &b.Title, &b.Desc); err == nil {
+			if cooldowns[b.ID] {
+				fmt.Printf("proposal-agent: skipping bead %s due to cooldown\n", b.ID)
+				continue
+			}
 			beads = append(beads, b)
 		}
 	}
@@ -4316,6 +4484,7 @@ Gib deine Antwort EXACTLY als ein valides JSON-Array von Objekten im folgenden F
 
 var sageOutageSimulated bool
 var sageSweepChan = make(chan struct{}, 1)
+var managerOutageSimulated bool
 
 type DanglingWorkspace struct {
 	ID        string `json:"id"`
@@ -4968,6 +5137,132 @@ func startSageSteward(p *pgxpool.Pool) {
 			}
 		}
 	}()
+}
+
+func startFlowManagerHeartbeat(p *pgxpool.Pool) {
+	// Initialize status in db on startup
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.manager_status (id, last_run, status, error_message)
+		 VALUES ('flow-manager', now(), 'healthy', NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    error_message = EXCLUDED.error_message`)
+
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			if managerOutageSimulated {
+				fmt.Println("Flow Manager: Heartbeat skipped (outage simulated)")
+				continue
+			}
+
+			_, err := p.Exec(context.Background(),
+				`INSERT INTO portfolio.manager_status (id, last_run, status, error_message)
+				 VALUES ('flow-manager', now(), 'healthy', NULL)
+				 ON CONFLICT (id) DO UPDATE SET
+				    last_run = EXCLUDED.last_run,
+				    status = EXCLUDED.status,
+				    error_message = EXCLUDED.error_message`)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to update flow manager status: %v\n", err)
+			}
+		}
+	}()
+}
+
+func getLinkageCompleteness(ctx context.Context, p *pgxpool.Pool) (float64, error) {
+	var linkedBeadsRegular, linkedBeadsCatchall, unlinkedBeads int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedBeadsRegular)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedBeadsCatchall)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='bead'`).Scan(&unlinkedBeads)
+
+	var linkedWorkspacesRegular, linkedWorkspacesCatchall, unlinkedWorkspaces int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedWorkspacesRegular)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedWorkspacesCatchall)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='vk_workspace'`).Scan(&unlinkedWorkspaces)
+
+	totalBeads := linkedBeadsRegular + linkedBeadsCatchall + unlinkedBeads
+	totalWorkspaces := linkedWorkspacesRegular + linkedWorkspacesCatchall + unlinkedWorkspaces
+	totalWorkItems := totalBeads + totalWorkspaces
+	linkedWorkItems := (linkedBeadsRegular + linkedBeadsCatchall) + (linkedWorkspacesRegular + linkedWorkspacesCatchall)
+
+	if totalWorkItems == 0 {
+		return 100.0, nil
+	}
+	return (float64(linkedWorkItems) / float64(totalWorkItems)) * 100.0, nil
+}
+
+func getPromoteReadyInitiatives(ctx context.Context, p *pgxpool.Pool) (map[string]bool, error) {
+	rows, err := p.Query(ctx, `SELECT initiative_id, ref FROM portfolio.initiative_link WHERE kind='bead'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	initToBeads := make(map[string][]string)
+	var allBeads []string
+	beadSet := make(map[string]bool)
+
+	for rows.Next() {
+		var initID, ref string
+		if err := rows.Scan(&initID, &ref); err == nil {
+			initToBeads[initID] = append(initToBeads[initID], ref)
+			if !beadSet[ref] {
+				beadSet[ref] = true
+				allBeads = append(allBeads, ref)
+			}
+		}
+	}
+
+	promoteReady := make(map[string]bool)
+	if len(allBeads) == 0 {
+		return promoteReady, nil
+	}
+
+	sp, err := solartownPool()
+	if err != nil {
+		return nil, err
+	}
+
+	beadStatuses := make(map[string]string)
+	bRows, err := sp.Query(ctx, `SELECT id, status FROM beads.issues WHERE id = ANY($1) AND deleted_at IS NULL`, allBeads)
+	if err != nil {
+		return nil, err
+	}
+	defer bRows.Close()
+
+	for bRows.Next() {
+		var id, status string
+		if err := bRows.Scan(&id, &status); err == nil {
+			beadStatuses[id] = status
+		}
+	}
+
+	for initID, beads := range initToBeads {
+		if len(beads) == 0 {
+			continue
+		}
+		allClosed := true
+		for _, b := range beads {
+			status, exists := beadStatuses[b]
+			if !exists || status != "closed" {
+				allClosed = false
+				break
+			}
+		}
+		if allClosed {
+			promoteReady[initID] = true
+		}
+	}
+
+	return promoteReady, nil
 }
 
 func getDanglingWorkspaces() ([]DanglingWorkspace, error) {
