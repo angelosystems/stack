@@ -14,8 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,138 +44,6 @@ func quantbotPool() (*pgxpool.Pool, error) {
 	}
 	qbPool = p
 	return p, nil
-}
-
-type HostCapacityGo struct {
-	CPU             float64 `json:"cpu"`
-	RAM             float64 `json:"ram"`
-	Disk            float64 `json:"disk"`
-	Swap            float64 `json:"swap"`
-	PSICPU          float64 `json:"psi_cpu"`
-	PSIMemory       float64 `json:"psi_memory"`
-	PSIIO           float64 `json:"psi_io"`
-	Headroom        float64 `json:"headroom"`
-	GovernorVerdict string  `json:"governor_verdict"`
-	CommittedRatio  float64 `json:"committed_ratio"`
-	SwapTrend       string  `json:"swap_trend"`
-	AgeSeconds      int     `json:"age_seconds"`
-	Liveness        string  `json:"liveness"`
-}
-
-func getHostCapacityGo(ctx context.Context) (*HostCapacityGo, error) {
-	qbp, err := quantbotPool()
-	if err != nil {
-		return nil, fmt.Errorf("quantbot database connection failed: %w", err)
-	}
-
-	rows, err := qbp.Query(ctx, `
-		SELECT DISTINCT ON (name) name, published_at, payload->>'value' AS value 
-		FROM public.kpi_events 
-		WHERE owner='infra' AND name IN ('cpu_nuernberg', 'ram_nuernberg', 'disk_nuernberg') 
-		ORDER BY name, published_at DESC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query kpi_events: %w", err)
-	}
-	defer rows.Close()
-
-	var cpu, ram, disk float64
-	var maxPublishedAt time.Time
-
-	for rows.Next() {
-		var name string
-		var pubAt time.Time
-		var valStr string
-		if err := rows.Scan(&name, &pubAt, &valStr); err != nil {
-			return nil, fmt.Errorf("failed to scan kpi_event row: %w", err)
-		}
-		var val float64
-		fmt.Sscanf(valStr, "%f", &val)
-
-		if pubAt.After(maxPublishedAt) {
-			maxPublishedAt = pubAt
-		}
-
-		switch name {
-		case "cpu_nuernberg":
-			cpu = val
-		case "ram_nuernberg":
-			ram = val
-		case "disk_nuernberg":
-			disk = val
-		}
-	}
-
-	// Falls keine Metriken gefunden wurden, Fallback auf plausible Standardwerte
-	if maxPublishedAt.IsZero() {
-		cpu = 42.5
-		ram = 71.2
-		disk = 82.1
-		maxPublishedAt = time.Now()
-	}
-
-	// Berechnungen für abgeleitete Werte
-	headroom := 100.0 - ram
-
-	// Governor Verdict
-	governorVerdict := "healthy"
-	if ram >= 90.0 || cpu >= 95.0 {
-		governorVerdict = "freeze"
-	}
-
-	// Swap
-	swap := (ram - 55.0) * 1.8
-	if swap < 5.0 {
-		swap = 5.0
-	} else if swap > 85.0 {
-		swap = 85.0
-	}
-
-	// PSI
-	psiCpu := cpu * 0.12
-	psiMem := (ram - 45.0) * 0.35
-	if psiMem < 0 {
-		psiMem = 0
-	}
-	psiIo := (disk - 50.0) * 0.08
-	if psiIo < 0 {
-		psiIo = 0
-	}
-
-	// Freeze Marge (committed_ratio, swap_trend)
-	committedRatio := ram * 1.05 / 100.0
-	swapTrend := "stable"
-	if ram > 75.0 {
-		swapTrend = "rising"
-	} else if ram < 60.0 {
-		swapTrend = "falling"
-	}
-
-	// Liveness & Age
-	ageSec := int(time.Now().Sub(maxPublishedAt).Seconds())
-	if ageSec < 0 {
-		ageSec = 0
-	}
-	liveness := "alive"
-	if ageSec >= 60 {
-		liveness = "dead"
-	}
-
-	return &HostCapacityGo{
-		CPU:             cpu,
-		RAM:             ram,
-		Disk:            disk,
-		Swap:            swap,
-		PSICPU:          psiCpu,
-		PSIMemory:       psiMem,
-		PSIIO:           psiIo,
-		Headroom:        headroom,
-		GovernorVerdict: governorVerdict,
-		CommittedRatio:  committedRatio,
-		SwapTrend:       swapTrend,
-		AgeSeconds:      ageSec,
-		Liveness:        liveness,
-	}, nil
 }
 
 // pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
@@ -296,7 +164,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -558,22 +426,106 @@ func cmdServe() *cobra.Command {
 					return
 				}
 				defer rows.Close()
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-				w.Write([]byte("["))
-				first := true
+
+				var items []map[string]any
 				for rows.Next() {
-					var j json.RawMessage
+					var j []byte
 					if err := rows.Scan(&j); err != nil {
 						continue
 					}
-					if !first {
-						w.Write([]byte(","))
+					var item map[string]any
+					if err := json.Unmarshal(j, &item); err == nil {
+						items = append(items, item)
 					}
-					w.Write(j)
-					first = false
 				}
-				w.Write([]byte("]"))
+
+				// Enrich items with lane information based on linked beads
+				if len(items) > 0 {
+					// 1. Gather all initiative IDs
+					initIDs := make([]string, 0, len(items))
+					for _, item := range items {
+						if id, ok := item["id"].(string); ok {
+							initIDs = append(initIDs, id)
+						}
+					}
+
+					// 2. Fetch linked beads from portfolio.initiative_link
+					initToBeads := make(map[string][]string)
+					allBeadIDs := make([]string, 0)
+
+					linkRows, err := p.Query(r.Context(), `
+						SELECT initiative_id, ref 
+						FROM portfolio.initiative_link 
+						WHERE kind = 'bead' AND initiative_id = ANY($1)
+					`, initIDs)
+					if err == nil {
+						defer linkRows.Close()
+						for linkRows.Next() {
+							var initID, beadID string
+							if linkRows.Scan(&initID, &beadID) == nil {
+								initToBeads[initID] = append(initToBeads[initID], beadID)
+								allBeadIDs = append(allBeadIDs, beadID)
+							}
+						}
+					}
+
+					// 3. Fetch lane labels from beads.labels using solartownPool
+					beadLanes := make(map[string]string)
+					if len(allBeadIDs) > 0 {
+						sp, err := solartownPool()
+						if err == nil {
+							labelRows, err := sp.Query(r.Context(), `
+								SELECT issue_id, label 
+								FROM beads.labels 
+								WHERE label LIKE 'lane:%' AND deleted_at IS NULL AND issue_id = ANY($1)
+							`, allBeadIDs)
+							if err == nil {
+								defer labelRows.Close()
+								for labelRows.Next() {
+									var issueID, label string
+									if labelRows.Scan(&issueID, &label) == nil {
+										laneName := strings.TrimPrefix(label, "lane:")
+										beadLanes[issueID] = laneName
+									}
+								}
+							}
+						}
+					}
+
+					// 4. Calculate majority lane for each initiative
+					for _, item := range items {
+						initID, _ := item["id"].(string)
+						beads := initToBeads[initID]
+
+						laneCounts := make(map[string]int)
+						for _, beadID := range beads {
+							if lane, ok := beadLanes[beadID]; ok {
+								laneCounts[lane]++
+							}
+						}
+
+						majorityLane := "untriagiert"
+						maxCount := 0
+						for lane, count := range laneCounts {
+							if count > maxCount {
+								maxCount = count
+								majorityLane = lane
+							} else if count == maxCount {
+								if lane < majorityLane {
+									majorityLane = lane
+								}
+							}
+						}
+						item["lane"] = majorityLane
+					}
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				if items == nil {
+					items = []map[string]any{}
+				}
+				json.NewEncoder(w).Encode(items)
 			})
 			// P5 — Karten-Detail (Side-Peek): Initiative + Links + Event-Historie als ein JSON
 			http.HandleFunc("/api/initiative", func(w http.ResponseWriter, r *http.Request) {
@@ -1151,6 +1103,7 @@ func cmdServe() *cobra.Command {
 					PlanCount         int       `json:"plan_count"`
 					HasLanePlanSignal bool      `json:"has_lane_plan_signal"`
 					Firma             string    `json:"firma"`
+					Lane              string    `json:"lane"`
 				}
 
 				var items []BacklogItem
@@ -1226,6 +1179,7 @@ func cmdServe() *cobra.Command {
 
 					for i := range items {
 						item := &items[i]
+						item.Lane = "untriagiert"
 						item.HasLanePlanSignal = hasSignalMap[item.ID]
 						if info, ok := initMap[item.ID]; ok {
 							item.Firma = info.Firma
@@ -1836,6 +1790,23 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(limits)
 			})
 
+			// Expose Flow thresholds to cockpit UI (P1.2)
+			http.HandleFunc("/api/flow-thresholds", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				thresholds := map[string]map[string]string{}
+				firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
+				stages := []string{"now", "soon", "idea", "watching", "done"}
+				for _, f := range firmas {
+					thresholds[f] = map[string]string{}
+					for _, s := range stages {
+						thresholds[f][s] = GetStageThreshold(f, s).String()
+					}
+				}
+				json.NewEncoder(w).Encode(thresholds)
+			})
+
 			// POST /api/proposal/accept
 			http.HandleFunc("/api/proposal/accept", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -2017,6 +1988,67 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(resp)
 			})
 
+			// POST /api/sage/handover
+			// Defined and implemented handover path Manager -> vk-Sage for workspace-based stagnation (R-D)
+			http.HandleFunc("/api/sage/handover", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+
+				var body struct {
+					InitiativeID string `json:"initiative_id"`
+					WorkspaceID  string `json:"workspace_id"`
+					Reason       string `json:"reason"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				if body.InitiativeID == "" || body.WorkspaceID == "" {
+					http.Error(w, "missing initiative_id or workspace_id", 400)
+					return
+				}
+
+				// 1. Log card symptom by writing a 'sage_action' event with action='handover' on the Initiative
+				payloadMap := map[string]any{
+					"workspace_id":    body.WorkspaceID,
+					"action":          "handover",
+					"reason":          body.Reason,
+					"source":          "manager",
+				}
+				payloadBytes, err := json.Marshal(payloadMap)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				_, err = p.Exec(r.Context(), `
+					INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					VALUES ($1, 'sage_action', 'sage', $2, 'flow-manager')
+				`, body.InitiativeID, string(payloadBytes))
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed to log handover event: %v", err), 500)
+					return
+				}
+
+				// 2. Explicitly notify / trigger vk-Sage to run a sweep of the workspace and handle it
+				select {
+				case sageSweepChan <- struct{}{}:
+				default:
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"ok":true,"handover_status":"received"}`))
+			})
+
 			// POST /api/sage/simulate-outage
 			http.HandleFunc("/api/sage/simulate-outage", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -2070,19 +2102,19 @@ func cmdServe() *cobra.Command {
 				if err == nil {
 					dbConnected = true
 					var cpuTime, ramTime, diskTime time.Time
-					_ = qbp.QueryRow(r.Context(), 
+					_ = qbp.QueryRow(r.Context(),
 						`SELECT (payload->>'value')::float, published_at 
 						 FROM public.kpi_events 
 						 WHERE owner='infra' AND name='cpu_nuernberg' 
 						 ORDER BY id DESC LIMIT 1`).Scan(&dbCPU, &cpuTime)
 
-					_ = qbp.QueryRow(r.Context(), 
+					_ = qbp.QueryRow(r.Context(),
 						`SELECT (payload->>'value')::float, published_at 
 						 FROM public.kpi_events 
 						 WHERE owner='infra' AND name='ram_nuernberg' 
 						 ORDER BY id DESC LIMIT 1`).Scan(&dbRAM, &ramTime)
 
-					_ = qbp.QueryRow(r.Context(), 
+					_ = qbp.QueryRow(r.Context(),
 						`SELECT (payload->>'value')::float, published_at 
 						 FROM public.kpi_events 
 						 WHERE owner='infra' AND name='disk_nuernberg' 
@@ -2265,6 +2297,7 @@ func cmdServe() *cobra.Command {
 			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
 			fmt.Println("  POST /api/github-webhook — GitHub pull_request (HMAC)")
 			fmt.Println("  GET  /api/wip-limits   — Configurable WIP limits")
+			fmt.Println("  GET  /api/flow-thresholds — Configurable flow thresholds")
 			fmt.Println("  POST /api/proposal/accept — Accept proposed card")
 			fmt.Println("  POST /api/proposal/reject — Reject/delete proposed card")
 			return http.ListenAndServe(":"+port, nil)
@@ -3458,6 +3491,31 @@ func parseSqliteTime(s string) (time.Time, error) {
 	return time.Time{}, err
 }
 
+var execBeadStatus = func(beadID string) (string, error) {
+	cmd := exec.Command("bd", "show", beadID, "--json")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	type beadInfo struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+
+	var beads []beadInfo
+	if err := json.Unmarshal(out.Bytes(), &beads); err != nil {
+		return "", err
+	}
+
+	if len(beads) == 0 {
+		return "", fmt.Errorf("no bead found with id %s", beadID)
+	}
+
+	return beads[0].Status, nil
+}
+
 func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) error {
 	ctx := context.Background()
 	vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
@@ -3581,6 +3639,12 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 
 				if time.Since(lastActive) > timeoutDur {
 					isStuckRunning = true
+					bid := extractBeadName(ws.name)
+					if bid != "" {
+						if bstatus, err := execBeadStatus(bid); err == nil && (bstatus == "open" || bstatus == "hooked") {
+							isStuckRunning = false
+						}
+					}
 				}
 			}
 			if !isStuckRunning {
@@ -3650,13 +3714,22 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 				}
 
 				if time.Since(lastActive) > timeoutDur {
-					class = fmt.Sprintf("running-aber-stuck (no update for %v)", time.Since(lastActive).Round(time.Second))
-					action = "escalate"
-					nameLower := strings.ToLower(ws.name)
-					if strings.HasPrefix(nameLower, "sol-") {
-						beadID = strings.TrimPrefix(nameLower, "sol-")
-					} else if strings.HasPrefix(nameLower, "st-") {
-						beadID = nameLower
+					bid := extractBeadName(ws.name)
+					isStuck := true
+					if bid != "" {
+						if bstatus, err := execBeadStatus(bid); err == nil && (bstatus == "open" || bstatus == "hooked") {
+							isStuck = false
+						}
+					}
+					if isStuck {
+						class = fmt.Sprintf("running-aber-stuck (no update for %v)", time.Since(lastActive).Round(time.Second))
+						action = "escalate"
+						nameLower := strings.ToLower(ws.name)
+						if strings.HasPrefix(nameLower, "sol-") {
+							beadID = strings.TrimPrefix(nameLower, "sol-")
+						} else if strings.HasPrefix(nameLower, "st-") {
+							beadID = nameLower
+						}
 					}
 				}
 			}
@@ -3693,6 +3766,8 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 					SELECT EXISTS(
 						SELECT 1 FROM portfolio.initiative_event 
 						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
+						  AND (payload->>'action' IS NULL OR payload->>'action' != 'handover')
+						  AND (payload->>'proposed_action' IS NULL OR payload->>'proposed_action' != 'handover')
 					)
 				`, initiativeID, ws.id).Scan(&exists)
 				if err != nil {

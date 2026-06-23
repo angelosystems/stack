@@ -4,6 +4,10 @@
 
 !.gitignore
 !README.md
+!deploy-manifest.yaml
+!.github/
+!.github/workflows/
+!.github/workflows/**
 !Makefile
 !apps/
 !docs/
@@ -27,6 +31,8 @@ apps/**
 
 tools/*
 !tools/*.sh
+!tools/twenty/
+!tools/twenty/**
 !tools/portfolio/
 !tools/portfolio/**
 !tools/master-kanban/
@@ -45,7 +51,7 @@ docs/*
 
 **/.env
 **/.env.*
-!tools/twenty/.env.example
+!**/.env.example
 **/node_modules/
 **/.next/
 

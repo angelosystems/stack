@@ -221,6 +221,10 @@
                           <div class="font-medium leading-snug" x-text="c.title"></div>
                           <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
                             <span class="text-[10px] text-slate-400" x-text="c.id"></span>
+                            <span class="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                                  :class="c.lane === 'hacker' ? 'bg-amber-100 text-amber-800' : (c.lane === 'plan' ? 'bg-sky-100 text-sky-800' : 'bg-slate-100 text-slate-600')"
+                                  x-text="c.lane === 'hacker' ? '⚡ Hacker (vk)' : (c.lane === 'plan' ? '🏭 Solartown (Polecats)' : '○ untriagiert')">
+                            </span>
                             <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
                             <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
                             <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
@@ -327,6 +331,10 @@
             <li class="px-5 py-2 flex items-center gap-3 text-sm hover:bg-slate-50">
               <span class="text-[10px] text-slate-400 w-20 shrink-0" x-text="b.id"></span>
               <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 shrink-0" x-text="b.rig"></span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
+                    :class="b.lane === 'hacker' ? 'bg-amber-100 text-amber-800' : (b.lane === 'plan' ? 'bg-sky-100 text-sky-800' : 'bg-slate-100 text-slate-600')"
+                    x-text="b.lane === 'hacker' ? '⚡ Hacker (vk)' : (b.lane === 'plan' ? '🏭 Solartown (Polecats)' : '○ untriagiert')">
+              </span>
               <span class="flex-1 truncate" x-text="b.title"></span>
               <span class="text-[10px] text-slate-400 shrink-0" x-text="ageOf(b.created_at)"></span>
               <button @click="openDispatch(b)" class="shrink-0 text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>

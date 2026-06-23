@@ -1,52 +1,65 @@
 ---
-slug: fundraising-crm-twenty
-layer: delivery
+title: Fundraising-CRM (Twenty) — Delivery-Report
+slug: fundraising-crm-twenty-delivery
 status: abandoned
+layer: delivery
 parent_plan: docs/plans/fundraising-crm-twenty-prd.md
-delivered: 2026-06-23
+created: 2026-06-23
 ---
 
-# Delivery-Report — Fundraising-CRM (Twenty)
+# Fundraising-CRM (Twenty) — Delivery-Report
 
-**Status: ABANDONED (2026-06-23)**  
-Stay Awesome hat bereits einen HubSpot-Account. Self-Host-Twenty wird nicht gebaut; Fundraising-Tracking läuft in HubSpot (Pragmatik + natives Gmail-Logging > Souveränität für diese Runde).
+## Kontext & Status
 
-## Verlauf
+**Status: Abgebrochen (Abandoned) am 2026-06-23.**
 
-| Phase / Epic | Ergebnis |
-|---|---|
-| E1 Box-Vorbereitung | Übersprungen (Projekt abgebrochen) |
-| E2 Twenty-Stack hochfahren | Übersprungen (Projekt abgebrochen) |
-| E3 nginx + TLS | Übersprungen (Projekt abgebrochen) |
-| E4 Initial-Setup & Pipeline | Übersprungen (Projekt abgebrochen) |
-| E5 Integration & Doku | **Teilweise umgesetzt:** Deploy-Artefakte (`docker-compose.yml` und `.env.example`) unter `tools/twenty/` im Repository eingecheckt (G9), um einen reproduzierbaren Stand für die Zukunft zu wahren. |
+Wie im PRD (`docs/plans/fundraising-crm-twenty-prd.md`) dokumentiert, hat Stay Awesome bereits einen aktiven HubSpot-Account. Aus Gründen der Pragmatik und des nativen Gmail-Loggings wird das Fundraising-Tracking in HubSpot fortgeführt. Das Self-Hosted Twenty CRM wird daher vorerst nicht produktiv auf der `deploy`-Box aufgesetzt.
 
-## Gates / Kriterien
+Dieser Delivery-Report dokumentiert die Erfüllung des Ziels **G9** (reproduzierbarer Deploy durch Einpflegen der Compose- und Env-Vorlagen ins Repository), während alle anderen Betriebsziele aufgrund des HubSpot-Entscheids als obsolet/nicht anwendbar deklariert wurden. Der PRD und die Deploy-Artefakte bleiben als vollständiger Entscheidungs- und Wiederaufsetz-Trail im Repository erhalten.
 
-| Gate | Status | Detail |
+## Nachvollziehbarkeit & Artefakte
+
+Die Deployment-Artefakte wurden unter `tools/twenty/` eingecheckt, um ein jederzeitiges, reproduzierbares Aufsetzen zu ermöglichen.
+
+| Datei | Pfad | Beschreibung |
 |---|---|---|
-| G1 Erreichbarkeit | ❌ Übersprungen | crm.stayawesome.app wurde nicht aufgeschaltet. |
-| G2 DNS | ❌ Übersprungen | DNS-Eintrag nicht angelegt. |
-| G3 Auth / Login-Wand | ❌ Übersprungen | Nicht relevant da kein Deploy. |
-| G4 Pipeline | ❌ Übersprungen | Keine Instanz konfiguriert. |
-| G5 DB-Isolation | ❌ Übersprungen | Keine Postgres-Instanz angelegt. |
-| G6 nginx-vhost | ❌ Übersprungen | Kein nginx-vhost auf deploy konfiguriert. |
-| G7 Cockpit-Registrierung | ❌ Übersprungen | Kein Eintrag in manifests/external. |
-| G8 Admin-Credentials in Vault | ❌ Übersprungen | Keine Zugangsdaten generiert. |
-| G9 Reproduzierbarer Deploy | ✅ Erfüllt | `docker-compose.yml` und `.env.example` unter `tools/twenty/` im Repo versioniert. |
+| Docker Compose | `tools/twenty/docker-compose.yml` | Stack aus `twenty-server`, `twenty-worker`, `twenty-postgres` (mit den nötigen Postgres-Extensions) und `twenty-redis` |
+| Env Template | `tools/twenty/.env.example` | Konfigurations-Schlüssel für DB, Redis, Ports, Signup-Disabling und Security-Secrets |
 
-## Entscheidungshintergrund
+## Abgleich der Ziele (G1–G9)
 
-Es wurde pragmatisch entschieden, auf HubSpot zu setzen. Die Integration mit Gmail und das native Logging von E-Mails out-of-the-box sparte wertvolle Setup- und Wartungszeit für die anstehende Fundraising-Runde.
+| ID | Success-Kriterium | Status | Bemerkung |
+|---|---|---|---|
+| **G1** | Twenty erreichbar unter `https://crm.stayawesome.app` mit gültigem TLS | 🚫 Abgebrochen | HubSpot-Wechsel hat Priorität |
+| **G2** | DNS `crm.stayawesome.app` → deploy-IP, proxied via CF | 🚫 Abgebrochen | HubSpot-Wechsel hat Priorität |
+| **G3** | Kein offener Zugang: Login-Wand vor jeder Funktion | 🚫 Abgebrochen | HubSpot-Wechsel hat Priorität |
+| **G4** | Fundraising-Pipeline existiert mit allen 6 Stages | 🚫 Abgebrochen | HubSpot-Wechsel hat Priorität |
+| **G5** | Twenty-DB isoliert von sa-db (eigene Postgres-Instanz) | 🚫 Abgebrochen | HubSpot-Wechsel hat Priorität |
+| **G6** | nginx-vhost folgt system-nginx-Konvention | 🚫 Abgebrochen | HubSpot-Wechsel hat Priorität |
+| **G7** | App im SA-Cockpit registriert | 🚫 Abgebrochen | HubSpot-Wechsel hat Priorität |
+| **G8** | Admin-Credentials + APP_SECRET in Vault | 🚫 Abgebrochen | HubSpot-Wechsel hat Priorität |
+| **G9** | Deploy reproduzierbar (compose + env-template getrackt) | ✅ Erfüllt | Artefakte im Repo unter `tools/twenty/` committet |
 
-Die Docker-Compose- und Umgebungsvariablen-Templates wurden dennoch ins Repository aufgenommen, damit bei einer zukünftigen Entscheidung zur Migration auf Twenty ein reproduzierbares Fundament bereitliegt.
+## Installationsanleitung (bei Re-Aktivierung)
 
-## Verifikation
+Falls sich Stay Awesome in Zukunft für eine Migration von HubSpot auf Twenty entscheidet, kann der Stack wie folgt initialisiert werden:
 
-Im Rahmen der finalen Übergabe wurden die im Repository unter `tools/twenty/` versionierten Deploy-Artefakte verifiziert:
-- `docker-compose.yml`: Definiert die komplette Service-Struktur (Server, Worker, DB, Redis) inklusive korrekter Healthchecks, Volumes und Restart-Policys.
-- `.env.example`: Dokumentiert alle notwendigen Umgebungsvariablen für eine reibungslose Instanziierung.
-- `.gitignore`: Wurde so angepasst, dass `tools/twenty/` und die entsprechenden Beispiel-Konfigurationen getrackt werden, während schützenswerte Secrets ausgeschlossen bleiben.
-
-Damit ist das Kriterium G9 vollständig und reproduzierbar erfüllt.
-
+1. **Verzeichnis erstellen & Dateien kopieren:**
+   ```bash
+   mkdir -p /opt/twenty
+   cp tools/twenty/docker-compose.yml /opt/twenty/
+   cp tools/twenty/.env.example /opt/twenty/.env
+   ```
+2. **Secrets generieren:**
+   Zwei sichere, zufällige Zeichenketten für `APP_SECRET` und `ENCRYPTION_KEY` erzeugen:
+   ```bash
+   openssl rand -base64 32
+   ```
+   Die Werte in `/opt/twenty/.env` eintragen und das Datenbank-Passwort anpassen.
+3. **Stack hochfahren:**
+   ```bash
+   cd /opt/twenty
+   docker compose up -d
+   ```
+4. **Reverse-Proxy (Nginx) konfigurieren:**
+   Einen system-nginx-vhost für `crm.stayawesome.app` anlegen und Requests auf `http://127.0.0.1:3000` weiterleiten. TLS per Certbot-Webroot einrichten.
