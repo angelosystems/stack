@@ -95,12 +95,18 @@ können als no-changes/Duplikat geschlossen sein, wie diese Session mehrfach
 zeigte); ein false-Promote würde unfertige Arbeit als erledigt markieren. Darum
 strikt propose→confirm.
 
-### L5 — Board-Review-Digest
-Periodischer Lauf (+ edge-getriggert, wenn Aktivitäts-Stille eine Schwelle
-überschreitet) erzeugt einen Digest, sichtbar als Board-Ansicht **„🩺 Manager"**:
-„3 Karten >X in NOW ohne Aktivität → 1 stockt, 2 promote-reif; 2 IDEA veraltet;
-NOW überläuft bei stayawesome". Genau „was bewegt sich nicht, was muss
-angestoßen werden" — an einem Ort, statt selbst zu suchen.
+### L5 — Board-Review-Digest & Aktive Zustellung (Push-Kanal)
+Ein periodischer Lauf erzeugt einen aggregierten **Board-Review-Digest**. Um einen proaktiven Manager zu garantieren, wird dieser Digest nicht nur passiv im Cockpit bereitgestellt, sondern über **aktive Push-Zustellkanäle** zugestellt:
+
+1. **Gas Town Mail (Primärkanal):**
+   - **Ziel:** Der Digest wird proaktiv als Markdown-Bericht an den konfigurierten Empfänger (Standard: `mariobrain/`, überschreibbar per `PORTFOLIO_DIGEST_RECIPIENT`) zugestellt.
+   - **Befehl:** Nutzt das systemeigene `gt mail send <recipient> -s "🩺 Flow-Manager Board-Review Digest" --stdin` Tool.
+   - **Inhalt:** Strukturierter Markdown-Bericht mit aggregierten Metriken (Gesamtzahl geflaggter Karten, Verteilung nach Stagnation/Promote-reif/Backlog-Fäule/WIP-Überlauf) sowie detaillierten Diagnoseergebnissen und vorgeschlagenen Aktionen je Karte.
+
+2. **Dashboard / Console (Ausweichkanal & Liveness):**
+   - **Ziel:** Ausgabe im Standard-Output (Journal-Logs) für volle Audit-Sicherheit und Systemüberwachung.
+
+*Telegram wird als Zustellkanal aus Sicherheits- und Datenschutzgründen explizit ausgeschlossen.*
 
 ### L6 — Selbst-Liveness + Budget
 Der Manager hat einen eigenen Heartbeat (ein ausgefallener Lauf ist sichtbar,
