@@ -157,6 +157,146 @@ func solartownPool() (*pgxpool.Pool, error) {
 	return p, nil
 }
 
+var getCaptureCompletenessFunc = getCaptureCompleteness
+
+// getCaptureCompleteness calculates system-wide capture completeness percentage
+func getCaptureCompleteness(ctx context.Context, p *pgxpool.Pool) (float64, error) {
+	var linkedBeadsRegular, linkedBeadsCatchall, unlinkedBeads int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedBeadsRegular)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedBeadsCatchall)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='bead'`).Scan(&unlinkedBeads)
+
+	var linkedWorkspacesRegular, linkedWorkspacesCatchall, unlinkedWorkspaces int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedWorkspacesRegular)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedWorkspacesCatchall)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='vk_workspace'`).Scan(&unlinkedWorkspaces)
+
+	var unlinkedRigs int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='rig'`).Scan(&unlinkedRigs)
+
+	totalBeads := linkedBeadsRegular + linkedBeadsCatchall + unlinkedBeads
+	totalWorkspaces := linkedWorkspacesRegular + linkedWorkspacesCatchall + unlinkedWorkspaces
+	totalRigs := unlinkedRigs
+	totalWorkItems := totalBeads + totalWorkspaces + totalRigs
+	linkedWorkItems := (linkedBeadsRegular + linkedBeadsCatchall) + (linkedWorkspacesRegular + linkedWorkspacesCatchall)
+
+	if totalWorkItems == 0 {
+		return 0.0, nil
+	}
+	return (float64(linkedWorkItems) / float64(totalWorkItems)) * 100.0, nil
+}
+
+// enrichInitiativesWithPromoteReady determines if initiatives are ready for promotion and their confidence
+func enrichInitiativesWithPromoteReady(ctx context.Context, p *pgxpool.Pool, items []map[string]any) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	// 1. Gather all initiative IDs
+	initIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if id, ok := item["id"].(string); ok {
+			initIDs = append(initIDs, id)
+		}
+	}
+
+	// 2. Fetch linked beads from portfolio.initiative_link
+	initToBeads := make(map[string][]string)
+	allBeadIDs := make([]string, 0)
+
+	linkRows, err := p.Query(ctx, `
+		SELECT initiative_id, ref 
+		FROM portfolio.initiative_link 
+		WHERE kind = 'bead' AND initiative_id = ANY($1)
+	`, initIDs)
+	if err != nil {
+		return err
+	}
+	defer linkRows.Close()
+	for linkRows.Next() {
+		var initID, beadID string
+		if linkRows.Scan(&initID, &beadID) == nil {
+			initToBeads[initID] = append(initToBeads[initID], beadID)
+			allBeadIDs = append(allBeadIDs, beadID)
+		}
+	}
+
+	// 3. Fetch status of linked beads from beads.issues using solartownPool
+	beadStatuses := make(map[string]string)
+	if len(allBeadIDs) > 0 {
+		sp, err := solartownPool()
+		if err == nil {
+			statusRows, err := sp.Query(ctx, `
+				SELECT id, status 
+				FROM beads.issues 
+				WHERE deleted_at IS NULL AND id = ANY($1)
+			`, allBeadIDs)
+			if err == nil {
+				defer statusRows.Close()
+				for statusRows.Next() {
+					var issueID, status string
+					if statusRows.Scan(&issueID, &status) == nil {
+						beadStatuses[issueID] = status
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Fetch overall capture completeness
+	completeness, err := getCaptureCompletenessFunc(ctx, p)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching capture completeness: %v\n", err)
+		completeness = 0.0
+	}
+
+	// 5. Determine promote-readiness and add properties
+	for _, item := range items {
+		initID, _ := item["id"].(string)
+		stage, _ := item["stage"].(string)
+		beads := initToBeads[initID]
+
+		// An initiative is Promote-ready if:
+		// - its current stage is "now"
+		// - it has at least one linked bead
+		// - all linked beads are closed
+		promoteReady := false
+		if stage == "now" && len(beads) > 0 {
+			allClosed := true
+			for _, beadID := range beads {
+				status, exists := beadStatuses[beadID]
+				if !exists || status != "closed" {
+					allClosed = false
+					break
+				}
+			}
+			promoteReady = allClosed
+		}
+
+		item["promote_ready"] = promoteReady
+		if completeness >= 60.0 {
+			item["promote_ready_confidence"] = "high"
+			item["promote_ready_caveat"] = ""
+		} else {
+			item["promote_ready_confidence"] = "low"
+			if promoteReady {
+				item["promote_ready_caveat"] = fmt.Sprintf("Geringe Linkage-Abdeckung (%.1f%% < 60.0%%): Auto-Promotion nach watching gedämpft", completeness)
+			} else {
+				item["promote_ready_caveat"] = ""
+			}
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	root := &cobra.Command{
 		Use:   "master-kanban",
@@ -649,11 +789,15 @@ func cmdServe() *cobra.Command {
 					}
 				}
 
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Access-Control-Allow-Origin", "*")
 				if items == nil {
 					items = []map[string]any{}
 				}
+				if err := enrichInitiativesWithPromoteReady(r.Context(), p, items); err != nil {
+					fmt.Fprintf(os.Stderr, "Error enriching initiatives with promote ready: %v\n", err)
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
 				json.NewEncoder(w).Encode(items)
 			})
 			// P5 — Karten-Detail (Side-Peek): Initiative + Links + Event-Historie als ein JSON
@@ -796,6 +940,14 @@ func cmdServe() *cobra.Command {
 
 					initMap["flow_signals"] = signals
 					rawObj["flow_signals"] = signals
+
+					// Also enrich with promote ready/damped
+					enrichList := []map[string]any{initMap}
+					if err := enrichInitiativesWithPromoteReady(r.Context(), p, enrichList); err == nil {
+						rawObj["initiative"] = enrichList[0]
+					} else {
+						fmt.Fprintf(os.Stderr, "Error enriching initiative with promote ready: %v\n", err)
+					}
 				}
 
 				w.Header().Set("Content-Type", "application/json")
@@ -1021,11 +1173,25 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
-				_, err := p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, body.Id, body.Stage)
+
+				var fromStage string
+				err := p.QueryRow(r.Context(), `SELECT stage FROM portfolio.initiative WHERE id = $1`, body.Id).Scan(&fromStage)
+				if err != nil {
+					http.Error(w, "initiative nicht gefunden: "+err.Error(), 404)
+					return
+				}
+
+				_, err = p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, body.Id, body.Stage)
 				if err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
+
+				_, _ = p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, from_stage, to_stage, actor)
+					 VALUES ($1, 'moved', 'master', $2, $3, $4)`,
+					body.Id, fromStage, body.Stage, actorFrom(r))
+
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
 			http.HandleFunc("/api/capture", func(w http.ResponseWriter, r *http.Request) {
@@ -2118,6 +2284,22 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
+				// 3.5 Log the created event on the new real initiative card
+				payloadBytes, _ := json.Marshal(map[string]any{
+					"title":       title,
+					"proposal_id": body.Id,
+					"bead_id":     cardID,
+					"note":        "Proposal accepted and initiative card created",
+				})
+				_, err = tx.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, to_stage, payload, actor)
+					 VALUES ($1, 'created', 'master', 'idea', $2, $3)`,
+					cardID, payloadBytes, actorFrom(r))
+				if err != nil {
+					http.Error(w, "Failed to insert created event: "+err.Error(), 500)
+					return
+				}
+
 				// Commit transaction so portfolio state is stored
 				if err := tx.Commit(r.Context()); err != nil {
 					http.Error(w, err.Error(), 500)
@@ -2177,8 +2359,32 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
+
+				var title, firma string
+				err := p.QueryRow(r.Context(), `SELECT title, firma FROM portfolio.initiative WHERE id = $1`, body.Id).Scan(&title, &firma)
+				if err == nil && firma != "" {
+					prefix := firmaPrefix[firma]
+					if prefix != "" {
+						catchAllID := prefix + "-catch-all"
+						var exists bool
+						_ = p.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id=$1)`, catchAllID).Scan(&exists)
+						if exists {
+							payloadBytes, _ := json.Marshal(map[string]any{
+								"proposal_id": body.Id,
+								"title":       title,
+								"action":      "reject",
+								"note":        fmt.Sprintf("Proposal %q rejected/discarded by manager", title),
+							})
+							_, _ = p.Exec(r.Context(),
+								`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+								 VALUES ($1, 'activity', 'master', $2, $3)`,
+								catchAllID, payloadBytes, actorFrom(r))
+						}
+					}
+				}
+
 				// Verwerfen löscht spurlos
-				_, err := p.Exec(r.Context(), `DELETE FROM portfolio.initiative WHERE id = $1`, body.Id)
+				_, err = p.Exec(r.Context(), `DELETE FROM portfolio.initiative WHERE id = $1`, body.Id)
 				if err != nil {
 					http.Error(w, err.Error(), 500)
 					return
@@ -3361,6 +3567,29 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 	}
 
 	if openCount == 0 {
+		completeness, err := getCaptureCompletenessFunc(ctx, p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking completeness: %v\n", err)
+			completeness = 0.0
+		}
+
+		if completeness < 60.0 {
+			fmt.Printf("⚠ Auto-Stage: %s promote-ready (all beads closed), BUT confidence is low (completeness %.1f%% < 60.0%%). Auto-stage to watching is DAMPED (skipped).\n", initiativeID, completeness)
+			payload, _ := json.Marshal(map[string]any{
+				"message":      "Auto-Promotion nach watching gedämpft wegen niedriger Linkage-Abdeckung",
+				"completeness": completeness,
+				"threshold":    60.0,
+			})
+			_, err = p.Exec(ctx, `
+				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				VALUES ($1, 'promote_damped', 'master', $2::jsonb, 'auto-stage')
+			`, initiativeID, payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error inserting promote_damped event: %v\n", err)
+			}
+			return
+		}
+
 		var exists bool
 		_ = p.QueryRow(ctx, `
 			SELECT EXISTS(
