@@ -147,6 +147,7 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 	}
 
 	// Run proposal check
+	_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE stage='soon' AND id NOT LIKE 'proposal-%'")
 	checkFirmaProposals(pPool, "solartown")
 
 	// Verify proposal card was created in the database
