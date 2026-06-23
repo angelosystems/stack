@@ -2413,12 +2413,15 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
+				var isLiveGeld bool
+				_ = p.QueryRow(r.Context(), "SELECT COALESCE(firma = 'quantbot', false) FROM portfolio.initiative WHERE id = $1", body.Id).Scan(&isLiveGeld)
+
 				payloadMap := map[string]any{
 					"action":       "escalate",
 					"reason":       body.Reason,
 					"timestamp":    time.Now().Format(time.RFC3339),
 					"heal_count":   0,
-					"is_live_geld": false,
+					"is_live_geld": isLiveGeld,
 				}
 				payloadBytes, _ := json.Marshal(payloadMap)
 

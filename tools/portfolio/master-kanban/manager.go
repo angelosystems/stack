@@ -204,6 +204,7 @@ func runManagerSweep(p *pgxpool.Pool) error {
 		signal.ActivityStaleHrs = time.Since(signal.LastActivity).Hours()
 
 		// Fetch bead count details if Dolt is reachable
+		var beads []LinkedBead
 		if spErr == nil && sp != nil {
 			var beadRefs []string
 			linkRows, err := p.Query(ctx, `
@@ -224,14 +225,15 @@ func runManagerSweep(p *pgxpool.Pool) error {
 				signal.TotalBeads = len(beadRefs)
 				// Query beads status in Dolt
 				beadRows, err := sp.Query(ctx, `
-					SELECT status FROM beads.issues
+					SELECT id, status FROM beads.issues
 					WHERE id = ANY($1)
 				`, beadRefs)
 				if err == nil {
 					defer beadRows.Close()
 					for beadRows.Next() {
-						var status string
-						if beadRows.Scan(&status) == nil {
+						var id, status string
+						if beadRows.Scan(&id, &status) == nil {
+							beads = append(beads, LinkedBead{Ref: id, Status: status})
 							if status == "closed" {
 								signal.ClosedBeads++
 							} else if status == "open" || status == "in_progress" || status == "hooked" {
@@ -241,44 +243,32 @@ func runManagerSweep(p *pgxpool.Pool) error {
 					}
 				}
 			}
+		}
 
-			// Check Vibe Kanban links for running executions/workspaces
-			var vkRefs []string
-			vkLinkRows, err := p.Query(ctx, `
-				SELECT ref FROM portfolio.initiative_link
-				WHERE initiative_id = $1 AND kind = 'vk_workspace'
+		// Check Vibe Kanban links for running executions/workspaces
+		var workspaces []LinkedWorkspace
+		vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
+		if _, statErr := os.Stat(vkDB); statErr == nil {
+			wsQuery := fmt.Sprintf(`
+				SELECT hex(w.id), COALESCE(ep.status, '')
+				FROM workspaces w
+				JOIN sessions s ON s.workspace_id = w.id
+				LEFT JOIN execution_processes ep ON ep.session_id = s.id
+				WHERE w.name LIKE '%%%s%%' AND w.archived = 0
+				ORDER BY ep.created_at DESC;
 			`, init.id)
-			if err == nil {
-				defer vkLinkRows.Close()
-				for vkLinkRows.Next() {
-					var ref string
-					if vkLinkRows.Scan(&ref) == nil {
-						vkRefs = append(vkRefs, ref)
-					}
-				}
-			}
-
-			if len(vkRefs) > 0 {
-				// Query Vibe Kanban SQLite DB for active running executions
-				vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
-				if _, statErr := os.Stat(vkDB); statErr == nil {
-					for _, ref := range vkRefs {
-						hexID := strings.ToUpper(strings.ReplaceAll(ref, "-", ""))
-						query := fmt.Sprintf(`
-							SELECT count(*) 
-							FROM workspaces w
-							JOIN sessions s ON s.workspace_id = w.id
-							JOIN execution_processes ep ON ep.session_id = s.id
-							WHERE hex(w.id)='%s' AND ep.status='running';
-						`, hexID)
-						cmd := exec.Command("sqlite3", "-readonly", vkDB, query)
-						var out bytes.Buffer
-						cmd.Stdout = &out
-						if cmd.Run() == nil {
-							var count int
-							if _, scanErr := fmt.Sscanf(strings.TrimSpace(out.String()), "%d", &count); scanErr == nil && count > 0 {
-								signal.HasActiveWork = true
-							}
+			sqliteCmd := exec.Command("sqlite3", "-readonly", vkDB, wsQuery)
+			var wsOut bytes.Buffer
+			sqliteCmd.Stdout = &wsOut
+			if err := sqliteCmd.Run(); err == nil {
+				wsLines := strings.Split(strings.TrimSpace(wsOut.String()), "\n")
+				for _, line := range wsLines {
+					parts := strings.Split(line, "|")
+					if len(parts) >= 2 {
+						workspaces = append(workspaces, LinkedWorkspace{ID: parts[0], Status: parts[1]})
+						status := strings.ToLower(parts[1])
+						if status == "running" || status == "queued" || status == "waiting" || status == "pending" || status == "" {
+							signal.HasActiveWork = true
 						}
 					}
 				}
@@ -287,6 +277,12 @@ func runManagerSweep(p *pgxpool.Pool) error {
 
 		if signal.ActiveBeads > 0 {
 			signal.HasActiveWork = true
+		}
+
+		// Check if lower layers (Reactor, vk-Sage) are engaged (MUST-FIX Nygard/Newman)
+		engaged, _, err := isLowerLayerEngaged(ctx, p, init.id, beads, workspaces)
+		if err == nil && engaged {
+			continue
 		}
 
 		// 1. Detection: Stagnation (stockend)
@@ -334,7 +330,19 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			if err == nil {
 				var actions []ProposalAction
 				// Low-Confidence underdrückt Aktions-Vorschläge (R-B / Acceptanz-Kriterium)
-				if strings.ToLower(confidence) != "low" {
+				if init.firma == "quantbot" {
+					actions = []ProposalAction{
+						{
+							Label:    "Eskalieren",
+							Endpoint: "/api/escalate",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":     init.id,
+								"reason": "Eskalation wegen Stagnation (Inaktivität)",
+							},
+						},
+					}
+				} else if strings.ToLower(confidence) != "low" {
 					if proposedAction != "" && proposedAction != "handover" {
 						actions = append(actions, ProposalAction{
 							Label:    proposedAction,
@@ -419,7 +427,19 @@ func runManagerSweep(p *pgxpool.Pool) error {
 			if err == nil {
 				var actions []ProposalAction
 				// Low-Confidence underdrückt Aktions-Vorschläge (R-B / Acceptanz-Kriterium)
-				if strings.ToLower(confidence) != "low" {
+				if init.firma == "quantbot" {
+					actions = []ProposalAction{
+						{
+							Label:    "Eskalieren",
+							Endpoint: "/api/escalate",
+							Method:   "POST",
+							Payload: map[string]any{
+								"id":     init.id,
+								"reason": "Eskalation wegen Promote-Bereitschaft (Live-Geld)",
+							},
+						},
+					}
+				} else if strings.ToLower(confidence) != "low" {
 					nowCount := wipCounts[init.firma]
 					targetStage := GetPromoteTargetStage(ctx, p, sp, spErr, init.stage, init.firma, nowCount)
 					actions = []ProposalAction{
