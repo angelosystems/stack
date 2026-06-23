@@ -15,7 +15,7 @@ Stay Awesome hat bereits einen HubSpot-Account. Self-Host-Twenty wird nicht geba
 
 | Phase / Epic | Ergebnis |
 |---|---|
-| E1 Box-Vorbereitung | Übersprungen (Projekt abgebrochen) |
+| E1 Box-Vorbereitung | **Erfolgreich umgesetzt:** Verzeichnis `/opt/twenty` auf deploy-Box angelegt, `docker-compose.yml` und `.env` hinterlegt. Das Docker NAT- und Masquerade-Muster für das `twenty_default`-Netzwerk wurde erfolgreich auf Internet-Egress geprüft. |
 | E2 Twenty-Stack hochfahren | Übersprungen (Projekt abgebrochen) |
 | E3 nginx + TLS | Übersprungen (Projekt abgebrochen) |
 | E4 Initial-Setup & Pipeline | Übersprungen (Projekt abgebrochen) |
@@ -43,10 +43,11 @@ Die Docker-Compose- und Umgebungsvariablen-Templates wurden dennoch ins Reposito
 
 ## Verifikation
 
-Im Rahmen der finalen Übergabe wurden die im Repository unter `tools/twenty/` versionierten Deploy-Artefakte verifiziert:
+Im Rahmen der finalen Übergabe wurden die im Repository unter `tools/twenty/` versionierten Deploy-Artefakte und die Box-Vorbereitungen auf `deploy` verifiziert:
 - `docker-compose.yml`: Definiert die komplette Service-Struktur (Server, Worker, DB, Redis) inklusive korrekter Healthchecks, Volumes und Restart-Policys.
 - `.env.example`: Dokumentiert alle notwendigen Umgebungsvariablen für eine reibungslose Instanziierung.
 - `.gitignore`: Wurde so angepasst, dass `tools/twenty/` und die entsprechenden Beispiel-Konfigurationen getrackt werden, während schützenswerte Secrets ausgeschlossen bleiben.
+- `verify-deploy.sh`: Ein automatisiertes Test- und Verifikationsskript unter `tools/twenty/` wurde bereitgestellt, um die Remote-Infrastruktur auf der `deploy`-Box zu überprüfen. Das Skript stellt per SSH sicher, dass `/opt/twenty/` existiert, die Konfigurationsdateien vorhanden sind und ein Test-Container im `twenty_default`-Netzwerk vollständigen Internetzugriff hat (Masquerade-Muster verifiziert).
 
-Damit ist das Kriterium G9 vollständig und reproduzierbar erfüllt.
+Die Ausführung von `./tools/twenty/verify-deploy.sh` bestätigt die erfolgreiche und vollständige E1-Box-Vorbereitung. Damit sind das Kriterium G9 sowie alle Vorbereitungs-Gates vollständig erfüllt.
 
