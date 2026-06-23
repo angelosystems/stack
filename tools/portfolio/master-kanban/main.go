@@ -3265,11 +3265,29 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 	}
 
 	if openCount == 0 {
-		_, err := p.Exec(ctx, `UPDATE portfolio.initiative SET stage='watching' WHERE id=$1 AND stage='now'`, initiativeID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error updating stage to watching: %v\n", err)
-		} else {
-			fmt.Printf("✓ Auto-Stage: %s moved to watching (all beads closed)\n", initiativeID)
+		var exists bool
+		_ = p.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM portfolio.initiative_event
+				WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = 'all-beads-closed'
+			)
+		`, initiativeID).Scan(&exists)
+		if !exists {
+			payloadBytes, _ := json.Marshal(map[string]any{
+				"classification":  "all-beads-closed",
+				"proposed_action": "stage-promotion",
+				"to_stage":        "watching",
+				"reason":          "Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu 'watching').",
+			})
+			_, err = p.Exec(ctx, `
+				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+			`, initiativeID, string(payloadBytes))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error logging sage_action for all beads closed: %v\n", err)
+			} else {
+				fmt.Printf("✓ Proposed stage promotion for initiative %s because all beads are closed\n", initiativeID)
+			}
 		}
 	}
 }
@@ -4107,11 +4125,160 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 		}
 	}
 
+	if !onlyStuckCheck {
+		runInitiativeChecks(ctx, p, printToStdout)
+	}
+
 	return nil
 }
 
 func runSageSweepEx(ctx context.Context, p *pgxpool.Pool, onlyStuck bool) {
 	_ = runSageSweep(p, false, onlyStuck)
+}
+
+func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout bool) {
+	// 1. "alle Beads closed" check:
+	rows, err := p.Query(ctx, `
+		SELECT id, stage, title, firma FROM portfolio.initiative 
+		WHERE stage NOT IN ('done', 'watching') AND archived_at IS NULL
+	`)
+	if err == nil {
+		type InitInfo struct {
+			ID, Stage, Title, Firma string
+		}
+		var activeInits []InitInfo
+		for rows.Next() {
+			var ii InitInfo
+			if rows.Scan(&ii.ID, &ii.Stage, &ii.Title, &ii.Firma) == nil {
+				activeInits = append(activeInits, ii)
+			}
+		}
+		rows.Close()
+
+		for _, init := range activeInits {
+			linkRows, err := p.Query(ctx, "SELECT ref FROM portfolio.initiative_link WHERE initiative_id=$1 AND kind='bead'", init.ID)
+			if err != nil {
+				continue
+			}
+			var beads []string
+			for linkRows.Next() {
+				var ref string
+				if linkRows.Scan(&ref) == nil {
+					beads = append(beads, ref)
+				}
+			}
+			linkRows.Close()
+
+			if len(beads) == 0 {
+				continue
+			}
+
+			sp, err := solartownPool()
+			if err != nil {
+				continue
+			}
+			var openCount int
+			err = sp.QueryRow(ctx, `SELECT count(*) FROM beads.issues WHERE id=ANY($1) AND status<>'closed' AND deleted_at IS NULL`, beads).Scan(&openCount)
+			if err == nil && openCount == 0 {
+				var exists bool
+				_ = p.QueryRow(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM portfolio.initiative_event
+						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = 'all-beads-closed'
+					)
+				`, init.ID).Scan(&exists)
+				if !exists {
+					payloadBytes, _ := json.Marshal(map[string]any{
+						"classification":  "all-beads-closed",
+						"proposed_action": "stage-promotion",
+						"to_stage":        "watching",
+						"reason":          "Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu 'watching').",
+					})
+					_, err = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+					`, init.ID, string(payloadBytes))
+					if err != nil {
+						if printToStdout {
+							fmt.Fprintf(os.Stderr, " -> Error logging sage_action for all beads closed: %v\n", err)
+						}
+					} else {
+						if printToStdout {
+							fmt.Printf(" -> Proposed stage promotion for initiative %s because all beads are closed\n", init.ID)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. "Backlog-Fäule" check:
+	backlogRows, err := p.Query(ctx, `
+		SELECT id, title, COALESCE(updated_at, created_at) FROM portfolio.initiative
+		WHERE stage = 'idea' AND archived_at IS NULL
+	`)
+	if err == nil {
+		type BacklogInfo struct {
+			ID, Title string
+			BaseTime  time.Time
+		}
+		var backlogItems []BacklogInfo
+		for backlogRows.Next() {
+			var bi BacklogInfo
+			if backlogRows.Scan(&bi.ID, &bi.Title, &bi.BaseTime) == nil {
+				backlogItems = append(backlogItems, bi)
+			}
+		}
+		backlogRows.Close()
+
+		for _, item := range backlogItems {
+			latestEventTime := item.BaseTime
+			var maxEventTime *time.Time
+			_ = p.QueryRow(ctx, "SELECT max(at) FROM portfolio.initiative_event WHERE initiative_id = $1", item.ID).Scan(&maxEventTime)
+			if maxEventTime != nil && maxEventTime.After(latestEventTime) {
+				latestEventTime = *maxEventTime
+			}
+
+			if time.Since(latestEventTime) > 14*24*time.Hour {
+				var exists bool
+				_ = p.QueryRow(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM portfolio.initiative_event
+						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = 'backlog-faeule'
+					)
+				`, item.ID).Scan(&exists)
+				if !exists {
+					payloadBytes, _ := json.Marshal(map[string]any{
+						"classification":  "backlog-faeule",
+						"proposed_action": "archive",
+						"reason":          "Review: noch relevant? (Backlog-Fäule nach 14 Tagen Inaktivität)",
+					})
+					_, err = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
+					`, item.ID, string(payloadBytes))
+					
+					commentPayload, _ := json.Marshal(map[string]any{
+						"title": "Review: noch relevant? (Backlog-Fäule nach 14 Tagen Inaktivität)",
+					})
+					_, _ = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						VALUES ($1, 'commented', 'sage', $2, 'sage')
+					`, item.ID, string(commentPayload))
+
+					if err != nil {
+						if printToStdout {
+							fmt.Fprintf(os.Stderr, " -> Error logging backlog-faeule for %s: %v\n", item.ID, err)
+						}
+					} else {
+						if printToStdout {
+							fmt.Printf(" -> Logged backlog-faeule for initiative %s\n", item.ID)
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 func startSageSteward(p *pgxpool.Pool) {
