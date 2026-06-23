@@ -531,6 +531,27 @@ func TestSageSteward_Sweep(t *testing.T) {
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
+	// Backup existing links for testBeadID to ensure our test link is the only one/first one found
+	var existingInits []string
+	rows, err := p.Query(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref = $1 AND kind = 'bead'", testBeadID)
+	if err == nil {
+		for rows.Next() {
+			var initID string
+			if rows.Scan(&initID) == nil {
+				existingInits = append(existingInits, initID)
+			}
+		}
+		rows.Close()
+	}
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE ref = $1 AND kind = 'bead'", testBeadID)
+
+	// Defer restoring them at the end of the test
+	defer func() {
+		for _, initID := range existingInits {
+			_, _ = p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1, 'bead', $2) ON CONFLICT DO NOTHING", initID, testBeadID)
+		}
+	}()
+
 	// Create test initiative
 	_, err = p.Exec(ctx, `
 		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
@@ -552,8 +573,8 @@ func TestSageSteward_Sweep(t *testing.T) {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
-	// Trigger runSageSweep
-	runSageSweep(ctx, p)
+	// Trigger runSageSweepEx with onlyStuck = false
+	runSageSweepEx(ctx, p, false)
 
 	// Verify that the sage_action event was logged!
 	var exists bool
@@ -596,6 +617,27 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	// Backup existing links for testBeadID to ensure our test link is the only one/first one found
+	var existingInitsStuck []string
+	rows, err := p.Query(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref = $1 AND kind = 'bead'", testBeadID)
+	if err == nil {
+		for rows.Next() {
+			var initID string
+			if rows.Scan(&initID) == nil {
+				existingInitsStuck = append(existingInitsStuck, initID)
+			}
+		}
+		rows.Close()
+	}
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE ref = $1 AND kind = 'bead'", testBeadID)
+
+	// Defer restoring them at the end of the test
+	defer func() {
+		for _, initID := range existingInitsStuck {
+			_, _ = p.Exec(ctx, "INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1, 'bead', $2) ON CONFLICT DO NOTHING", initID, testBeadID)
+		}
+	}()
 
 	// Create test initiative
 	_, err = p.Exec(ctx, `
