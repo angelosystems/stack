@@ -825,6 +825,34 @@ func TestInitiativeChecks(t *testing.T) {
 	if !commentExists {
 		t.Errorf("expected commented event to be logged for initiative %s, but it was not", rotInitiativeID)
 	}
+
+	// 4. Cooldown Check
+	// A second run of runInitiativeChecks should NOT create duplicate events due to the cooldown mechanism
+	runInitiativeChecks(ctx, p, false)
+
+	var allBeadsClosedEventCount int
+	err = p.QueryRow(ctx, `
+		SELECT count(*) FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'classification' = 'all-beads-closed'
+	`, testInitiativeID).Scan(&allBeadsClosedEventCount)
+	if err != nil {
+		t.Fatalf("failed to query all-beads-closed event count: %v", err)
+	}
+	if allBeadsClosedEventCount != 1 {
+		t.Errorf("expected exactly 1 sage_action event due to cooldown, got %d", allBeadsClosedEventCount)
+	}
+
+	var backlogRotEventCount int
+	err = p.QueryRow(ctx, `
+		SELECT count(*) FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'classification' = 'backlog-faeule'
+	`, rotInitiativeID).Scan(&backlogRotEventCount)
+	if err != nil {
+		t.Fatalf("failed to query backlog-faeule event count: %v", err)
+	}
+	if backlogRotEventCount != 1 {
+		t.Errorf("expected exactly 1 backlog-faeule sage_action event due to cooldown, got %d", backlogRotEventCount)
+	}
 }
 
 func TestSageSteward_Handover(t *testing.T) {
