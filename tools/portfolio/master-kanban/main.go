@@ -46,6 +46,7 @@ func quantbotPool() (*pgxpool.Pool, error) {
 	return p, nil
 }
 
+// pgxRows deckt pgx.Rows ab, ohne pgx direkt zu importieren wo's nicht nötig ist
 type pgxRows interface {
 	Next() bool
 	Scan(dest ...any) error
@@ -156,6 +157,146 @@ func solartownPool() (*pgxpool.Pool, error) {
 	return p, nil
 }
 
+var getCaptureCompletenessFunc = getCaptureCompleteness
+
+// getCaptureCompleteness calculates system-wide capture completeness percentage
+func getCaptureCompleteness(ctx context.Context, p *pgxpool.Pool) (float64, error) {
+	var linkedBeadsRegular, linkedBeadsCatchall, unlinkedBeads int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedBeadsRegular)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedBeadsCatchall)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='bead'`).Scan(&unlinkedBeads)
+
+	var linkedWorkspacesRegular, linkedWorkspacesCatchall, unlinkedWorkspaces int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedWorkspacesRegular)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedWorkspacesCatchall)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='vk_workspace'`).Scan(&unlinkedWorkspaces)
+
+	var unlinkedRigs int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='rig'`).Scan(&unlinkedRigs)
+
+	totalBeads := linkedBeadsRegular + linkedBeadsCatchall + unlinkedBeads
+	totalWorkspaces := linkedWorkspacesRegular + linkedWorkspacesCatchall + unlinkedWorkspaces
+	totalRigs := unlinkedRigs
+	totalWorkItems := totalBeads + totalWorkspaces + totalRigs
+	linkedWorkItems := (linkedBeadsRegular + linkedBeadsCatchall) + (linkedWorkspacesRegular + linkedWorkspacesCatchall)
+
+	if totalWorkItems == 0 {
+		return 0.0, nil
+	}
+	return (float64(linkedWorkItems) / float64(totalWorkItems)) * 100.0, nil
+}
+
+// enrichInitiativesWithPromoteReady determines if initiatives are ready for promotion and their confidence
+func enrichInitiativesWithPromoteReady(ctx context.Context, p *pgxpool.Pool, items []map[string]any) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	// 1. Gather all initiative IDs
+	initIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if id, ok := item["id"].(string); ok {
+			initIDs = append(initIDs, id)
+		}
+	}
+
+	// 2. Fetch linked beads from portfolio.initiative_link
+	initToBeads := make(map[string][]string)
+	allBeadIDs := make([]string, 0)
+
+	linkRows, err := p.Query(ctx, `
+		SELECT initiative_id, ref 
+		FROM portfolio.initiative_link 
+		WHERE kind = 'bead' AND initiative_id = ANY($1)
+	`, initIDs)
+	if err != nil {
+		return err
+	}
+	defer linkRows.Close()
+	for linkRows.Next() {
+		var initID, beadID string
+		if linkRows.Scan(&initID, &beadID) == nil {
+			initToBeads[initID] = append(initToBeads[initID], beadID)
+			allBeadIDs = append(allBeadIDs, beadID)
+		}
+	}
+
+	// 3. Fetch status of linked beads from beads.issues using solartownPool
+	beadStatuses := make(map[string]string)
+	if len(allBeadIDs) > 0 {
+		sp, err := solartownPool()
+		if err == nil {
+			statusRows, err := sp.Query(ctx, `
+				SELECT id, status 
+				FROM beads.issues 
+				WHERE deleted_at IS NULL AND id = ANY($1)
+			`, allBeadIDs)
+			if err == nil {
+				defer statusRows.Close()
+				for statusRows.Next() {
+					var issueID, status string
+					if statusRows.Scan(&issueID, &status) == nil {
+						beadStatuses[issueID] = status
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Fetch overall capture completeness
+	completeness, err := getCaptureCompletenessFunc(ctx, p)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching capture completeness: %v\n", err)
+		completeness = 0.0
+	}
+
+	// 5. Determine promote-readiness and add properties
+	for _, item := range items {
+		initID, _ := item["id"].(string)
+		stage, _ := item["stage"].(string)
+		beads := initToBeads[initID]
+
+		// An initiative is Promote-ready if:
+		// - its current stage is "now"
+		// - it has at least one linked bead
+		// - all linked beads are closed
+		promoteReady := false
+		if stage == "now" && len(beads) > 0 {
+			allClosed := true
+			for _, beadID := range beads {
+				status, exists := beadStatuses[beadID]
+				if !exists || status != "closed" {
+					allClosed = false
+					break
+				}
+			}
+			promoteReady = allClosed
+		}
+
+		item["promote_ready"] = promoteReady
+		if completeness >= 60.0 {
+			item["promote_ready_confidence"] = "high"
+			item["promote_ready_caveat"] = ""
+		} else {
+			item["promote_ready_confidence"] = "low"
+			if promoteReady {
+				item["promote_ready_caveat"] = fmt.Sprintf("Geringe Linkage-Abdeckung (%.1f%% < 60.0%%): Auto-Promotion nach watching gedämpft", completeness)
+			} else {
+				item["promote_ready_caveat"] = ""
+			}
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	root := &cobra.Command{
 		Use:   "master-kanban",
@@ -163,7 +304,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -268,6 +409,27 @@ func slugify(s string) string {
 	return out
 }
 
+func parseTime(val any) time.Time {
+	if val == nil {
+		return time.Now()
+	}
+	s, ok := val.(string)
+	if !ok {
+		return time.Now()
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t, err = time.Parse("2006-01-02T15:04:05.999999Z07:00", s)
+		if err != nil {
+			t, err = time.Parse("2006-01-02 15:04:05.999999-07", s)
+			if err != nil {
+				return time.Now()
+			}
+		}
+	}
+	return t
+}
+
 func connect() *pgxpool.Pool {
 	if pool != nil {
 		return pool
@@ -367,7 +529,7 @@ func cmdMove() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
-			tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = 			                      `, args[0], args[1])
+			tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, args[0], args[1])
 			if err != nil {
 				return err
 			}
@@ -411,6 +573,317 @@ func cmdSync() *cobra.Command {
 	}
 }
 
+func parseTimestamp(val any) time.Time {
+	if val == nil {
+		return time.Time{}
+	}
+	switch v := val.(type) {
+	case time.Time:
+		return v
+	case string:
+		t, err := time.Parse(time.RFC3339, v)
+		if err == nil {
+			return t
+		}
+		t, err = time.Parse("2006-01-02T15:04:05Z07:00", v)
+		if err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func formatDuration(d time.Duration) string {
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+	seconds := int(d.Seconds()) % 60
+
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
+}
+
+func enrichLane(ctx context.Context, p *pgxpool.Pool, items []map[string]any) {
+	if len(items) == 0 {
+		return
+	}
+	// 1. Gather all initiative IDs
+	initIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if id, ok := item["id"].(string); ok {
+			initIDs = append(initIDs, id)
+		}
+	}
+
+	// 2. Fetch linked beads from portfolio.initiative_link
+	initToBeads := make(map[string][]string)
+	allBeadIDs := make([]string, 0)
+
+	linkRows, err := p.Query(ctx, `
+		SELECT initiative_id, ref 
+		FROM portfolio.initiative_link 
+		WHERE kind = 'bead' AND initiative_id = ANY($1)
+	`, initIDs)
+	if err == nil {
+		defer linkRows.Close()
+		for linkRows.Next() {
+			var initID, beadID string
+			if linkRows.Scan(&initID, &beadID) == nil {
+				initToBeads[initID] = append(initToBeads[initID], beadID)
+				allBeadIDs = append(allBeadIDs, beadID)
+			}
+		}
+	}
+
+	// 3. Fetch lane labels from beads.labels using solartownPool
+	beadLanes := make(map[string]string)
+	if len(allBeadIDs) > 0 {
+		sp, err := solartownPool()
+		if err == nil {
+			labelRows, err := sp.Query(ctx, `
+				SELECT issue_id, label 
+				FROM beads.labels 
+				WHERE label LIKE 'lane:%' AND deleted_at IS NULL AND issue_id = ANY($1)
+			`, allBeadIDs)
+			if err == nil {
+				defer labelRows.Close()
+				for labelRows.Next() {
+					var issueID, label string
+					if labelRows.Scan(&issueID, &label) == nil {
+						laneName := strings.TrimPrefix(label, "lane:")
+						beadLanes[issueID] = laneName
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Calculate majority lane for each initiative
+	for _, item := range items {
+		initID, _ := item["id"].(string)
+		beads := initToBeads[initID]
+
+		laneCounts := make(map[string]int)
+		for _, beadID := range beads {
+			if lane, ok := beadLanes[beadID]; ok {
+				laneCounts[lane]++
+			}
+		}
+
+		majorityLane := "untriagiert"
+		maxCount := 0
+		for lane, count := range laneCounts {
+			if count > maxCount {
+				maxCount = count
+				majorityLane = lane
+			} else if count == maxCount {
+				if lane < majorityLane {
+					majorityLane = lane
+				}
+			}
+		}
+		item["lane"] = majorityLane
+	}
+}
+
+func enrichFlowSignals(ctx context.Context, p *pgxpool.Pool, items []map[string]any) {
+	if len(items) == 0 {
+		return
+	}
+
+	now := time.Now()
+
+	// 1. Gather all initiative IDs
+	initIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if id, ok := item["id"].(string); ok {
+			initIDs = append(initIDs, id)
+		}
+	}
+
+	// 2. Fetch stage-move events for Zeit-in-Stage
+	// Maps: initID -> stage -> max(at)
+	stageEntryMap := make(map[string]map[string]time.Time)
+	eventRows, err := p.Query(ctx, `
+		SELECT initiative_id, to_stage, max(at) 
+		FROM portfolio.initiative_event 
+		WHERE kind = 'moved' AND initiative_id = ANY($1)
+		GROUP BY initiative_id, to_stage
+	`, initIDs)
+	if err == nil {
+		defer eventRows.Close()
+		for eventRows.Next() {
+			var initID, toStage string
+			var maxAt time.Time
+			if eventRows.Scan(&initID, &toStage, &maxAt) == nil {
+				if _, ok := stageEntryMap[initID]; !ok {
+					stageEntryMap[initID] = make(map[string]time.Time)
+				}
+				stageEntryMap[initID][toStage] = maxAt
+			}
+		}
+	}
+
+	// 3. Fetch linked beads and their closed/total counts
+	initToBeads := make(map[string][]string)
+	allBeadIDs := make([]string, 0)
+	linkRows, err := p.Query(ctx, `
+		SELECT initiative_id, ref 
+		FROM portfolio.initiative_link 
+		WHERE kind = 'bead' AND initiative_id = ANY($1)
+	`, initIDs)
+	if err == nil {
+		defer linkRows.Close()
+		for linkRows.Next() {
+			var initID, beadID string
+			if linkRows.Scan(&initID, &beadID) == nil {
+				initToBeads[initID] = append(initToBeads[initID], beadID)
+				allBeadIDs = append(allBeadIDs, beadID)
+			}
+		}
+	}
+
+	beadStatus := make(map[string]string)
+	if len(allBeadIDs) > 0 {
+		sp, err := solartownPool()
+		if err == nil {
+			statusRows, err := sp.Query(ctx, `
+				SELECT id, status 
+				FROM beads.issues 
+				WHERE deleted_at IS NULL AND id = ANY($1)
+			`, allBeadIDs)
+			if err == nil {
+				defer statusRows.Close()
+				for statusRows.Next() {
+					var issueID, status string
+					if statusRows.Scan(&issueID, &status) == nil {
+						beadStatus[issueID] = status
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Fetch NOW stage counts per firma
+	firmaNowCounts := make(map[string]int)
+	nowCountRows, err := p.Query(ctx, `
+		SELECT firma, count(*) 
+		FROM portfolio.initiative 
+		WHERE stage = 'now' AND archived_at IS NULL 
+		GROUP BY firma
+	`)
+	if err == nil {
+		defer nowCountRows.Close()
+		for nowCountRows.Next() {
+			var f string
+			var count int
+			if nowCountRows.Scan(&f, &count) == nil {
+				firmaNowCounts[f] = count
+			}
+		}
+	}
+
+	// 5. Enrich items with the four flow signals
+	for _, item := range items {
+		initID, _ := item["id"].(string)
+		currentStage, _ := item["stage"].(string)
+		firma, _ := item["firma"].(string)
+
+		// A) Zeit-in-Stage
+		var stageEntryTime time.Time
+		if m, ok := stageEntryMap[initID]; ok {
+			if t, ok := m[currentStage]; ok {
+				stageEntryTime = t
+			}
+		}
+
+		if stageEntryTime.IsZero() {
+			stageEntryTime = parseTimestamp(item["updated_at"])
+		}
+		if stageEntryTime.IsZero() {
+			stageEntryTime = parseTimestamp(item["created_at"])
+		}
+
+		timeInStageSec := int(now.Sub(stageEntryTime).Seconds())
+		if timeInStageSec < 0 {
+			timeInStageSec = 0
+		}
+		timeInStageStr := formatDuration(time.Duration(timeInStageSec) * time.Second)
+
+		// B) Aktivitäts-Stille
+		lastActTime := parseTimestamp(item["last_activity"])
+		if lastActTime.IsZero() {
+			lastActTime = parseTimestamp(item["updated_at"])
+		}
+		if lastActTime.IsZero() {
+			lastActTime = parseTimestamp(item["created_at"])
+		}
+
+		activitySilenceSec := int(now.Sub(lastActTime).Seconds())
+		if activitySilenceSec < 0 {
+			activitySilenceSec = 0
+		}
+		activitySilenceStr := formatDuration(time.Duration(activitySilenceSec) * time.Second)
+
+		// C) Bead-Fortschritt
+		beads := initToBeads[initID]
+		totalBeads := len(beads)
+		closedBeads := 0
+		for _, bID := range beads {
+			if status, ok := beadStatus[bID]; ok && status == "closed" {
+				closedBeads++
+			}
+		}
+		beadProgressPercentage := 0.0
+		if totalBeads > 0 {
+			beadProgressPercentage = float64(closedBeads) / float64(totalBeads) * 100.0
+		}
+		beadProgressStr := fmt.Sprintf("%d/%d", closedBeads, totalBeads)
+
+		// D) WIP-vs-Limit
+		nowLimit, _ := getWIPLimits(firma)
+		cardsInNow := firmaNowCounts[firma]
+		wipVsLimitStr := fmt.Sprintf("%d/%d", cardsInNow, nowLimit)
+
+		// Put everything into the map under "flow_signals" and top-level fields
+		flowSignals := map[string]any{
+			"time_in_stage_seconds":    timeInStageSec,
+			"time_in_stage":            timeInStageStr,
+			"activity_silence_seconds": activitySilenceSec,
+			"activity_silence":         activitySilenceStr,
+			"bead_progress_closed":     closedBeads,
+			"bead_progress_total":      totalBeads,
+			"bead_progress_percentage": beadProgressPercentage,
+			"bead_progress_str":        beadProgressStr,
+			"wip_cards_in_now":         cardsInNow,
+			"wip_limit":                nowLimit,
+			"wip_vs_limit_str":         wipVsLimitStr,
+		}
+		item["flow_signals"] = flowSignals
+
+		// Add as top-level fields too for maximum compatibility
+		item["time_in_stage_seconds"] = timeInStageSec
+		item["time_in_stage"] = timeInStageStr
+		item["activity_silence_seconds"] = activitySilenceSec
+		item["activity_silence"] = activitySilenceStr
+		item["bead_progress_closed"] = closedBeads
+		item["bead_progress_total"] = totalBeads
+		item["bead_progress_percentage"] = beadProgressPercentage
+		item["bead_progress_str"] = beadProgressStr
+		item["wip_cards_in_now"] = cardsInNow
+		item["wip_limit"] = nowLimit
+		item["wip_vs_limit_str"] = wipVsLimitStr
+	}
+}
+
 func cmdServe() *cobra.Command {
 	var port string
 	c := &cobra.Command{
@@ -418,6 +891,7 @@ func cmdServe() *cobra.Command {
 		Short: "JSON-API für Cockpit-Page (Stage 3)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
+			http.DefaultServeMux = http.NewServeMux()
 			http.HandleFunc("/api/initiatives", func(w http.ResponseWriter, r *http.Request) {
 				rows, err := p.Query(r.Context(), `SELECT row_to_json(s) FROM portfolio.initiative_summary s ORDER BY firma, stage, id`)
 				if err != nil {
@@ -425,6 +899,24 @@ func cmdServe() *cobra.Command {
 					return
 				}
 				defer rows.Close()
+
+				completenessPct, err := getLinkageCompleteness(r.Context(), p)
+				if err != nil {
+					completenessPct = 0.0
+				}
+
+				threshold := 90.0
+				if envThreshold := os.Getenv("PORTFOLIO_CONFIDENCE_THRESHOLD"); envThreshold != "" {
+					var t float64
+					if _, err := fmt.Sscanf(envThreshold, "%f", &t); err == nil {
+						threshold = t
+					}
+				}
+
+				promoteReadyMap, err := getPromoteReadyInitiatives(r.Context(), p)
+				if err != nil {
+					promoteReadyMap = make(map[string]bool)
+				}
 
 				var items []map[string]any
 				for rows.Next() {
@@ -434,11 +926,20 @@ func cmdServe() *cobra.Command {
 					}
 					var item map[string]any
 					if err := json.Unmarshal(j, &item); err == nil {
+						initID, _ := item["id"].(string)
+						pr := promoteReadyMap[initID]
+						item["promote_ready"] = pr
+						item["linkage_confidence_percentage"] = completenessPct
+
+						if pr && completenessPct < threshold {
+							item["confidence_caveat"] = fmt.Sprintf("Confidence-Vorbehalt: Niedrige Linkage-Abdeckung (%.1f%%).", completenessPct)
+						} else {
+							item["confidence_caveat"] = ""
+						}
 						items = append(items, item)
 					}
 				}
 
-				// Enrich items with lane information based on linked beads
 				if len(items) > 0 {
 					// 1. Gather all initiative IDs
 					initIDs := make([]string, 0, len(items))
@@ -491,7 +992,59 @@ func cmdServe() *cobra.Command {
 						}
 					}
 
-					// 4. Calculate majority lane for each initiative
+					// 4. Fetch status of all verlinked beads in bulk
+					beadStatuses := make(map[string]string)
+					if len(allBeadIDs) > 0 {
+						sp, err := solartownPool()
+						if err == nil {
+							statusRows, err := sp.Query(r.Context(), `
+								SELECT id, status 
+								FROM beads.issues 
+								WHERE id = ANY($1) AND deleted_at IS NULL
+							`, allBeadIDs)
+							if err == nil {
+								defer statusRows.Close()
+								for statusRows.Next() {
+									var bID, bStatus string
+									if statusRows.Scan(&bID, &bStatus) == nil {
+										beadStatuses[bID] = bStatus
+									}
+								}
+							}
+						}
+					}
+
+					// 5. Fetch latest stage-move events in bulk for Zeit-in-Stage
+					stageMoveTimes := make(map[string]time.Time)
+					eventRows, err := p.Query(r.Context(), `
+						SELECT initiative_id, to_stage, max(at) 
+						FROM portfolio.initiative_event 
+						WHERE kind = 'moved' AND initiative_id = ANY($1)
+						GROUP BY initiative_id, to_stage
+					`, initIDs)
+					if err == nil {
+						defer eventRows.Close()
+						for eventRows.Next() {
+							var initID, toStage string
+							var at time.Time
+							if eventRows.Scan(&initID, &toStage, &at) == nil {
+								key := initID + ":" + toStage
+								stageMoveTimes[key] = at
+							}
+						}
+					}
+
+					// 6. Calculate company WIP counts in 'now'
+					wipCounts := make(map[string]int)
+					for _, item := range items {
+						stage, _ := item["stage"].(string)
+						firma, _ := item["firma"].(string)
+						if stage == "now" {
+							wipCounts[firma]++
+						}
+					}
+
+					// 7. Calculate majority lane and flow signals for each initiative
 					for _, item := range items {
 						initID, _ := item["id"].(string)
 						beads := initToBeads[initID]
@@ -516,14 +1069,73 @@ func cmdServe() *cobra.Command {
 							}
 						}
 						item["lane"] = majorityLane
+
+						// Calculate the 4 flow signals
+						currentStage, _ := item["stage"].(string)
+						firma, _ := item["firma"].(string)
+						updatedAt := parseTime(item["updated_at"])
+
+						// Signal 1: Zeit-in-Stage
+						var entryTime time.Time
+						if t, ok := stageMoveTimes[initID+":"+currentStage]; ok {
+							entryTime = t
+						} else {
+							entryTime = updatedAt
+						}
+						timeInStageDays := time.Since(entryTime).Hours() / 24.0
+						if timeInStageDays < 0 {
+							timeInStageDays = 0
+						}
+
+						// Signal 2: Aktivitäts-Stille
+						var lastActivityTime time.Time
+						if item["last_activity"] != nil {
+							lastActivityTime = parseTime(item["last_activity"])
+						} else {
+							lastActivityTime = updatedAt
+						}
+						activityStillnessDays := time.Since(lastActivityTime).Hours() / 24.0
+						if activityStillnessDays < 0 {
+							activityStillnessDays = 0
+						}
+
+						// Signal 3: Bead-Fortschritt
+						closedCount := 0
+						totalCount := len(beads)
+						for _, beadID := range beads {
+							if status, ok := beadStatuses[beadID]; ok && status == "closed" {
+								closedCount++
+							}
+						}
+
+						// Signal 4: WIP-vs-Limit
+						companyWip := wipCounts[firma]
+						companyLimit, _ := getWIPLimits(firma)
+
+						item["flow_signals"] = map[string]any{
+							"time_in_stage_days":      timeInStageDays,
+							"activity_stillness_days": activityStillnessDays,
+							"bead_progress": map[string]any{
+								"closed": closedCount,
+								"total":  totalCount,
+							},
+							"wip_vs_limit": map[string]any{
+								"wip":   companyWip,
+								"limit": companyLimit,
+							},
+						}
 					}
+				}
+
+				if items == nil {
+					items = []map[string]any{}
+				}
+				if err := enrichInitiativesWithPromoteReady(r.Context(), p, items); err != nil {
+					fmt.Fprintf(os.Stderr, "Error enriching initiatives with promote ready: %v\n", err)
 				}
 
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Access-Control-Allow-Origin", "*")
-				if items == nil {
-					items = []map[string]any{}
-				}
 				json.NewEncoder(w).Encode(items)
 			})
 			// P5 — Karten-Detail (Side-Peek): Initiative + Links + Event-Historie als ein JSON
@@ -545,7 +1157,7 @@ func cmdServe() *cobra.Command {
 					http.Error(w, "initiative nicht gefunden: "+id, 404)
 					return
 				}
-				var j json.RawMessage
+				var j []byte
 				err := p.QueryRow(r.Context(), `SELECT json_build_object(
 					'initiative', (SELECT row_to_json(s) FROM portfolio.initiative_summary s WHERE s.id=$1),
 					'links', COALESCE((SELECT json_agg(row_to_json(l) ORDER BY l.kind, l.added_at)
@@ -558,7 +1170,157 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 500)
 					return
 				}
-				w.Write(j)
+
+				var rawObj map[string]any
+				if err := json.Unmarshal(j, &rawObj); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				// Extract initiative fields
+				initMap, _ := rawObj["initiative"].(map[string]any)
+				if initMap != nil {
+					initID, _ := initMap["id"].(string)
+					currentStage, _ := initMap["stage"].(string)
+					firma, _ := initMap["firma"].(string)
+					updatedAt := parseTime(initMap["updated_at"])
+
+					// 1. Zeit-in-Stage
+					var entryTime time.Time
+					err := p.QueryRow(r.Context(), `
+						SELECT at FROM portfolio.initiative_event 
+						WHERE initiative_id = $1 AND kind = 'moved' AND to_stage = $2 
+						ORDER BY at DESC LIMIT 1
+					`, initID, currentStage).Scan(&entryTime)
+					if err != nil {
+						entryTime = updatedAt
+					}
+					timeInStageDays := time.Since(entryTime).Hours() / 24.0
+					if timeInStageDays < 0 {
+						timeInStageDays = 0
+					}
+
+					// 2. Aktivitäts-Stille
+					var lastActivityTime time.Time
+					if initMap["last_activity"] != nil {
+						lastActivityTime = parseTime(initMap["last_activity"])
+					} else {
+						lastActivityTime = updatedAt
+					}
+					activityStillnessDays := time.Since(lastActivityTime).Hours() / 24.0
+					if activityStillnessDays < 0 {
+						activityStillnessDays = 0
+					}
+
+					// 3. Bead-Fortschritt
+					var beadIDs []string
+					if links, ok := rawObj["links"].([]any); ok {
+						for _, l := range links {
+							if lMap, ok := l.(map[string]any); ok {
+								if lMap["kind"] == "bead" {
+									if ref, ok := lMap["ref"].(string); ok {
+										beadIDs = append(beadIDs, ref)
+									}
+								}
+							}
+						}
+					}
+
+					beadStatuses := make(map[string]string)
+					if len(beadIDs) > 0 {
+						sp, err := solartownPool()
+						if err == nil {
+							statusRows, err := sp.Query(r.Context(), `
+								SELECT id, status 
+								FROM beads.issues 
+								WHERE id = ANY($1) AND deleted_at IS NULL
+							`, beadIDs)
+							if err == nil {
+								defer statusRows.Close()
+								for statusRows.Next() {
+									var bID, bStatus string
+									if statusRows.Scan(&bID, &bStatus) == nil {
+										beadStatuses[bID] = bStatus
+									}
+								}
+							}
+						}
+					}
+
+					closedCount := 0
+					totalCount := len(beadIDs)
+					for _, bID := range beadIDs {
+						if status, ok := beadStatuses[bID]; ok && status == "closed" {
+							closedCount++
+						}
+					}
+
+					// 4. WIP-vs-Limit
+					var companyWip int
+					_ = p.QueryRow(r.Context(), `
+						SELECT count(*) FROM portfolio.initiative 
+						WHERE stage = 'now' AND firma = $1 AND archived_at IS NULL
+					`, firma).Scan(&companyWip)
+					companyLimit, _ := getWIPLimits(firma)
+
+					signals := map[string]any{
+						"time_in_stage_days":      timeInStageDays,
+						"activity_stillness_days": activityStillnessDays,
+						"bead_progress": map[string]any{
+							"closed": closedCount,
+							"total":  totalCount,
+						},
+						"wip_vs_limit": map[string]any{
+							"wip":   companyWip,
+							"limit": companyLimit,
+						},
+					}
+
+					initMap["flow_signals"] = signals
+					rawObj["flow_signals"] = signals
+
+					// Also enrich with promote ready/damped
+					enrichList := []map[string]any{initMap}
+					if err := enrichInitiativesWithPromoteReady(r.Context(), p, enrichList); err == nil {
+						initMap = enrichList[0]
+					} else {
+						fmt.Fprintf(os.Stderr, "Error enriching initiative with promote ready: %v\n", err)
+					}
+
+					completenessPct, err := getLinkageCompleteness(r.Context(), p)
+					if err != nil {
+						completenessPct = 0.0
+					}
+
+					threshold := 90.0
+					if envThreshold := os.Getenv("PORTFOLIO_CONFIDENCE_THRESHOLD"); envThreshold != "" {
+						var t float64
+						if _, err := fmt.Sscanf(envThreshold, "%f", &t); err == nil {
+							threshold = t
+						}
+					}
+
+					promoteReadyMap, err := getPromoteReadyInitiatives(r.Context(), p)
+					if err != nil {
+						promoteReadyMap = make(map[string]bool)
+					}
+
+					pr := promoteReadyMap[id]
+					initMap["promote_ready"] = pr
+					initMap["linkage_confidence_percentage"] = completenessPct
+
+					if pr && completenessPct < threshold {
+						initMap["confidence_caveat"] = fmt.Sprintf("Confidence-Vorbehalt: Niedrige Linkage-Abdeckung (%.1f%%).", completenessPct)
+					} else {
+						initMap["confidence_caveat"] = ""
+					}
+
+					rawObj["initiative"] = initMap
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				json.NewEncoder(w).Encode(rawObj)
 			})
 			// P5 — Kommentar zur Karte: landet als 'commented'-Event in der Historie
 			http.HandleFunc("/api/comment", func(w http.ResponseWriter, r *http.Request) {
@@ -779,11 +1541,25 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
-				_, err := p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, body.Id, body.Stage)
+
+				var fromStage string
+				err := p.QueryRow(r.Context(), `SELECT stage FROM portfolio.initiative WHERE id = $1`, body.Id).Scan(&fromStage)
+				if err != nil {
+					http.Error(w, "initiative nicht gefunden: "+err.Error(), 404)
+					return
+				}
+
+				_, err = p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, body.Id, body.Stage)
 				if err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
+
+				_, _ = p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, from_stage, to_stage, actor)
+					 VALUES ($1, 'moved', 'master', $2, $3, $4)`,
+					body.Id, fromStage, body.Stage, actorFrom(r))
+
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
 			http.HandleFunc("/api/capture", func(w http.ResponseWriter, r *http.Request) {
@@ -1567,6 +2343,12 @@ func cmdServe() *cobra.Command {
 				default:
 				}
 
+				// Trigger Flow Manager on incoming events (edge-trigger)
+				select {
+				case flowManagerChan <- struct{}{}:
+				default:
+				}
+
 				if ev.Kind == "stage_proposed" {
 					var pLoad struct {
 						Stage string `json:"stage"`
@@ -1789,6 +2571,23 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(limits)
 			})
 
+			// Expose Flow thresholds to cockpit UI (P1.2)
+			http.HandleFunc("/api/flow-thresholds", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				thresholds := map[string]map[string]string{}
+				firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
+				stages := []string{"now", "soon", "idea", "watching", "done"}
+				for _, f := range firmas {
+					thresholds[f] = map[string]string{}
+					for _, s := range stages {
+						thresholds[f][s] = GetStageThreshold(f, s).String()
+					}
+				}
+				json.NewEncoder(w).Encode(thresholds)
+			})
+
 			// POST /api/proposal/accept
 			http.HandleFunc("/api/proposal/accept", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1859,6 +2658,25 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
+				// 3.5 Log the created event on the new real initiative card
+				payloadBytes, _ := json.Marshal(map[string]any{
+					"title":       title,
+					"proposal_id": body.Id,
+					"bead_id":     cardID,
+					"note":        "Proposal accepted and initiative card created",
+				})
+				_, err = tx.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, to_stage, payload, actor)
+					 VALUES ($1, 'created', 'master', 'idea', $2, $3)`,
+					cardID, payloadBytes, actorFrom(r))
+				if err != nil {
+					http.Error(w, "Failed to insert created event: "+err.Error(), 500)
+					return
+				}
+
+				// 3b. Clear proposal cooldown if any
+				_, _ = tx.Exec(r.Context(), `DELETE FROM portfolio.proposal_cooldown WHERE bead_id = $1`, cardID)
+
 				// Commit transaction so portfolio state is stored
 				if err := tx.Commit(r.Context()); err != nil {
 					http.Error(w, err.Error(), 500)
@@ -1918,12 +2736,92 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
+
+				var title, firma string
+				err := p.QueryRow(r.Context(), `SELECT title, firma FROM portfolio.initiative WHERE id = $1`, body.Id).Scan(&title, &firma)
+				if err == nil && firma != "" {
+					prefix := firmaPrefix[firma]
+					if prefix != "" {
+						catchAllID := prefix + "-catch-all"
+						var exists bool
+						_ = p.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id=$1)`, catchAllID).Scan(&exists)
+						if exists {
+							payloadBytes, _ := json.Marshal(map[string]any{
+								"proposal_id": body.Id,
+								"title":       title,
+								"action":      "reject",
+								"note":        fmt.Sprintf("Proposal %q rejected/discarded by manager", title),
+							})
+							_, _ = p.Exec(r.Context(),
+								`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+								 VALUES ($1, 'activity', 'master', $2, $3)`,
+								catchAllID, payloadBytes, actorFrom(r))
+						}
+					}
+				}
+
 				// Verwerfen löscht spurlos
-				_, err := p.Exec(r.Context(), `DELETE FROM portfolio.initiative WHERE id = $1`, body.Id)
+				_, err = p.Exec(r.Context(), `DELETE FROM portfolio.initiative WHERE id = $1`, body.Id)
 				if err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
+
+				// Enforce cooldown: extract bead_id from proposal ID (proposal-<bead_id>)
+				beadID := strings.TrimPrefix(body.Id, "proposal-")
+				_, _ = p.Exec(r.Context(),
+					`INSERT INTO portfolio.proposal_cooldown (bead_id, rejected_at)
+					 VALUES ($1, now())
+					 ON CONFLICT (bead_id) DO UPDATE SET rejected_at = now()`,
+					beadID)
+
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
+			// POST /api/escalate
+			http.HandleFunc("/api/escalate", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				var body struct {
+					Id     string `json:"id"`
+					Reason string `json:"reason"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				var firma string
+				_ = p.QueryRow(r.Context(), "SELECT firma FROM portfolio.initiative WHERE id = $1", body.Id).Scan(&firma)
+				isLiveGeld := (firma == "quantbot")
+
+				payloadMap := map[string]any{
+					"action":       "escalate",
+					"reason":       body.Reason,
+					"timestamp":    time.Now().Format(time.RFC3339),
+					"heal_count":   0,
+					"is_live_geld": isLiveGeld,
+				}
+				payloadBytes, _ := json.Marshal(payloadMap)
+
+				_, err := p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1, 'sage_action', 'master', $2::jsonb, 'flow-manager')`,
+					body.Id, string(payloadBytes))
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
 
@@ -1931,6 +2829,206 @@ func cmdServe() *cobra.Command {
 			startStageChangeListener(p)
 			startProposalAgentListener(p)
 			startSageSteward(p)
+			startFlowManagerSteward(p)
+
+			// GET /api/manager
+			http.HandleFunc("/api/manager", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				// 1. Get flow manager status
+				var lastRun time.Time
+				var status string
+				var errMsg *string
+				err := p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.sage_status WHERE id = 'flow-manager'`).
+					Scan(&lastRun, &status, &errMsg)
+				if err != nil {
+					lastRun = time.Now()
+					status = "unknown"
+				}
+
+				// 2. Fetch unarchived initiatives and their latest flow_action payload (if any)
+				rows, err := p.Query(r.Context(), `
+					WITH latest_flow_action AS (
+						SELECT DISTINCT ON (initiative_id) initiative_id, payload, at
+						FROM portfolio.initiative_event
+						WHERE kind = 'flow_action'
+						ORDER BY initiative_id, at DESC
+					)
+					SELECT i.id, i.title, i.stage, i.firma, COALESCE(fa.payload::text, '{}')
+					FROM portfolio.initiative i
+					LEFT JOIN latest_flow_action fa ON fa.initiative_id = i.id
+					WHERE i.archived_at IS NULL
+					ORDER BY i.id
+				`)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				defer rows.Close()
+
+				type FlaggedCard struct {
+					ID             string   `json:"id"`
+					Title          string   `json:"title"`
+					Stage          string   `json:"stage"`
+					Firma          string   `json:"firma"`
+					FlaggedReasons []string `json:"flagged_reasons"`
+					Category       string   `json:"category"`
+					Confidence     string   `json:"confidence"`
+					Reasoning      string   `json:"reasoning"`
+					ProposedAction string   `json:"proposed_action"`
+				}
+
+				var flaggedCards []FlaggedCard
+				stockendCount := 0
+				promoteCount := 0
+				veraltetCount := 0
+				wipOverflowsMap := make(map[string]bool)
+
+				for rows.Next() {
+					var id, title, stage, firma, payloadStr string
+					if err := rows.Scan(&id, &title, &stage, &firma, &payloadStr); err == nil {
+						var payload map[string]any
+						if json.Unmarshal([]byte(payloadStr), &payload) == nil {
+							reasonsRaw, ok := payload["flagged_reasons"].([]any)
+							if ok && len(reasonsRaw) > 0 {
+								var reasons []string
+								for _, rVal := range reasonsRaw {
+									if rStr, ok := rVal.(string); ok {
+										reasons = append(reasons, rStr)
+										if strings.Contains(strings.ToLower(rStr), "wip-überlauf") {
+											wipOverflowsMap[firma] = true
+										}
+									}
+								}
+
+								category, _ := payload["category"].(string)
+								confidence, _ := payload["confidence"].(string)
+								reasoning, _ := payload["reasoning"].(string)
+								proposedAction, _ := payload["proposed_action"].(string)
+
+								card := FlaggedCard{
+									ID:             id,
+									Title:          title,
+									Stage:          stage,
+									Firma:          firma,
+									FlaggedReasons: reasons,
+									Category:       category,
+									Confidence:     confidence,
+									Reasoning:      reasoning,
+									ProposedAction: proposedAction,
+								}
+								flaggedCards = append(flaggedCards, card)
+
+								if category == "wartet-auf-Mensch" || category == "Workspace-gescheitert" {
+									stockendCount++
+								} else if category == "fertig-nicht-promotet" {
+									promoteCount++
+								} else if category == "verlassen" {
+									veraltetCount++
+								}
+							}
+						}
+					}
+				}
+
+				var wipOverflows []string
+				for f := range wipOverflowsMap {
+					wipOverflows = append(wipOverflows, f)
+				}
+
+				// 3. Build summary text
+				totalFlagged := stockendCount + promoteCount + veraltetCount
+				var summaryParts []string
+				if totalFlagged > 0 {
+					if stockendCount > 0 {
+						summaryParts = append(summaryParts, fmt.Sprintf("%d stockt", stockendCount))
+					}
+					if promoteCount > 0 {
+						summaryParts = append(summaryParts, fmt.Sprintf("%d promote-reif", promoteCount))
+					}
+					if veraltetCount > 0 {
+						summaryParts = append(summaryParts, fmt.Sprintf("%d veraltet", veraltetCount))
+					}
+				}
+
+				summaryText := ""
+				if totalFlagged > 0 {
+					summaryText = fmt.Sprintf("%d auffällige Karten: %s", totalFlagged, strings.Join(summaryParts, ", "))
+					if len(wipOverflows) > 0 {
+						summaryText += fmt.Sprintf(" · WIP-Überlauf bei %s", strings.Join(wipOverflows, ", "))
+					}
+				} else {
+					summaryText = "Keine auffälligen Karten auf dem Board. Hervorragender Fluss! 🚀"
+				}
+
+				resp := map[string]any{
+					"status":        status,
+					"last_run":      lastRun,
+					"flagged_cards": flaggedCards,
+					"summary": map[string]any{
+						"stockend":      stockendCount,
+						"promote_reif":  promoteCount,
+						"veraltet":      veraltetCount,
+						"wip_overflows": wipOverflows,
+					},
+					"summary_text": summaryText,
+				}
+
+				json.NewEncoder(w).Encode(resp)
+			})
+
+			// GET /api/manager/digest
+			http.HandleFunc("/api/manager/digest", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				var payload string
+				err := p.QueryRow(r.Context(),
+					`SELECT payload FROM portfolio.manager_digest WHERE id = 'latest'`).Scan(&payload)
+				if err != nil {
+					resp := map[string]any{
+						"stagnant":      []any{},
+						"promote_ready": []any{},
+						"stale":         []any{},
+						"wip_overflow":  []any{},
+						"last_run":      time.Now(),
+						"status":        "unknown",
+					}
+					json.NewEncoder(w).Encode(resp)
+					return
+				}
+				w.Write([]byte(payload))
+			})
+
+			// GET /api/manager/status
+			http.HandleFunc("/api/manager/status", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				var lastRun time.Time
+				var status string
+				var errMsg *string
+				err := p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.manager_status WHERE id = 'manager-steward'`).
+					Scan(&lastRun, &status, &errMsg)
+				if err != nil {
+					lastRun = time.Now()
+					status = "unknown"
+				}
+
+				if time.Since(lastRun) > 30*time.Second {
+					status = "alarm"
+				}
+
+				resp := map[string]any{
+					"last_run":      lastRun,
+					"status":        status,
+					"error_message": errMsg,
+				}
+				json.NewEncoder(w).Encode(resp)
+			})
 
 			// GET /api/sage/status
 			http.HandleFunc("/api/sage/status", func(w http.ResponseWriter, r *http.Request) {
@@ -1989,6 +3087,30 @@ func cmdServe() *cobra.Command {
 					dangling = []DanglingWorkspace{}
 				}
 
+				// Query Flow Manager Status
+				var mgrLastRun time.Time
+				var mgrStatus string
+				var mgrErrMsg *string
+				err = p.QueryRow(r.Context(),
+					`SELECT last_run, status, error_message FROM portfolio.manager_status WHERE id = 'flow-manager'`).
+					Scan(&mgrLastRun, &mgrStatus, &mgrErrMsg)
+				if err != nil {
+					mgrLastRun = time.Now()
+					mgrStatus = "unknown"
+				}
+
+				// If last run is older than 30 seconds, it's an alarm!
+				if time.Since(mgrLastRun) > 30*time.Second {
+					mgrStatus = "alarm"
+				}
+
+				mgrResp := map[string]any{
+					"last_run":         mgrLastRun,
+					"status":           mgrStatus,
+					"error_message":    mgrErrMsg,
+					"outage_simulated": managerOutageSimulated,
+				}
+
 				resp := map[string]any{
 					"last_run":            oldestLastRun,
 					"status":              aggregateStatus,
@@ -1997,8 +3119,70 @@ func cmdServe() *cobra.Command {
 					"dangling_baseline":   4,
 					"outage_simulated":    sageOutageSimulated,
 					"dangling_workspaces": dangling,
+					"manager_status":      mgrResp,
 				}
 				json.NewEncoder(w).Encode(resp)
+			})
+
+			// POST /api/sage/handover
+			// Defined and implemented handover path Manager -> vk-Sage for workspace-based stagnation (R-D)
+			http.HandleFunc("/api/sage/handover", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+
+				var body struct {
+					InitiativeID string `json:"initiative_id"`
+					WorkspaceID  string `json:"workspace_id"`
+					Reason       string `json:"reason"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				if body.InitiativeID == "" || body.WorkspaceID == "" {
+					http.Error(w, "missing initiative_id or workspace_id", 400)
+					return
+				}
+
+				// 1. Log card symptom by writing a 'sage_action' event with action='handover' on the Initiative
+				payloadMap := map[string]any{
+					"workspace_id": body.WorkspaceID,
+					"action":       "handover",
+					"reason":       body.Reason,
+					"source":       "manager",
+				}
+				payloadBytes, err := json.Marshal(payloadMap)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+
+				_, err = p.Exec(r.Context(), `
+					INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					VALUES ($1, 'sage_action', 'sage', $2, 'flow-manager')
+				`, body.InitiativeID, string(payloadBytes))
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed to log handover event: %v", err), 500)
+					return
+				}
+
+				// 2. Explicitly notify / trigger vk-Sage to run a sweep of the workspace and handle it
+				select {
+				case sageSweepChan <- struct{}{}:
+				default:
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"ok":true,"handover_status":"received"}`))
 			})
 
 			// POST /api/sage/simulate-outage
@@ -2226,6 +3410,47 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(resp)
 			})
 
+			// POST /api/manager/simulate-outage
+			http.HandleFunc("/api/manager/simulate-outage", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+
+				var body struct {
+					Simulate bool `json:"simulate"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+
+				if body.Simulate {
+					managerOutageSimulated = true
+					// Back-date last_run to 10 minutes ago to trigger alarm instantly
+					_, _ = p.Exec(r.Context(),
+						`UPDATE portfolio.manager_status 
+						 SET last_run = now() - interval '10 minutes', status = 'alarm' 
+						 WHERE id = 'flow-manager'`)
+				} else {
+					managerOutageSimulated = false
+					// Restore healthy status
+					_, _ = p.Exec(r.Context(),
+						`UPDATE portfolio.manager_status 
+						 SET last_run = now(), status = 'healthy', error_message = NULL 
+						 WHERE id = 'flow-manager'`)
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, `{"ok":true}`)
+			})
+
 			// Bootup Catchup — both Pull-Regel and Proposal-Agent
 			firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
 			for _, f := range firmas {
@@ -2249,6 +3474,7 @@ func cmdServe() *cobra.Command {
 			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
 			fmt.Println("  POST /api/github-webhook — GitHub pull_request (HMAC)")
 			fmt.Println("  GET  /api/wip-limits   — Configurable WIP limits")
+			fmt.Println("  GET  /api/flow-thresholds — Configurable flow thresholds")
 			fmt.Println("  POST /api/proposal/accept — Accept proposed card")
 			fmt.Println("  POST /api/proposal/reject — Reject/delete proposed card")
 			return http.ListenAndServe(":"+port, nil)
@@ -2521,6 +3747,82 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if body.Lane == "hack" {
+			// Determine repo from plan_item or fallback to company default
+			var repo string
+			_ = p.QueryRow(r.Context(),
+				`SELECT repo FROM portfolio.plan_item WHERE initiative_id = $1 LIMIT 1`, body.Id).
+				Scan(&repo)
+
+			if repo == "" {
+				firmaRepo := map[string]string{
+					"stayawesome": "/root/stayawesomeOS",
+					"solartown":   "/root/solartown",
+					"quantbot":    "/opt/quantbot",
+					"mariobrain":  "/root/mario-brain",
+					"stack":       "/opt/stack",
+				}
+				repo = firmaRepo[info.Firma]
+			}
+			if repo == "" {
+				repo = "/root/solartown" // fallback
+			}
+
+			// Execute vk-delegate to spawn workspace
+			exe := findVkDelegate()
+
+			prompt := body.Note
+			if prompt == "" {
+				prompt = info.Title
+			}
+
+			cmd := exec.Command(exe,
+				"--repo", repo,
+				"--name", info.Title,
+				"--prompt", prompt,
+			)
+
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				errMsg := fmt.Sprintf("vk-delegate failed: %v, stderr: %s", err, stderr.String())
+				http.Error(w, errMsg, 500)
+				return
+			}
+
+			// Parse workspace_id from stdout
+			re := regexp.MustCompile(`workspace_id:\s+([a-f0-9\-]+)`)
+			matches := re.FindStringSubmatch(stdout.String())
+			if len(matches) < 2 {
+				http.Error(w, "failed to parse workspace_id from vk-delegate output: "+stdout.String(), 500)
+				return
+			}
+			wsID := matches[1]
+
+			// Write dispatched event to initiative_event
+			payloadBytes, _ := json.Marshal(map[string]string{
+				"lane": body.Lane,
+				"ref":  wsID,
+			})
+			_, err = p.Exec(r.Context(),
+				`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				 VALUES ($1, 'dispatched', 'vk', $2::jsonb, 'master-kanban')`,
+				body.Id, string(payloadBytes))
+			if err != nil {
+				http.Error(w, "failed to write initiative_event: "+err.Error(), 500)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"workspace_id": wsID,
+			})
+			return
+		}
+
 		var canonicalRef, filePath string
 		if body.Lane == "plan" || body.Lane == "plan-deep" {
 			// Check capacity governor for 429 stress admission criterion
@@ -2685,7 +3987,7 @@ func guessFirmaFromCWD() string {
 		return ""
 	}
 	cwd = strings.ToLower(cwd)
-	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") {
+	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") || strings.Contains(cwd, "/opt/stack") {
 		return "stack"
 	}
 	if strings.Contains(cwd, "stayawesome") {
@@ -2915,42 +4217,91 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 	}
 
 	if openCount == 0 {
-		var firma string
-		var currentStage string
-		_ = p.QueryRow(ctx, `SELECT firma, stage FROM portfolio.initiative WHERE id=$1`, initiativeID).Scan(&firma, &currentStage)
+		// Fetch firma early so we can apply Live-Geld-Schutz bypass before confidence gates
+		var earlyFirma string
+		_ = p.QueryRow(ctx, `SELECT firma FROM portfolio.initiative WHERE id=$1`, initiativeID).Scan(&earlyFirma)
 
-		classification := "all-beads-closed"
-		proposedAction := "stage-promotion"
-		toStage := getPromoteTarget(currentStage)
-		if toStage == "" {
-			return
+		// Enforce Linkage Confidence threshold (SC-confidence / damping)
+		// quantbot bypasses this gate — Live-Geld-Schutz always escalates regardless of completeness
+		if earlyFirma != "quantbot" {
+			completenessPct, err := getLinkageCompleteness(ctx, p)
+			if err == nil {
+				threshold := 90.0
+				if envThreshold := os.Getenv("PORTFOLIO_CONFIDENCE_THRESHOLD"); envThreshold != "" {
+					var t float64
+					if _, err := fmt.Sscanf(envThreshold, "%f", &t); err == nil {
+						threshold = t
+					}
+				}
+				if completenessPct < threshold {
+					fmt.Printf("⚠ Auto-Stage: %s promote transition to watching bypassed/damped due to low linkage completeness (%.1f%% < %.1f%%)\n", initiativeID, completenessPct, threshold)
+					return
+				}
+			}
 		}
-		reason := fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu %q).", toStage)
 
-		if firma == "quantbot" {
-			classification = "all-beads-closed-live-geld"
-			proposedAction = "escalate"
-			toStage = ""
-			reason = "Live-Geld-Schutz: Alle verknüpften Beads geschlossen, autonomer Promote-Vorschlag verweigert — Karte wird geflaggt und eskaliert."
+		completeness, err := getCaptureCompletenessFunc(ctx, p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking completeness: %v\n", err)
+			completeness = 0.0
+		}
+
+		if completeness < 60.0 {
+			fmt.Printf("⚠ Auto-Stage: %s promote-ready (all beads closed), BUT confidence is low (completeness %.1f%% < 60.0%%). Auto-stage to watching is DAMPED (skipped).\n", initiativeID, completeness)
+			payload, _ := json.Marshal(map[string]any{
+				"message":      "Auto-Promotion nach watching gedämpft wegen niedriger Linkage-Abdeckung",
+				"completeness": completeness,
+				"threshold":    60.0,
+			})
+			_, err = p.Exec(ctx, `
+				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				VALUES ($1, 'promote_damped', 'master', $2::jsonb, 'auto-stage')
+			`, initiativeID, payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error inserting promote_damped event: %v\n", err)
+			}
+			return
 		}
 
 		var exists bool
 		_ = p.QueryRow(ctx, `
 			SELECT EXISTS(
 				SELECT 1 FROM portfolio.initiative_event
-				WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = $2
+				WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'classification') = 'all-beads-closed'
 			)
-		`, initiativeID, classification).Scan(&exists)
+		`, initiativeID).Scan(&exists)
 		if !exists {
-			payloadMap := map[string]any{
-				"classification":  classification,
+			var currentStage, firma string
+			err = p.QueryRow(ctx, `SELECT stage, firma FROM portfolio.initiative WHERE id=$1`, initiativeID).Scan(&currentStage, &firma)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error querying initiative stage and firma: %v\n", err)
+				return
+			}
+			if currentStage == "done" {
+				return
+			}
+			var nowCount int
+			_ = p.QueryRow(ctx, `SELECT count(*) FROM portfolio.initiative WHERE firma=$1 AND stage='now' AND archived_at IS NULL`, firma).Scan(&nowCount)
+
+			targetStage := GetPromoteTargetStage(ctx, p, sp, nil, currentStage, firma, nowCount)
+
+			var proposedAction, toStage, reason string
+			if firma == "quantbot" {
+				proposedAction = "escalate"
+				toStage = ""
+				reason = "Alle verknüpften Beads geschlossen (Eskalation wegen Live-Geld-Schutz)."
+			} else {
+				proposedAction = "stage-promotion"
+				toStage = targetStage
+				reason = fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu '%s').", targetStage)
+			}
+
+			payloadBytes, _ := json.Marshal(map[string]any{
+				"classification":  "all-beads-closed",
 				"proposed_action": proposedAction,
+				"to_stage":        toStage,
 				"reason":          reason,
-			}
-			if toStage != "" {
-				payloadMap["to_stage"] = toStage
-			}
-			payloadBytes, _ := json.Marshal(payloadMap)
+			})
 			_, err = p.Exec(ctx, `
 				INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
 				VALUES ($1, 'sage_action', 'sage', $2, 'sage')
@@ -2959,7 +4310,7 @@ func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID s
 				fmt.Fprintf(os.Stderr, "Error logging sage_action for all beads closed: %v\n", err)
 			} else {
 				if firma == "quantbot" {
-					fmt.Printf("✓ Live-Geld-Schutz: Escalated initiative %s because all beads are closed\n", initiativeID)
+					fmt.Printf("✓ Escalated initiative %s because all beads are closed (Live-Geld-Schutz)\n", initiativeID)
 				} else {
 					fmt.Printf("✓ Proposed stage promotion for initiative %s because all beads are closed\n", initiativeID)
 				}
@@ -3287,6 +4638,18 @@ func checkFirmaProposals(p *pgxpool.Pool, firma string) {
 		return
 	}
 
+	cooldowns := make(map[string]bool)
+	cRows, err := p.Query(context.Background(), `SELECT bead_id FROM portfolio.proposal_cooldown WHERE rejected_at > now() - interval '7 days'`)
+	if err == nil {
+		defer cRows.Close()
+		for cRows.Next() {
+			var bid string
+			if cRows.Scan(&bid) == nil {
+				cooldowns[bid] = true
+			}
+		}
+	}
+
 	rows, err := sp.Query(context.Background(), `
 		SELECT i.id, i.title, COALESCE(i.description, '')
 		FROM beads.issues i
@@ -3319,6 +4682,10 @@ func checkFirmaProposals(p *pgxpool.Pool, firma string) {
 	for rows.Next() {
 		var b Bead
 		if err := rows.Scan(&b.ID, &b.Title, &b.Desc); err == nil {
+			if cooldowns[b.ID] {
+				fmt.Printf("proposal-agent: skipping bead %s due to cooldown\n", b.ID)
+				continue
+			}
 			beads = append(beads, b)
 		}
 	}
@@ -3449,6 +4816,7 @@ Gib deine Antwort EXACTLY als ein valides JSON-Array von Objekten im folgenden F
 
 var sageOutageSimulated bool
 var sageSweepChan = make(chan struct{}, 1)
+var managerOutageSimulated bool
 
 type DanglingWorkspace struct {
 	ID        string `json:"id"`
@@ -3481,6 +4849,31 @@ func parseSqliteTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, err
+}
+
+var execBeadStatus = func(beadID string) (string, error) {
+	cmd := exec.Command("bd", "show", beadID, "--json")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	type beadInfo struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+
+	var beads []beadInfo
+	if err := json.Unmarshal(out.Bytes(), &beads); err != nil {
+		return "", err
+	}
+
+	if len(beads) == 0 {
+		return "", fmt.Errorf("no bead found with id %s", beadID)
+	}
+
+	return beads[0].Status, nil
 }
 
 func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) error {
@@ -3606,6 +4999,12 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 
 				if time.Since(lastActive) > timeoutDur {
 					isStuckRunning = true
+					bid := extractBeadName(ws.name)
+					if bid != "" {
+						if bstatus, err := execBeadStatus(bid); err == nil && (bstatus == "open" || bstatus == "hooked") {
+							isStuckRunning = false
+						}
+					}
 				}
 			}
 			if !isStuckRunning {
@@ -3675,13 +5074,36 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 				}
 
 				if time.Since(lastActive) > timeoutDur {
-					class = fmt.Sprintf("running-aber-stuck (no update for %v)", time.Since(lastActive).Round(time.Second))
-					action = "escalate"
-					nameLower := strings.ToLower(ws.name)
-					if strings.HasPrefix(nameLower, "sol-") {
-						beadID = strings.TrimPrefix(nameLower, "sol-")
-					} else if strings.HasPrefix(nameLower, "st-") {
-						beadID = nameLower
+					bid := extractBeadName(ws.name)
+					isStuck := true
+					if bid != "" {
+						if bstatus, err := execBeadStatus(bid); err == nil && (bstatus == "open" || bstatus == "hooked") {
+							isStuck = false
+						}
+					}
+					if isStuck {
+						class = fmt.Sprintf("running-aber-stuck (no update for %v)", time.Since(lastActive).Round(time.Second))
+						action = "escalate"
+						nameLower := strings.ToLower(ws.name)
+						if strings.HasPrefix(nameLower, "sol-") {
+							beadID = strings.TrimPrefix(nameLower, "sol-")
+						} else if strings.HasPrefix(nameLower, "st-") {
+							beadID = nameLower
+						}
+					}
+
+					// Exclude cards/workspaces with healthy pending dispatches (waiting for capacity/polecat)
+					if beadID != "" {
+						sp, err := solartownPool()
+						if err == nil {
+							var beadStatus string
+							err = sp.QueryRow(ctx, `SELECT status FROM beads.issues WHERE id = $1 AND deleted_at IS NULL`, beadID).Scan(&beadStatus)
+							if err == nil && beadStatus == "open" {
+								class = ""
+								action = ""
+								beadID = ""
+							}
+						}
 					}
 				}
 			}
@@ -3718,6 +5140,8 @@ func runSageSweep(p *pgxpool.Pool, printToStdout bool, onlyStuckCheck bool) erro
 					SELECT EXISTS(
 						SELECT 1 FROM portfolio.initiative_event 
 						WHERE initiative_id = $1 AND kind = 'sage_action' AND (payload->>'workspace_id') = $2
+						  AND (payload->>'action' IS NULL OR payload->>'action' != 'handover')
+						  AND (payload->>'proposed_action' IS NULL OR payload->>'proposed_action' != 'handover')
 					)
 				`, initiativeID, ws.id).Scan(&exists)
 				if err != nil {
@@ -3826,18 +5250,8 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 			err = sp.QueryRow(ctx, `SELECT count(*) FROM beads.issues WHERE id=ANY($1) AND status<>'closed' AND deleted_at IS NULL`, beads).Scan(&openCount)
 			if err == nil && openCount == 0 {
 				classification := "all-beads-closed"
-				proposedAction := "stage-promotion"
-				toStage := getPromoteTarget(init.Stage)
-				if toStage == "" {
-					continue
-				}
-				reason := fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu %q).", toStage)
-
 				if init.Firma == "quantbot" {
 					classification = "all-beads-closed-live-geld"
-					proposedAction = "escalate"
-					toStage = ""
-					reason = "Live-Geld-Schutz: Alle verknüpften Beads geschlossen, autonomer Promote-Vorschlag verweigert — Karte wird geflaggt und eskaliert."
 				}
 
 				var exists bool
@@ -3851,15 +5265,28 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 					)
 				`, init.ID, classification, cooldownHours).Scan(&exists)
 				if !exists {
-					payloadMap := map[string]any{
+					var nowCount int
+					_ = p.QueryRow(ctx, `SELECT count(*) FROM portfolio.initiative WHERE firma=$1 AND stage='now' AND archived_at IS NULL`, init.Firma).Scan(&nowCount)
+
+					targetStage := GetPromoteTargetStage(ctx, p, sp, nil, init.Stage, init.Firma, nowCount)
+
+					var proposedAction, toStage, reason string
+					if init.Firma == "quantbot" {
+						proposedAction = "escalate"
+						toStage = ""
+						reason = "Alle verknüpften Beads geschlossen (Eskalation wegen Live-Geld-Schutz)."
+					} else {
+						proposedAction = "stage-promotion"
+						toStage = targetStage
+						reason = fmt.Sprintf("Alle verknüpften Beads geschlossen (Vorschlag: Stage-Promotion zu '%s').", targetStage)
+					}
+
+					payloadBytes, _ := json.Marshal(map[string]any{
 						"classification":  classification,
 						"proposed_action": proposedAction,
+						"to_stage":        toStage,
 						"reason":          reason,
-					}
-					if toStage != "" {
-						payloadMap["to_stage"] = toStage
-					}
-					payloadBytes, _ := json.Marshal(payloadMap)
+					})
 					_, err = p.Exec(ctx, `
 						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
 						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
@@ -3871,7 +5298,7 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 					} else {
 						if printToStdout {
 							if init.Firma == "quantbot" {
-								fmt.Printf(" -> Live-Geld-Schutz: Escalated initiative %s because all beads are closed\n", init.ID)
+								fmt.Printf(" -> Escalated initiative %s because all beads are closed (Live-Geld-Schutz)\n", init.ID)
 							} else {
 								fmt.Printf(" -> Proposed stage promotion for initiative %s because all beads are closed\n", init.ID)
 							}
@@ -3932,7 +5359,7 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
 						VALUES ($1, 'sage_action', 'sage', $2, 'sage')
 					`, item.ID, string(payloadBytes))
-					
+
 					commentPayload, _ := json.Marshal(map[string]any{
 						"title": "Review: noch relevant? (Backlog-Fäule nach 14 Tagen Inaktivität)",
 					})
@@ -4049,6 +5476,132 @@ func startSageSteward(p *pgxpool.Pool) {
 	}()
 }
 
+func startFlowManagerHeartbeat(p *pgxpool.Pool) {
+	// Initialize status in db on startup
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.manager_status (id, last_run, status, error_message)
+		 VALUES ('flow-manager', now(), 'healthy', NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    error_message = EXCLUDED.error_message`)
+
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			if managerOutageSimulated {
+				fmt.Println("Flow Manager: Heartbeat skipped (outage simulated)")
+				continue
+			}
+
+			_, err := p.Exec(context.Background(),
+				`INSERT INTO portfolio.manager_status (id, last_run, status, error_message)
+				 VALUES ('flow-manager', now(), 'healthy', NULL)
+				 ON CONFLICT (id) DO UPDATE SET
+				    last_run = EXCLUDED.last_run,
+				    status = EXCLUDED.status,
+				    error_message = EXCLUDED.error_message`)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ failed to update flow manager status: %v\n", err)
+			}
+		}
+	}()
+}
+
+func getLinkageCompleteness(ctx context.Context, p *pgxpool.Pool) (float64, error) {
+	var linkedBeadsRegular, linkedBeadsCatchall, unlinkedBeads int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedBeadsRegular)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='bead' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedBeadsCatchall)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='bead'`).Scan(&unlinkedBeads)
+
+	var linkedWorkspacesRegular, linkedWorkspacesCatchall, unlinkedWorkspaces int
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND NOT (initiative_id LIKE '%-catch-all')`).Scan(&linkedWorkspacesRegular)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.initiative_link WHERE kind='vk_workspace' AND initiative_id LIKE '%-catch-all'`).Scan(&linkedWorkspacesCatchall)
+	_ = p.QueryRow(ctx,
+		`SELECT COUNT(*) FROM portfolio.unlinked_item WHERE kind='vk_workspace'`).Scan(&unlinkedWorkspaces)
+
+	totalBeads := linkedBeadsRegular + linkedBeadsCatchall + unlinkedBeads
+	totalWorkspaces := linkedWorkspacesRegular + linkedWorkspacesCatchall + unlinkedWorkspaces
+	totalWorkItems := totalBeads + totalWorkspaces
+	linkedWorkItems := (linkedBeadsRegular + linkedBeadsCatchall) + (linkedWorkspacesRegular + linkedWorkspacesCatchall)
+
+	if totalWorkItems == 0 {
+		return 100.0, nil
+	}
+	return (float64(linkedWorkItems) / float64(totalWorkItems)) * 100.0, nil
+}
+
+func getPromoteReadyInitiatives(ctx context.Context, p *pgxpool.Pool) (map[string]bool, error) {
+	rows, err := p.Query(ctx, `SELECT initiative_id, ref FROM portfolio.initiative_link WHERE kind='bead'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	initToBeads := make(map[string][]string)
+	var allBeads []string
+	beadSet := make(map[string]bool)
+
+	for rows.Next() {
+		var initID, ref string
+		if err := rows.Scan(&initID, &ref); err == nil {
+			initToBeads[initID] = append(initToBeads[initID], ref)
+			if !beadSet[ref] {
+				beadSet[ref] = true
+				allBeads = append(allBeads, ref)
+			}
+		}
+	}
+
+	promoteReady := make(map[string]bool)
+	if len(allBeads) == 0 {
+		return promoteReady, nil
+	}
+
+	sp, err := solartownPool()
+	if err != nil {
+		return nil, err
+	}
+
+	beadStatuses := make(map[string]string)
+	bRows, err := sp.Query(ctx, `SELECT id, status FROM beads.issues WHERE id = ANY($1) AND deleted_at IS NULL`, allBeads)
+	if err != nil {
+		return nil, err
+	}
+	defer bRows.Close()
+
+	for bRows.Next() {
+		var id, status string
+		if err := bRows.Scan(&id, &status); err == nil {
+			beadStatuses[id] = status
+		}
+	}
+
+	for initID, beads := range initToBeads {
+		if len(beads) == 0 {
+			continue
+		}
+		allClosed := true
+		for _, b := range beads {
+			status, exists := beadStatuses[b]
+			if !exists || status != "closed" {
+				allClosed = false
+				break
+			}
+		}
+		if allClosed {
+			promoteReady[initID] = true
+		}
+	}
+
+	return promoteReady, nil
+}
+
 func getDanglingWorkspaces() ([]DanglingWorkspace, error) {
 	vkDB := envOr("VK_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
 	if _, err := os.Stat(vkDB); os.IsNotExist(err) {
@@ -4156,4 +5709,29 @@ func checkDoneProbe(p *pgxpool.Pool, vkDB string, wsID string, taskHex string, b
 	}
 
 	return false
+}
+
+var vkDelegatePath string
+
+func findVkDelegate() string {
+	if vkDelegatePath != "" {
+		return vkDelegatePath
+	}
+	paths := []string{
+		"/root/solartown/tools/vk-delegate/vk-delegate",
+		"./tools/vk-delegate/vk-delegate",
+		"vk-delegate",
+	}
+	for _, p := range paths {
+		if strings.HasPrefix(p, "/") {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		} else {
+			if lp, err := exec.LookPath(p); err == nil {
+				return lp
+			}
+		}
+	}
+	return "/root/solartown/tools/vk-delegate/vk-delegate"
 }

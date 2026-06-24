@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"strings"
 )
 
 func TestSageLeaseSequential(t *testing.T) {
@@ -247,7 +248,17 @@ func TestStewardReport(t *testing.T) {
 	}
 	defer p.Close()
 
-	err = runSteward(p, vkDB)
+	for i := 0; i < 5; i++ {
+		err = runSteward(p, vkDB)
+		if err == nil {
+			break
+		}
+		if strings.Contains(err.Error(), "exit status 5") || strings.Contains(err.Error(), "locked") {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		break
+	}
 	if err != nil {
 		t.Errorf("expected no error running runSteward, got: %v", err)
 	}

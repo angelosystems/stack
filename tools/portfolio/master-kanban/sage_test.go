@@ -621,7 +621,9 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 	testBeadID := "st-ib5e"
 	testInitiativeID := "init-sage-test-sweep-stuck"
 
-	// Clean up other test data
+	// Clean up any old test data
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", testBeadID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", testBeadID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
@@ -1024,3 +1026,116 @@ func TestStageTransitionMap(t *testing.T) {
 	}
 }
 
+func TestSageSteward_Handover(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	testInitiativeID := "init-sage-test-handover"
+	testWorkspaceID := "99999999999999999999999999999999"
+
+	// Clean up old test data
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	// Create test initiative
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
+		VALUES ($1, 'Sage Handover Test Initiative', 'idea', false, 'stayawesome', 'plan_file')
+	`, testInitiativeID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	// Create test server mux and register Handover handler
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/sage/handover", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			InitiativeID string `json:"initiative_id"`
+			WorkspaceID  string `json:"workspace_id"`
+			Reason       string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		if body.InitiativeID == "" || body.WorkspaceID == "" {
+			http.Error(w, "missing initiative_id or workspace_id", 400)
+			return
+		}
+
+		payloadMap := map[string]any{
+			"workspace_id": body.WorkspaceID,
+			"action":       "handover",
+			"reason":       body.Reason,
+			"source":       "manager",
+		}
+		payloadBytes, _ := json.Marshal(payloadMap)
+
+		_, err = p.Exec(r.Context(), `
+			INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+			VALUES ($1, 'sage_action', 'sage', $2, 'flow-manager')
+		`, body.InitiativeID, string(payloadBytes))
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		select {
+		case sageSweepChan <- struct{}{}:
+		default:
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true,"handover_status":"received"}`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Perform POST request to the handover API
+	postBody, _ := json.Marshal(map[string]string{
+		"initiative_id": testInitiativeID,
+		"workspace_id":  testWorkspaceID,
+		"reason":        "Simulierte Workspace-Stagnation im NOW-Stage",
+	})
+	resp, err := http.Post(server.URL+"/api/sage/handover", "application/json", bytes.NewReader(postBody))
+	if err != nil {
+		t.Fatalf("failed to send POST handover request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	// Verify that the handover event was logged in the database
+	var count int
+	err = p.QueryRow(ctx, `
+		SELECT count(*) FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 AND kind = 'sage_action' 
+		  AND payload->>'action' = 'handover' 
+		  AND payload->>'workspace_id' = $2
+	`, testInitiativeID, testWorkspaceID).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query logged handover event: %v", err)
+	}
+
+	if count != 1 {
+		t.Errorf("expected exactly 1 handover event to be logged, got %d", count)
+	}
+}

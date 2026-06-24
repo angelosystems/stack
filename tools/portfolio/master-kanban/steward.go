@@ -193,12 +193,6 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 			beadDisplay = "—"
 		}
 
-		// Append to stdout report
-		reportBuilder.WriteString(fmt.Sprintf("%d. Workspace: %s (%s)\n", corpseCount, ws.id[:8], ws.name))
-		reportBuilder.WriteString(fmt.Sprintf("   Bead:      %s\n", beadDisplay))
-		reportBuilder.WriteString(fmt.Sprintf("   Klasse:    %s\n", sageClass))
-		reportBuilder.WriteString(fmt.Sprintf("   Aktion:    %s\n\n", proposedAction))
-
 		// 4. Log Board-Event on the Initiative (using a fallback if no bead/initiative is associated)
 		var initiativeID string
 		if beadID != "" {
@@ -228,6 +222,11 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 			proposedAction = "escalate"
 		}
 
+		// Append to stdout report
+		reportBuilder.WriteString(fmt.Sprintf("%d. Workspace: %s (%s)\n", corpseCount, ws.id[:8], ws.name))
+		reportBuilder.WriteString(fmt.Sprintf("   Bead:      %s\n", beadDisplay))
+		reportBuilder.WriteString(fmt.Sprintf("   Klasse:    %s\n", sageClass))
+		reportBuilder.WriteString(fmt.Sprintf("   Aktion:    %s\n\n", proposedAction))
 		// Check for idempotence: does an identical sage_action event already exist for this workspace?
 		var exists bool
 		err := p.QueryRow(ctx, `

@@ -184,3 +184,144 @@ func TestSageSweep_FilteringAndChannel(t *testing.T) {
 		t.Errorf("expected healthy workspace st-ib5e to remain untouched with 0 events, got %d", countIb5e)
 	}
 }
+
+func TestSageSweep_StagnationDetectorExclusion(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	// Mock execBeadStatus to return "open" so it gets excluded
+	origExecBeadStatus := execBeadStatus
+	defer func() { execBeadStatus = origExecBeadStatus }()
+	execBeadStatus = func(beadID string) (string, error) {
+		if beadID == "st-1bpf" {
+			return "open", nil
+		}
+		return "in_progress", nil
+	}
+
+	// Clean up any pre-existing test events to ensure clean state
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE payload->>'workspace_id' IN ('20202020')")
+
+	var initID1bpf string
+	err = p.QueryRow(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref='st-1bpf' AND kind='bead'").Scan(&initID1bpf)
+	if err != nil {
+		t.Fatalf("failed to find initiative_id for st-1bpf: %v", err)
+	}
+
+	// 1. Create a temporary SQLite database for vibe-kanban
+	tmpFile, err := os.CreateTemp("", "vibe-kanban-sweep-test-ex-*.sqlite")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	dbPath := tmpFile.Name()
+
+	// 2. Initialize schema
+	schema := `
+	CREATE TABLE workspaces (
+		id         BLOB PRIMARY KEY,
+		name       TEXT,
+		created_at TEXT,
+		task_id    BLOB,
+		archived   INTEGER DEFAULT 0
+	);
+	CREATE TABLE sessions (
+		id           BLOB PRIMARY KEY,
+		workspace_id BLOB
+	);
+	CREATE TABLE execution_processes (
+		id         BLOB PRIMARY KEY,
+		session_id BLOB,
+		status     TEXT,
+		exit_code  INTEGER,
+		started_at TEXT,
+		updated_at TEXT,
+		created_at TEXT,
+		run_reason TEXT
+	);
+	`
+	if err := exec.Command("sqlite3", dbPath, schema).Run(); err != nil {
+		t.Fatalf("failed to initialize sqlite schema: %v", err)
+	}
+
+	// 3. Insert SQLite fixture for a stuck running workspace
+	now := time.Now()
+	stuckTimeStr := now.Add(-2 * time.Hour).UTC().Format("2006-01-02T15:04:05Z")
+
+	fixtures := fmt.Sprintf(`
+	-- WS_EX: Stuck running workspace (normally detected, but excluded since st-1bpf is "open")
+	INSERT INTO workspaces (id, name, created_at, task_id, archived) VALUES (x'20202020', 'sol-st-1bpf', '%[1]s', x'bbbbbbbb', 0);
+	INSERT INTO sessions (id, workspace_id) VALUES (x'21212121', x'20202020');
+	INSERT INTO execution_processes (id, session_id, status, exit_code, started_at, updated_at, created_at, run_reason)
+	VALUES (x'22222222', x'21212121', 'running', NULL, '%[1]s', '%[1]s', '%[1]s', 'codingagent');
+	`, stuckTimeStr)
+
+	if err := exec.Command("sqlite3", dbPath, fixtures).Run(); err != nil {
+		t.Fatalf("failed to insert test fixtures: %v", err)
+	}
+
+	// Set VK_DB env variable
+	origVkDB := os.Getenv("VIBE_KANBAN_DB")
+	defer os.Setenv("VIBE_KANBAN_DB", origVkDB)
+	os.Setenv("VIBE_KANBAN_DB", dbPath)
+
+	// Set SAGE_STUCK_TIMEOUT to a low value for testing
+	defer os.Unsetenv("SAGE_STUCK_TIMEOUT")
+	os.Setenv("SAGE_STUCK_TIMEOUT", "5m")
+
+	// --- PHASE 1: Mock execBeadStatus to return "open" (exclusion should apply!) ---
+	currentMockStatus := "open"
+	execBeadStatus = func(beadID string) (string, error) {
+		if beadID == "st-1bpf" {
+			return currentMockStatus, nil
+		}
+		return "in_progress", nil
+	}
+
+	// Run Stuck-Only Sweep
+	err = runSageSweep(p, true, true)
+	if err != nil {
+		t.Fatalf("runSageSweep(onlyStuckCheck=true) failed in phase 1: %v", err)
+	}
+
+	// Verify that NO event was logged for st-1bpf because it was excluded (status: "open")
+	var count1bpf int
+	err = p.QueryRow(ctx, "SELECT count(*) FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'workspace_id' = '20202020'", initID1bpf).Scan(&count1bpf)
+	if err != nil {
+		t.Fatalf("failed to query events for st-1bpf in phase 1: %v", err)
+	}
+	if count1bpf != 0 {
+		t.Errorf("expected 0 events for open bead st-1bpf, but got %d (exclusion did not apply!)", count1bpf)
+	}
+
+	// --- PHASE 2: Mock execBeadStatus to return "in_progress" (exclusion should NOT apply!) ---
+	currentMockStatus = "in_progress"
+
+	err = runSageSweep(p, true, true)
+	if err != nil {
+		t.Fatalf("runSageSweep(onlyStuckCheck=true) failed in phase 2: %v", err)
+	}
+
+	err = p.QueryRow(ctx, "SELECT count(*) FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'workspace_id' = '20202020'", initID1bpf).Scan(&count1bpf)
+	if err != nil {
+		t.Fatalf("failed to query events for st-1bpf in phase 2: %v", err)
+	}
+	if count1bpf != 1 {
+		t.Errorf("expected exactly 1 event for in_progress bead st-1bpf, but got %d", count1bpf)
+	}
+}

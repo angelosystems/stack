@@ -104,17 +104,35 @@ können als no-changes/Duplikat geschlossen sein, wie diese Session mehrfach
 zeigte); ein false-Promote würde unfertige Arbeit als erledigt markieren. Darum
 strikt propose→confirm.
 
-### L5 — Board-Review-Digest
-Periodischer Lauf (+ edge-getriggert, wenn Aktivitäts-Stille eine Schwelle
-überschreitet) erzeugt einen Digest, sichtbar als Board-Ansicht **„🩺 Manager"**:
-„3 Karten >X in NOW ohne Aktivität → 1 stockt, 2 promote-reif; 2 IDEA veraltet;
-NOW überläuft bei stayawesome". Genau „was bewegt sich nicht, was muss
-angestoßen werden" — an einem Ort, statt selbst zu suchen.
+### L5 — Board-Review-Digest & Aktive Zustellung (Push-Kanal)
+Ein periodischer Lauf erzeugt einen aggregierten **Board-Review-Digest**. Um einen proaktiven Manager zu garantieren, wird dieser Digest nicht nur passiv im Cockpit bereitgestellt, sondern über **aktive Push-Zustellkanäle** zugestellt:
+
+1. **Gas Town Mail (Primärkanal):**
+   - **Ziel:** Der Digest wird proaktiv als Markdown-Bericht an den konfigurierten Empfänger (Standard: `mariobrain/`, überschreibbar per `PORTFOLIO_DIGEST_RECIPIENT`) zugestellt.
+   - **Befehl:** Nutzt das systemeigene `gt mail send <recipient> -s "🩺 Flow-Manager Board-Review Digest" --stdin` Tool.
+   - **Inhalt:** Strukturierter Markdown-Bericht mit aggregierten Metriken (Gesamtzahl geflaggter Karten, Verteilung nach Stagnation/Promote-reif/Backlog-Fäule/WIP-Überlauf) sowie detaillierten Diagnoseergebnissen und vorgeschlagenen Aktionen je Karte.
+
+2. **Dashboard / Console (Ausweichkanal & Liveness):**
+   - **Ziel:** Ausgabe im Standard-Output (Journal-Logs) für volle Audit-Sicherheit und Systemüberwachung.
+
+*Telegram wird als Zustellkanal aus Sicherheits- und Datenschutzgründen explizit ausgeschlossen.*
 
 ### L6 — Selbst-Liveness + Budget
 Der Manager hat einen eigenen Heartbeat (ein ausgefallener Lauf ist sichtbar,
 nicht still — Lehre aus capture-completeness) und ein Pro-Karte-Budget: dieselbe
 Karte wird nicht jeden Zyklus neu geflaggt (Cooldown gegen Flag-Müdigkeit).
+
+### L7 — Stage-Übergangs-Map (P2.4)
+Da die Stages nicht linear sind, wird das Promote-Ziel über eine dynamische Entscheidungsmatrix ermittelt, die die Kapazitätsanzeige (P2.2) nutzt:
+
+| Von Stage | Bedingung | Ziel-Stage | Logik / Begründung |
+|---|---|---|---|
+| **idea** | Freie Kapazität (idle Polecats > 0 ODER vk-Slots > 0) UND `nowCount < nowLimit` | **now** | Überspringt `soon`, da sofortige Ausführung möglich ist (Pull-System). |
+| **idea** | Keine Kapazität ODER `nowCount >= nowLimit` | **soon** | Wandert in die Warteschlange. |
+| **soon** | Keine zusätzlichen Bedingungen | **now** | Wird in die aktive Umsetzung überführt. |
+| **now** | Keine zusätzlichen Bedingungen | **watching** | Aktive Entwicklung abgeschlossen, Beobachtung von Reviews/Tests. |
+| **watching** | Keine zusätzlichen Bedingungen | **done** | Erfolgreich abgeschlossen und archiviert. |
+| **done** | Bereits am Ende | *(keine)* | Endzustand. Keine weitere Promotion möglich. |
 
 ## Success-Criteria
 
@@ -139,6 +157,27 @@ Karte wird nicht jeden Zyklus neu geflaggt (Cooldown gegen Flag-Müdigkeit).
 
 - R-A: Schwellwert-Tuning — was ist „zu lange in Stage"? Pro Stage + pro Firma
   konfigurierbar; konservativ starten, nachjustieren. Vor L1 Defaults setzen.
+  
+  **Spezifikation: Per-Stage-Schwellen-Defaultmodell (P1.2)**
+  
+  Das Default-Schwellenmodell definiert, nach welcher Dauer von Inaktivität (Aktivitäts-Stille) eine Karte in einer bestimmten Stage als stagnierend oder veraltet (Backlog-Fäule) eingestuft wird.
+  
+  | Stage | Standard-Schwelle | Begründung & Typ |
+  |---|---|---|
+  | `now` | **3 Tage** (`3d`) | Active Execution. 3 Tage ohne jegliche Aktivität (Bead/Workspace/Commit) deutet auf Stagnation hin. |
+  | `soon` | **14 Tage** (`14d`) | Waiting queue. Längere Liegezeiten sind hier normal, aber nach 2 Wochen Inaktivität sollte nachgehakt werden. |
+  | `idea` | **90 Tage** (`90d`) | Backlog-Fäule. Im Idea-Backlog sind Monate legitim; nach 3 Monaten ohne Bewegung gilt die Idee als veraltet. |
+  | `watching` | **30 Tage** (`30d`) | Passive Beobachtung. Sollte nach 1 Monat ohne Aktivität evaluiert werden. |
+  | `done` | **Inaktiviert** (`0s`) | Abgeschlossene Arbeit altert nicht und löst keine Flow-Aktionen aus. |
+  
+  *Konfiguration & Priorität:*
+  Die Schwellenwerte können flexibel über Umgebungsvariablen überschrieben werden:
+  1. `PORTFOLIO_THRESHOLD_<STAGE>_<FIRMA>` (z.B. `PORTFOLIO_THRESHOLD_NOW_STAYAWESOME=12h`)
+  2. `PORTFOLIO_THRESHOLD_<STAGE>` (z.B. `PORTFOLIO_THRESHOLD_NOW=5d`)
+  3. Der oben spezifizierte Standardwert.
+  
+  Unterstützte Formate beim Parsing (erweiterte durations): Tage (`d`/`days`), Wochen (`w`/`weeks`), Monate (`mo`/`months`) sowie Standard-Go-Dauer-Formate (`h`, `m`).
+
 - R-B: Diagnose-Qualität — GLM liest das Warum evtl. falsch. Mitigation:
   Diagnose ist beratend; jede Aktion braucht Confirm; niedrige Confidence →
   nur flaggen, kein Aktions-Vorschlag.
@@ -150,6 +189,19 @@ Karte wird nicht jeden Zyklus neu geflaggt (Cooldown gegen Flag-Müdigkeit).
   explizit definieren.
 - R-E: Zeit-in-Stage braucht stage-move-Events; sind die lückenhaft, ist die
   Alterung approximativ — Fallback auf `updated_at`.
+- R-F: **Promote-Ziel mehrdeutig** — die Stages sind nicht linear (`idea`/`now`/`soon`/`watching`/`done`).
+  
+  **Spezifikation: Stage-Übergangs-Map (P2.4)**
+  
+  Das Modell definiert das eindeutige Promote-Ziel für jede Ausgangs-Stage, um Fehl-Promotions oder Unklarheiten bei automatisierten Vorschlägen zu vermeiden.
+  
+  | Ausgangs-Stage | Promote-Ziel | Bedeutung des Übergangs & Logik |
+  |---|---|---|
+  | `idea` | `soon` | **In Warteschlange einreihen.** Die Idee ist triagiert und bereit für die Detail-Ausarbeitung oder Einreihung in die nächste Planungsphase. |
+  | `soon` | `now` | **In aktive Entwicklung geben.** Karte rückt in die Spalte für aktive Ausführung vor; Beads werden an den Scheduler/Reactor übergeben. |
+  | `now` | `watching` | **In Beobachtung/Abnahme verschieben.** Aktive Umsetzung abgeschlossen (z. B. alle verlinkten Beads closed), wartet auf PR-Review, CI-Durchlauf oder menschliche Abnahme. |
+  | `watching` | `done` | **Final abschließen.** Abnahme erfolgreich, Karte wird archiviert/abgeschlossen. |
+  | `done` | *Terminal* | **Keine Promotion möglich.** Dies ist der Endzustand. Promotion aus `done` wirft einen Fehler. |
 
 ## Phasen (Granularität, keine Zeit)
 
@@ -192,6 +244,6 @@ Ein klar fokussierter, sauber abgegrenzter PRD-Draft. Das Problem ist konkret un
 
 **NOTES:**
 - **[Wiegers] Per-Stage-Schwellen sind das Korrektheits-Fundament** (R-A) — vor L1 das stage-differenzierte Default-Modell festnageln (NOW: Tage; IDEA: Monate legitim), nicht „später tunen".
-- **[Adzic] Promote-Ziel mehrdeutig** — die Stages sind nicht linear (idea/now/soon/watching/done). Die Stage-Übergangs-Karte definieren: was heißt „promoten" aus jeder Stage?
+- [x] **[Adzic] Promote-Ziel mehrdeutig** — die Stages sind nicht linear (idea/now/soon/watching/done). Die Stage-Übergangs-Karte definieren: was heißt „promoten" aus jeder Stage? (Spezifiziert in R-F / Spezifikation: Stage-Übergangs-Map (P2.4))
 - **[Cockburn] Digest-Zustellung: push statt pull.** Eine Ansicht, die Mario aktiv aufrufen muss, untergräbt einen *proaktiven* Manager — Zustellkanal spezifizieren (Dashboard/Mail/Fabric, kein Telegram).
 - **[Crispin] Den Manager gegen die Staging-Board-Instanz testen** (geseedete Karten in stockend/promote-reif-Zuständen), nicht gegen prod-Karten.

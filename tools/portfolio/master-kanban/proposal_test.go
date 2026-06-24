@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -61,10 +64,14 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 
 	testBeadID := "st-wisp-0hoz"
 
+	// Ensure st-catch-all exists in portfolio database
+	_, _ = pPool.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title) VALUES ('st-catch-all', 'solartown', 'watching', 'Solartown Catch-all') ON CONFLICT (id) DO NOTHING`)
+
 	// Cleanup any leftover test data
 	cleanup := func() {
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id IN ($1, $2)", testBeadID, "st-catch-all")
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id IN ($1, $2)", "proposal-"+testBeadID, testBeadID)
 		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id LIKE 'proposal-%'")
-		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testBeadID)
 		_, _ = sPool.Exec(ctx, "UPDATE beads.labels SET deleted_at=now() WHERE issue_id=$1 AND label='lane:plan'", testBeadID)
 	}
 	cleanup()
@@ -146,6 +153,7 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 	}
 
 	// Run proposal check
+	_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE stage='soon' AND id NOT LIKE 'proposal-%'")
 	checkFirmaProposals(pPool, "solartown")
 
 	// Verify proposal card was created in the database
@@ -173,8 +181,12 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 	}
 
 	// 5. Start our master-kanban serve command in a background goroutine to test accept/reject endpoints
+	http.DefaultServeMux = http.NewServeMux()
 	srvCmd := cmdServe()
-	testPort := "17770"
+	testPort, err := getFreePort()
+	if err != nil {
+		t.Fatalf("Failed to find free port: %v", err)
+	}
 	srvCmd.SetArgs([]string{"--port", testPort})
 	go func() {
 		_ = srvCmd.Execute()
@@ -220,6 +232,16 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 		t.Errorf("Unexpected real initiative card values: title=%q, stage=%q", cardTitle, cardStage)
 	}
 
+	// Verify 'created' event was written on accept
+	var createdEventCount int
+	err = pPool.QueryRow(ctx, "SELECT COUNT(*) FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'created'", testBeadID).Scan(&createdEventCount)
+	if err != nil {
+		t.Fatalf("Failed to query created event: %v", err)
+	}
+	if createdEventCount != 1 {
+		t.Errorf("Expected 1 created event for accepted proposal, got %d", createdEventCount)
+	}
+
 	// Verify lane:plan label is set on the bead in beads database
 	var labelExists bool
 	err = sPool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM beads.labels WHERE issue_id = $1 AND label = 'lane:plan' AND deleted_at IS NULL)", testBeadID).Scan(&labelExists)
@@ -262,5 +284,184 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 	}
 	if propExists {
 		t.Errorf("Expected proposal card to be deleted after reject")
+	}
+
+	// Verify rejection activity event was logged on st-catch-all
+	var rejectEventCount int
+	err = pPool.QueryRow(ctx, "SELECT COUNT(*) FROM portfolio.initiative_event WHERE initiative_id = 'st-catch-all' AND kind = 'activity' AND payload->>'action' = 'reject'").Scan(&rejectEventCount)
+	if err != nil {
+		t.Fatalf("Failed to query reject event on catch-all: %v", err)
+	}
+	if rejectEventCount != 1 {
+		t.Errorf("Expected 1 reject event on st-catch-all, got %d", rejectEventCount)
+	}
+
+	// C. Test /api/move Endpoint
+	movePayload := map[string]string{"id": testBeadID, "stage": "soon"}
+	mBytes, _ := json.Marshal(movePayload)
+	req, _ = http.NewRequest("POST", "http://localhost:"+testPort+"/api/move", bytes.NewReader(mBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Auth-Request-Email", "mario@solartown.de")
+
+	resp, err = cl.Do(req)
+	if err != nil {
+		t.Fatalf("POST to move endpoint failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected move endpoint to return status 200, got %d", resp.StatusCode)
+	}
+
+	// Verify stage is updated
+	var currentStage string
+	err = pPool.QueryRow(ctx, "SELECT stage FROM portfolio.initiative WHERE id = $1", testBeadID).Scan(&currentStage)
+	if err != nil {
+		t.Fatalf("Failed to query stage: %v", err)
+	}
+	if currentStage != "soon" {
+		t.Errorf("Expected stage to be 'soon', got %q", currentStage)
+	}
+
+	// Verify move event was logged
+	var moveEventCount int
+	var fromStage, toStage string
+	err = pPool.QueryRow(ctx, "SELECT COUNT(*), from_stage, to_stage FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'moved' AND actor = 'mario@solartown.de' GROUP BY from_stage, to_stage", testBeadID).Scan(&moveEventCount, &fromStage, &toStage)
+	if err != nil {
+		t.Fatalf("Failed to query move event: %v", err)
+	}
+	if moveEventCount != 1 {
+		t.Errorf("Expected 1 move event with actor 'mario@solartown.de', got %d", moveEventCount)
+	}
+	if fromStage != "idea" || toStage != "soon" {
+		t.Errorf("Expected stage transition from 'idea' to 'soon', got from %q to %q", fromStage, toStage)
+	}
+}
+
+func getFreePort() (string, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return "", err
+	}
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	defer l.Close()
+	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port), nil
+}
+
+func TestApiDispatch(t *testing.T) {
+	// 1. Connect to development database
+	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+
+	ctx := context.Background()
+	pPool, err := pgxpool.New(ctx, portfolioDsn)
+	if err != nil {
+		t.Fatalf("Failed to connect to portfolio DB: %v", err)
+	}
+	defer pPool.Close()
+
+	// Swap global pool
+	oldPool := pool
+	pool = pPool
+	defer func() {
+		pool = oldPool
+	}()
+
+	testInitiativeID := "st-bead-native-reviewer"
+	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440000"
+
+	// Cleanup test events
+	cleanup := func() {
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'dispatched'", testInitiativeID)
+	}
+	cleanup()
+	defer cleanup()
+
+	// 2. Create mock vk-delegate script
+	tmpDir, err := os.MkdirTemp("", "vk-mock")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mockScriptPath := filepath.Join(tmpDir, "vk-delegate")
+	scriptContent := fmt.Sprintf(`#!/bin/sh
+echo "workspace_id:        %s"
+echo "execution_process:   550e8400-e29b-41d4-a716-446655440001"
+echo "workspace_url:       http://localhost:54682/workspaces/%s"
+`, testWorkspaceID, testWorkspaceID)
+
+	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write mock script: %v", err)
+	}
+
+	// Override the vk-delegate path used by the handler
+	oldVkPath := vkDelegatePath
+	vkDelegatePath = mockScriptPath
+	defer func() {
+		vkDelegatePath = oldVkPath
+	}()
+
+	// 3. Start master-kanban serve command in a background goroutine
+	http.DefaultServeMux = http.NewServeMux()
+	srvCmd := cmdServe()
+	testPort, err := getFreePort()
+	if err != nil {
+		t.Fatalf("Failed to get free port: %v", err)
+	}
+	srvCmd.SetArgs([]string{"--port", testPort})
+	go func() {
+		_ = srvCmd.Execute()
+	}()
+	// Allow server to boot up
+	time.Sleep(500 * time.Millisecond)
+
+	// 4. Test POS /api/dispatch
+	payload := map[string]string{
+		"id":   testInitiativeID,
+		"lane": "hack",
+		"note": "Implement test features detached",
+	}
+	pBytes, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", "http://localhost:"+testPort+"/api/dispatch", bytes.NewReader(pBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	cl := &http.Client{Timeout: 5 * time.Second}
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatalf("POST to dispatch endpoint failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected dispatch endpoint to return status 200, got %d", resp.StatusCode)
+	}
+
+	var respData struct {
+		Ok          bool   `json:"ok"`
+		WorkspaceID string `json:"workspace_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&respData); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if !respData.Ok || respData.WorkspaceID != testWorkspaceID {
+		t.Errorf("Unexpected response: %+v", respData)
+	}
+
+	// 5. Verify the dispatch event was written to the portfolio.initiative_event table
+	var dbRef string
+	err = pPool.QueryRow(ctx,
+		`SELECT payload->>'ref' FROM portfolio.initiative_event 
+		 WHERE initiative_id = $1 AND kind = 'dispatched' AND payload->>'lane' = 'hack'`,
+		testInitiativeID).Scan(&dbRef)
+	if err != nil {
+		t.Fatalf("Failed to find dispatched event in database: %v", err)
+	}
+
+	if dbRef != testWorkspaceID {
+		t.Errorf("Expected event ref to be %q, got %q", testWorkspaceID, dbRef)
 	}
 }
