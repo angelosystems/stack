@@ -225,7 +225,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		// Stagnation Check
 		hasActiveWorkspace := false
 		for _, ws := range workspaces {
-			if ws.Status == "running" {
+			if ws.Status == "running" || ws.Status == "waiting" {
 				hasActiveWorkspace = true
 				break
 			}
@@ -239,17 +239,63 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		}
 
 		timeInactivity := time.Since(init.UpdatedAt)
-		if (init.Stage == "now" || init.Stage == "soon") && timeInactivity > 48*time.Hour && !hasActiveWorkspace && !hasActiveBeads {
+		stagnationThreshold := GetStageThreshold(init.Firma, init.Stage)
+		if (init.Stage == "now" || init.Stage == "soon") && stagnationThreshold > 0 && timeInactivity > stagnationThreshold && !hasActiveWorkspace && !hasActiveBeads {
 			flaggedReasons = append(flaggedReasons, fmt.Sprintf("Stagnation: %v tage stille, keine aktive arbeit (workspace/beads)", int(timeInactivity.Hours()/24)))
 		}
 
 		// Backlog-Fäule Check
-		if init.Stage == "idea" && time.Since(init.CreatedAt) > 14*24*time.Hour && len(beads) == 0 && len(events) <= 1 {
-			flaggedReasons = append(flaggedReasons, "Backlog-Fäule: über 14 tage unbewegt in IDEA")
+		staleThreshold := GetStageThreshold(init.Firma, "idea")
+		if init.Stage == "idea" && staleThreshold > 0 && time.Since(init.CreatedAt) > staleThreshold && len(beads) == 0 && len(events) <= 1 {
+			flaggedReasons = append(flaggedReasons, fmt.Sprintf("Backlog-Fäule: über %v tage unbewegt in IDEA", int(staleThreshold.Hours()/24)))
 		}
 
 		// If flagged, run GLM diagnosis!
 		if len(flaggedReasons) > 0 {
+			// Eskalations-Leiter: Reactor -> vk-Sage -> Manager
+			// Check if any of the lower layers are engaged for this initiative.
+
+			// 1. Check for active/waiting Workspace
+			hasActiveWorkspace := false
+			for _, ws := range workspaces {
+				if ws.Status == "running" || ws.Status == "waiting" {
+					hasActiveWorkspace = true
+					break
+				}
+			}
+
+			// 2. Check for open Reactor attempt
+			openReactor := hasOpenReactorAttempt(events)
+
+			// 3. Check if in vk-Sage's queue (active lease)
+			hasSageLease := false
+			for _, b := range beads {
+				var lockedUntil time.Time
+				err := p.QueryRow(ctx, `
+					SELECT locked_until FROM portfolio.sage_lease WHERE bead_id = $1
+				`, b.Ref).Scan(&lockedUntil)
+				if err == nil && lockedUntil.After(time.Now()) {
+					hasSageLease = true
+					break
+				}
+			}
+
+			if hasActiveWorkspace || openReactor || hasSageLease {
+				var engaged []string
+				if hasActiveWorkspace {
+					engaged = append(engaged, "active Workspace")
+				}
+				if openReactor {
+					engaged = append(engaged, "open Reactor attempt")
+				}
+				if hasSageLease {
+					engaged = append(engaged, "vk-Sage's queue/lease")
+				}
+				fmt.Printf("Skipping flagged card %s (%s) because lower layers are engaged: %s\n\n",
+					init.ID, init.Title, strings.Join(engaged, ", "))
+				continue
+			}
+
 			fmt.Printf("Diagnosing flagged card %s (%s, Stage: %s, Firma: %s)\n", init.ID, init.Title, init.Stage, init.Firma)
 			fmt.Printf("  -> Flagged reasons: %s\n", strings.Join(flaggedReasons, " | "))
 
@@ -259,7 +305,9 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				continue
 			}
 
-			if diagnosis.Category == "Workspace-gescheitert" {
+			if init.Firma == "quantbot" {
+				diagnosis.ProposedAction = "escalate"
+			} else if diagnosis.Category == "Workspace-gescheitert" {
 				diagnosis.ProposedAction = "handover"
 			}
 
@@ -293,7 +341,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				}
 
 				// If category is "Workspace-gescheitert" (Workspace-bedingte Stagnation),
-				// execute the explicit handover path: log a 'sage_action' event with action='handover' on the Initiative.
+				// execute the explicit handover path: log a 'sage_action' event on the Initiative.
 				if diagnosis.Category == "Workspace-gescheitert" {
 					var targetWSID string
 					for _, ws := range workspaces {
@@ -310,11 +358,18 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 					}
 
 					if targetWSID != "" {
+						actionType := "handover"
+						reasonMsg := fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning)
+						if init.Firma == "quantbot" {
+							actionType = "escalate"
+							reasonMsg = fmt.Sprintf("Live-Geld-Schutz (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning)
+						}
+
 						handoverPayload := map[string]any{
-							"workspace_id": targetWSID,
-							"action":       "handover",
-							"reason":       fmt.Sprintf("Manager Handover (Workspace-bedingte Stagnation): %s", diagnosis.Reasoning),
-							"source":       "manager",
+							"workspace_id":    targetWSID,
+							"action":          actionType,
+							"reason":          reasonMsg,
+							"source":          "manager",
 						}
 						handoverBytes, err := json.Marshal(handoverPayload)
 						if err == nil {
@@ -323,9 +378,13 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 								VALUES ($1, 'sage_action', 'sage', $2, 'flow-manager', now())
 							`, init.ID, string(handoverBytes))
 							if err != nil {
-								fmt.Fprintf(os.Stderr, "  ❌ Failed to write handover sage_action event for %s: %v\n", init.ID, err)
+								fmt.Fprintf(os.Stderr, "  ❌ Failed to write handover/escalate sage_action event for %s: %v\n", init.ID, err)
 							} else {
-								fmt.Printf("  ✓ Handed over stagnant workspace %s to vk-Sage (sage_action event logged)\n", targetWSID)
+								if init.Firma == "quantbot" {
+									fmt.Printf("  ✓ Escalated stagnant workspace %s to vk-Sage (sage_action event logged with action=escalate)\n", targetWSID)
+								} else {
+									fmt.Printf("  ✓ Handed over stagnant workspace %s to vk-Sage (sage_action event logged)\n", targetWSID)
+								}
 							}
 						}
 					}
@@ -339,6 +398,40 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				Diagnosis:      diagnosis,
 			})
 			fmt.Println()
+		} else {
+			// Card is not flagged. Check if the previous flow_action event was flagged, and clear it.
+			var lastPayloadStr string
+			err := p.QueryRow(ctx, `
+				SELECT payload::text FROM portfolio.initiative_event 
+				WHERE initiative_id = $1 AND kind = 'flow_action' 
+				ORDER BY at DESC LIMIT 1
+			`, init.ID).Scan(&lastPayloadStr)
+			if err == nil {
+				var lastPayload map[string]any
+				if json.Unmarshal([]byte(lastPayloadStr), &lastPayload) == nil {
+					reasons, _ := lastPayload["flagged_reasons"].([]any)
+					if len(reasons) > 0 {
+						// Previous state was flagged, now cleared! Log a clearing event.
+						if !dryRun {
+							payloadMap := map[string]any{
+								"flagged_reasons": []string{},
+								"category":        "",
+								"confidence":      "",
+								"reasoning":       "",
+								"proposed_action": "",
+							}
+							payloadBytes, _ := json.Marshal(payloadMap)
+							_, err = p.Exec(ctx, `
+								INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+								VALUES ($1, 'flow_action', 'flow_manager', $2, 'flow-manager', now())
+							`, init.ID, string(payloadBytes))
+							if err == nil {
+								fmt.Printf("  ✓ Cleared stagnation flag for card %s\n", init.ID)
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -582,5 +675,136 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 		}
 	}
 
+	// 4. Check for open Reactor attempt (kein offener Reactor-Versuch)
+	eventRows, err := p.Query(ctx, `
+		SELECT kind, source_backend, COALESCE(from_stage, ''), COALESCE(to_stage, ''), COALESCE(payload::text, '{}'), COALESCE(actor, ''), at 
+		FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 
+		ORDER BY at DESC 
+		LIMIT 5
+	`, initID)
+	if err == nil {
+		var events []FlowEvent
+		for eventRows.Next() {
+			var ev FlowEvent
+			if err := eventRows.Scan(&ev.Kind, &ev.SourceBackend, &ev.FromStage, &ev.ToStage, &ev.Payload, &ev.Actor, &ev.At); err == nil {
+				events = append(events, ev)
+			}
+		}
+		eventRows.Close()
+
+		if hasOpenReactorAttempt(events) {
+			return true, "open Reactor attempt exists", nil
+		}
+	}
+
+	// 5. Check if in vk-Sage's queue (healing or retry in progress: heal_count > 0 and heal_count < 2)
+	if len(beads) > 0 {
+		var beadRefs []string
+		for _, b := range beads {
+			beadRefs = append(beadRefs, b.Ref)
+		}
+
+		var hasActiveHeals bool
+		err = p.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM portfolio.sage_heal_count
+				WHERE bead_id = ANY($1) AND heal_count > 0 AND heal_count < 2
+			)
+		`, beadRefs).Scan(&hasActiveHeals)
+		if err == nil && hasActiveHeals {
+			// Double check if an escalation event has already been logged.
+			var hasEscalated bool
+			err = p.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM portfolio.initiative_event
+					WHERE initiative_id = $1 AND kind = 'sage_action'
+					  AND payload->>'action' = 'escalate'
+				)
+			`, initID).Scan(&hasEscalated)
+			if err == nil && !hasEscalated {
+				return true, "vk-Sage retry/healing is in progress (in vk-Sage's queue)", nil
+			}
+		}
+	}
+
 	return false, "", nil
+}
+
+func hasOpenReactorAttempt(events []FlowEvent) bool {
+	for _, ev := range events {
+		if ev.Kind == "deployed" {
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(ev.Payload), &payload); err == nil {
+				status, _ := payload["status"].(string)
+				if status != "healthy" && status != "failed" && status != "rolled-back" && status != "blocked_migrations" && status != "" {
+					return true
+				}
+			}
+		}
+		if ev.Kind == "dispatched" && time.Since(ev.At) < 15*time.Minute {
+			hasNewerActivity := false
+			for _, other := range events {
+				if other.At.After(ev.At) && (other.Kind == "deployed" || other.Kind == "workspace_started") {
+					hasNewerActivity = true
+					break
+				}
+			}
+			if !hasNewerActivity {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var flowManagerChan = make(chan struct{}, 1)
+
+func startFlowManagerSteward(p *pgxpool.Pool) {
+	// Initialize status in db on startup
+	_, _ = p.Exec(context.Background(),
+		`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+		 VALUES ('flow-manager', now(), 'healthy', NULL)
+		 ON CONFLICT (id) DO UPDATE SET
+		    last_run = EXCLUDED.last_run,
+		    status = EXCLUDED.status,
+		    error_message = EXCLUDED.error_message`)
+
+	go func() {
+		// Run a full check on startup to initialize and catch up
+		_ = runFlowManager(p, false)
+
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			var checkErr error
+
+			select {
+			case <-flowManagerChan:
+				// Edge-triggered: run flow manager
+				checkErr = runFlowManager(p, false)
+			case <-ticker.C:
+				// Periodic: run flow manager
+				checkErr = runFlowManager(p, false)
+			}
+
+			statusVal := "healthy"
+			var errMsgVal *string
+			if checkErr != nil {
+				statusVal = "alarm"
+				strErr := checkErr.Error()
+				errMsgVal = &strErr
+				fmt.Fprintf(os.Stderr, "Flow Manager Steward: check failed: %v\n", checkErr)
+			}
+
+			_, _ = p.Exec(context.Background(),
+				`INSERT INTO portfolio.sage_status (id, last_run, status, error_message)
+				 VALUES ('flow-manager', now(), $1, $2)
+				 ON CONFLICT (id) DO UPDATE SET
+				    last_run = EXCLUDED.last_run,
+				    status = EXCLUDED.status,
+				    error_message = EXCLUDED.error_message`, statusVal, errMsgVal)
+		}
+	}()
 }

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -242,8 +244,33 @@ func TestDispatchHack(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
+	// Create mock vk-delegate script
+	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440001"
+	mockScriptPath := filepath.Join(t.TempDir(), "vk-delegate")
+	scriptContent := fmt.Sprintf(`#!/bin/sh
+echo "workspace_id:        %s"
+echo "execution_process:   550e8400-e29b-41d4-a716-446655440001"
+echo "workspace_url:       http://localhost:54682/workspaces/%s"
+`, testWorkspaceID, testWorkspaceID)
+
+	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write mock script: %v", err)
+	}
+
+	// Override the vk-delegate path used by the handler
+	oldVkPath := vkDelegatePath
+	vkDelegatePath = mockScriptPath
+	defer func() {
+		vkDelegatePath = oldVkPath
+	}()
+
 	testID := "sk-test-dispatch-hack"
-	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+	cleanup := func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testID)
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+	}
+	cleanup()
+	defer cleanup()
 
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
@@ -251,7 +278,6 @@ func TestDispatchHack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}
-	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
 
 	// Setup payload
 	bodyMap := map[string]string{
@@ -272,7 +298,7 @@ func TestDispatchHack(t *testing.T) {
 
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		t.Fatalf("expected status 200, got %d, body: %s", resp.StatusCode, w.Body.String())
 	}
 
 	var result struct {

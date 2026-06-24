@@ -202,6 +202,16 @@ func TestSageSweep_StagnationDetectorExclusion(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
+	// Mock execBeadStatus to return "open" so it gets excluded
+	origExecBeadStatus := execBeadStatus
+	defer func() { execBeadStatus = origExecBeadStatus }()
+	execBeadStatus = func(beadID string) (string, error) {
+		if beadID == "st-1bpf" {
+			return "open", nil
+		}
+		return "in_progress", nil
+	}
+
 	// Clean up any pre-existing test events to ensure clean state
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE payload->>'workspace_id' IN ('20202020')")
 
@@ -275,9 +285,6 @@ func TestSageSweep_StagnationDetectorExclusion(t *testing.T) {
 	os.Setenv("SAGE_STUCK_TIMEOUT", "5m")
 
 	// --- PHASE 1: Mock execBeadStatus to return "open" (exclusion should apply!) ---
-	origExecBeadStatus := execBeadStatus
-	defer func() { execBeadStatus = origExecBeadStatus }()
-
 	currentMockStatus := "open"
 	execBeadStatus = func(beadID string) (string, error) {
 		if beadID == "st-1bpf" {
