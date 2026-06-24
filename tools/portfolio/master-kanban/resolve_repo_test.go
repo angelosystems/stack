@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -252,6 +254,24 @@ func TestDispatchHack(t *testing.T) {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}
 	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+
+	// Mock vk-delegate so the hack lane does not spawn a real workspace.
+	const mockWorkspaceID = "550e8400-e29b-41d4-a716-446655440099"
+	tmpDir, err := os.MkdirTemp("", "vk-mock")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mockScriptPath := filepath.Join(tmpDir, "vk-delegate")
+	scriptContent := fmt.Sprintf("#!/bin/sh\necho \"workspace_id:        %s\"\n", mockWorkspaceID)
+	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	oldVkPath := vkDelegatePath
+	vkDelegatePath = mockScriptPath
+	defer func() { vkDelegatePath = oldVkPath }()
 
 	// Setup payload
 	bodyMap := map[string]string{
