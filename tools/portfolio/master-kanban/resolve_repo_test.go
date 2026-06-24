@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -253,6 +255,23 @@ func TestDispatchHack(t *testing.T) {
 	}
 	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
 
+	// Mock vk-delegate so the test does not spawn a real workspace
+	tmpDir, err := os.MkdirTemp("", "vk-mock")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mockWorkspaceID := "550e8400-e29b-41d4-a716-446655440000"
+	mockScriptPath := filepath.Join(tmpDir, "vk-delegate")
+	scriptContent := fmt.Sprintf("#!/bin/sh\necho \"workspace_id:        %s\"\n", mockWorkspaceID)
+	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+	oldVkPath := vkDelegatePath
+	vkDelegatePath = mockScriptPath
+	defer func() { vkDelegatePath = oldVkPath }()
+
 	// Setup payload
 	bodyMap := map[string]string{
 		"id":   testID,
@@ -276,9 +295,10 @@ func TestDispatchHack(t *testing.T) {
 	}
 
 	var result struct {
-		Ok   bool   `json:"ok"`
-		Ref  string `json:"ref"`
-		Path string `json:"path"`
+		Ok          bool   `json:"ok"`
+		Ref         string `json:"ref"`
+		Path        string `json:"path"`
+		WorkspaceID string `json:"workspace_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -286,6 +306,10 @@ func TestDispatchHack(t *testing.T) {
 
 	if !result.Ok {
 		t.Errorf("expected Ok to be true")
+	}
+
+	if result.WorkspaceID != mockWorkspaceID {
+		t.Errorf("expected workspace_id %s, got %s", mockWorkspaceID, result.WorkspaceID)
 	}
 
 	if result.Path != "" {
