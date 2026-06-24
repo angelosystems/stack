@@ -581,8 +581,66 @@ func TestSageSteward_Sweep(t *testing.T) {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
-	// Trigger runSageSweepEx with onlyStuck = false
-	runSageSweepEx(ctx, p, false)
+	// 1. Create a temporary SQLite database for vibe-kanban
+	tmpFile, err := os.CreateTemp("", "vibe-kanban-sweep-test-*.sqlite")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	dbPath := tmpFile.Name()
+
+	// 2. Initialize schema
+	schema := `
+	CREATE TABLE workspaces (
+		id         BLOB PRIMARY KEY,
+		name       TEXT,
+		created_at TEXT,
+		task_id    BLOB,
+		archived   INTEGER DEFAULT 0
+	);
+	CREATE TABLE sessions (
+		id           BLOB PRIMARY KEY,
+		workspace_id BLOB
+	);
+	CREATE TABLE execution_processes (
+		id         BLOB PRIMARY KEY,
+		session_id BLOB,
+		status     TEXT,
+		exit_code  INTEGER,
+		started_at TEXT,
+		updated_at TEXT,
+		created_at TEXT,
+		run_reason TEXT
+	);
+	`
+	if err := exec.Command("sqlite3", dbPath, schema).Run(); err != nil {
+		t.Fatalf("failed to initialize sqlite schema: %v", err)
+	}
+
+	// 3. Insert SQLite fixtures
+	now := time.Now()
+	timeStr := now.UTC().Format("2006-01-02 15:04:05")
+
+	fixtures := fmt.Sprintf(`
+	INSERT INTO workspaces (id, name, created_at, task_id, archived) VALUES (x'B842765043A04994B61AACF51E019956', 'sol-st-ib5e', '%[1]s', x'cccccccc', 0);
+	INSERT INTO sessions (id, workspace_id) VALUES (x'31313131', x'B842765043A04994B61AACF51E019956');
+	INSERT INTO execution_processes (id, session_id, status, exit_code, started_at, updated_at, created_at, run_reason)
+	VALUES (x'32323232', x'31313131', 'failed', 1, '%[1]s', '%[1]s', '%[1]s', 'codingagent');
+	`, timeStr)
+
+	if err := exec.Command("sqlite3", dbPath, fixtures).Run(); err != nil {
+		t.Fatalf("failed to insert test fixtures: %v", err)
+	}
+
+	// Set VIBE_KANBAN_DB env variable
+	origVkDB := os.Getenv("VIBE_KANBAN_DB")
+	defer os.Setenv("VIBE_KANBAN_DB", origVkDB)
+	os.Setenv("VIBE_KANBAN_DB", dbPath)
+
+	// Trigger runSageSweep
+	_ = runSageSweep(p, true, false)
 
 	// Verify that the sage_action event was logged!
 	var exists bool

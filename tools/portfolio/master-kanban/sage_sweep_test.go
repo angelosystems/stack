@@ -284,19 +284,44 @@ func TestSageSweep_StagnationDetectorExclusion(t *testing.T) {
 	defer os.Unsetenv("SAGE_STUCK_TIMEOUT")
 	os.Setenv("SAGE_STUCK_TIMEOUT", "5m")
 
+	// --- PHASE 1: Mock execBeadStatus to return "open" (exclusion should apply!) ---
+	currentMockStatus := "open"
+	execBeadStatus = func(beadID string) (string, error) {
+		if beadID == "st-1bpf" {
+			return currentMockStatus, nil
+		}
+		return "in_progress", nil
+	}
+
 	// Run Stuck-Only Sweep
 	err = runSageSweep(p, true, true)
 	if err != nil {
-		t.Fatalf("runSageSweep(onlyStuckCheck=true) failed: %v", err)
+		t.Fatalf("runSageSweep(onlyStuckCheck=true) failed in phase 1: %v", err)
 	}
 
 	// Verify that NO event was logged for st-1bpf because it was excluded (status: "open")
 	var count1bpf int
 	err = p.QueryRow(ctx, "SELECT count(*) FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'workspace_id' = '20202020'", initID1bpf).Scan(&count1bpf)
 	if err != nil {
-		t.Fatalf("failed to query events for st-1bpf: %v", err)
+		t.Fatalf("failed to query events for st-1bpf in phase 1: %v", err)
 	}
 	if count1bpf != 0 {
-		t.Errorf("expected 0 events for st-1bpf because its bead status is 'open' (excluded), got %d", count1bpf)
+		t.Errorf("expected 0 events for open bead st-1bpf, but got %d (exclusion did not apply!)", count1bpf)
+	}
+
+	// --- PHASE 2: Mock execBeadStatus to return "in_progress" (exclusion should NOT apply!) ---
+	currentMockStatus = "in_progress"
+
+	err = runSageSweep(p, true, true)
+	if err != nil {
+		t.Fatalf("runSageSweep(onlyStuckCheck=true) failed in phase 2: %v", err)
+	}
+
+	err = p.QueryRow(ctx, "SELECT count(*) FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'workspace_id' = '20202020'", initID1bpf).Scan(&count1bpf)
+	if err != nil {
+		t.Fatalf("failed to query events for st-1bpf in phase 2: %v", err)
+	}
+	if count1bpf != 1 {
+		t.Errorf("expected exactly 1 event for in_progress bead st-1bpf, but got %d", count1bpf)
 	}
 }
