@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -522,11 +523,10 @@ func TestSageSteward_Sweep(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
-	// Setup mock initiative and link for testing the sweep
 	testBeadID := "st-ib5e"
 	testInitiativeID := "init-sage-test-sweep"
 
-	// Clean up any old test data
+	// Clean up other test data
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
@@ -581,66 +581,8 @@ func TestSageSteward_Sweep(t *testing.T) {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
-	// 1. Create a temporary SQLite database for vibe-kanban
-	tmpFile, err := os.CreateTemp("", "vibe-kanban-sweep-test-*.sqlite")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
-
-	dbPath := tmpFile.Name()
-
-	// 2. Initialize schema
-	schema := `
-	CREATE TABLE workspaces (
-		id         BLOB PRIMARY KEY,
-		name       TEXT,
-		created_at TEXT,
-		task_id    BLOB,
-		archived   INTEGER DEFAULT 0
-	);
-	CREATE TABLE sessions (
-		id           BLOB PRIMARY KEY,
-		workspace_id BLOB
-	);
-	CREATE TABLE execution_processes (
-		id         BLOB PRIMARY KEY,
-		session_id BLOB,
-		status     TEXT,
-		exit_code  INTEGER,
-		started_at TEXT,
-		updated_at TEXT,
-		created_at TEXT,
-		run_reason TEXT
-	);
-	`
-	if err := exec.Command("sqlite3", dbPath, schema).Run(); err != nil {
-		t.Fatalf("failed to initialize sqlite schema: %v", err)
-	}
-
-	// 3. Insert SQLite fixtures
-	now := time.Now()
-	timeStr := now.UTC().Format("2006-01-02 15:04:05")
-
-	fixtures := fmt.Sprintf(`
-	INSERT INTO workspaces (id, name, created_at, task_id, archived) VALUES (x'B842765043A04994B61AACF51E019956', 'sol-st-ib5e', '%[1]s', x'cccccccc', 0);
-	INSERT INTO sessions (id, workspace_id) VALUES (x'31313131', x'B842765043A04994B61AACF51E019956');
-	INSERT INTO execution_processes (id, session_id, status, exit_code, started_at, updated_at, created_at, run_reason)
-	VALUES (x'32323232', x'31313131', 'failed', 1, '%[1]s', '%[1]s', '%[1]s', 'codingagent');
-	`, timeStr)
-
-	if err := exec.Command("sqlite3", dbPath, fixtures).Run(); err != nil {
-		t.Fatalf("failed to insert test fixtures: %v", err)
-	}
-
-	// Set VIBE_KANBAN_DB env variable
-	origVkDB := os.Getenv("VIBE_KANBAN_DB")
-	defer os.Setenv("VIBE_KANBAN_DB", origVkDB)
-	os.Setenv("VIBE_KANBAN_DB", dbPath)
-
-	// Trigger runSageSweep
-	_ = runSageSweep(p, true, false)
+	// Trigger runSageSweepEx with onlyStuck = false
+	runSageSweepEx(ctx, p, false)
 
 	// Verify that the sage_action event was logged!
 	var exists bool
@@ -912,6 +854,175 @@ func TestInitiativeChecks(t *testing.T) {
 	}
 	if backlogRotEventCount != 1 {
 		t.Errorf("expected exactly 1 backlog-faeule sage_action event due to cooldown, got %d", backlogRotEventCount)
+	}
+	}
+
+	func TestLiveGeldSchutz_SC7(t *testing.T) {
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	testBeadID := "st-ib5e" // already closed in beads DB
+	testInitiativeID := "init-test-live-geld-protection"
+
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
+		VALUES ($1, 'Test Live Geld Protection Initiative', 'now', false, 'quantbot', 'plan_file')
+	`, testInitiativeID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+		VALUES ($1, 'bead', $2)
+	`, testInitiativeID, testBeadID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative link: %v", err)
+	}
+
+	// Trigger checks
+	runInitiativeChecks(ctx, p, false)
+
+	// Verify that stage-promotion WAS NOT logged
+	var promoExists bool
+	err = p.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM portfolio.initiative_event
+			WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'proposed_action' = 'stage-promotion'
+		)
+	`, testInitiativeID).Scan(&promoExists)
+	if err != nil {
+		t.Fatalf("failed to query stage-promotion: %v", err)
+	}
+	if promoExists {
+		t.Errorf("expected NO stage-promotion event to be logged for quantbot initiative under Live-Geld-Schutz")
+	}
+
+	// Verify that escalate WAS logged instead
+	var proposedAction, classification, reason string
+	err = p.QueryRow(ctx, `
+		SELECT 
+			payload->>'proposed_action',
+			payload->>'classification',
+			payload->>'reason'
+		FROM portfolio.initiative_event
+		WHERE initiative_id = $1 AND kind = 'sage_action'
+		ORDER BY at DESC LIMIT 1
+	`, testInitiativeID).Scan(&proposedAction, &classification, &reason)
+	if err != nil {
+		t.Fatalf("failed to query escalation event: %v", err)
+	}
+
+	if proposedAction != "escalate" {
+		t.Errorf("expected proposed_action to be 'escalate', got %q", proposedAction)
+	}
+	if classification != "all-beads-closed-live-geld" {
+		t.Errorf("expected classification to be 'all-beads-closed-live-geld', got %q", classification)
+	}
+	if !strings.Contains(reason, "Live-Geld-Schutz") {
+		t.Errorf("expected reason to contain 'Live-Geld-Schutz', got %q", reason)
+	}
+}
+
+func TestStageTransitionMap(t *testing.T) {
+	// 1. Test getPromoteTarget helper function
+	testCases := []struct {
+		stage    string
+		expected string
+	}{
+		{"idea", "soon"},
+		{"soon", "now"},
+		{"now", "watching"},
+		{"watching", "done"},
+		{"done", ""},
+		{"invalid", ""},
+	}
+
+	for _, tc := range testCases {
+		got := getPromoteTarget(tc.stage)
+		if got != tc.expected {
+			t.Errorf("getPromoteTarget(%q) = %q; expected %q", tc.stage, got, tc.expected)
+		}
+	}
+
+	// 2. Integration test for promoting from 'watching' to 'done'
+	dsn := os.Getenv("PORTFOLIO_DSN")
+	if dsn == "" {
+		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping integration test; db not reachable:", err)
+	}
+	defer p.Close()
+
+	if err := p.Ping(ctx); err != nil {
+		t.Skip("skipping integration test; db ping failed:", err)
+	}
+
+	testBeadID := "st-ib5e" // st-ib5e is already closed in beads DB!
+	testInitiativeID := "init-test-watching-to-done"
+
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative (id, title, stage, stage_locked_by_human, firma, primary_backend)
+		VALUES ($1, 'Test Watching to Done Initiative', 'watching', false, 'stayawesome', 'plan_file')
+	`, testInitiativeID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = $1", testInitiativeID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
+
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+		VALUES ($1, 'bead', $2)
+	`, testInitiativeID, testBeadID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative link: %v", err)
+	}
+
+	// Trigger runInitiativeChecks
+	runInitiativeChecks(ctx, p, false)
+
+	// Verify all-beads-closed proposed stage-promotion event was logged with 'done' target!
+	var toStage string
+	err = p.QueryRow(ctx, `
+		SELECT payload->>'to_stage' FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 AND kind = 'sage_action' AND payload->>'classification' = 'all-beads-closed'
+		ORDER BY at DESC LIMIT 1
+	`, testInitiativeID).Scan(&toStage)
+	if err != nil {
+		t.Fatalf("failed to query logged event for watching-to-done: %v", err)
+	}
+	if toStage != "done" {
+		t.Errorf("expected to_stage to be 'done' for watching-to-done promotion, got %q", toStage)
 	}
 }
 

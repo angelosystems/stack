@@ -4171,6 +4171,21 @@ func getWIPLimits(firma string) (int, int) {
 	return nowLimit, soonLimit
 }
 
+func getPromoteTarget(currentStage string) string {
+	switch currentStage {
+	case "idea":
+		return "soon"
+	case "soon":
+		return "now"
+	case "now":
+		return "watching"
+	case "watching":
+		return "done"
+	default:
+		return ""
+	}
+}
+
 func checkAndMoveToWatching(ctx context.Context, p *pgxpool.Pool, initiativeID string) {
 	rows, err := p.Query(ctx, `SELECT ref FROM portfolio.initiative_link WHERE initiative_id=$1 AND kind='bead'`, initiativeID)
 	if err != nil {
@@ -5234,16 +5249,21 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 			var openCount int
 			err = sp.QueryRow(ctx, `SELECT count(*) FROM beads.issues WHERE id=ANY($1) AND status<>'closed' AND deleted_at IS NULL`, beads).Scan(&openCount)
 			if err == nil && openCount == 0 {
+				classification := "all-beads-closed"
+				if init.Firma == "quantbot" {
+					classification = "all-beads-closed-live-geld"
+				}
+
 				var exists bool
 				_ = p.QueryRow(ctx, `
 					SELECT EXISTS(
 						SELECT 1 FROM portfolio.initiative_event
 						WHERE initiative_id = $1 
 						  AND kind = 'sage_action' 
-						  AND (payload->>'classification') = 'all-beads-closed'
-						  AND at > now() - ($2 * interval '1 hour')
+						  AND (payload->>'classification') = $2
+						  AND at > now() - ($3 * interval '1 hour')
 					)
-				`, init.ID, cooldownHours).Scan(&exists)
+				`, init.ID, classification, cooldownHours).Scan(&exists)
 				if !exists {
 					var nowCount int
 					_ = p.QueryRow(ctx, `SELECT count(*) FROM portfolio.initiative WHERE firma=$1 AND stage='now' AND archived_at IS NULL`, init.Firma).Scan(&nowCount)
@@ -5262,7 +5282,7 @@ func runInitiativeChecks(ctx context.Context, p *pgxpool.Pool, printToStdout boo
 					}
 
 					payloadBytes, _ := json.Marshal(map[string]any{
-						"classification":  "all-beads-closed",
+						"classification":  classification,
 						"proposed_action": proposedAction,
 						"to_stage":        toStage,
 						"reason":          reason,

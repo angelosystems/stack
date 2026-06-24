@@ -216,9 +216,9 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 
 		var firma string
 		if initiativeID != "" && initiativeID != "sk-vk-sage-workspace-steward" {
-			_ = p.QueryRow(ctx, "SELECT firma FROM portfolio.initiative WHERE id = $1", initiativeID).Scan(&firma)
+			_ = p.QueryRow(ctx, `SELECT firma FROM portfolio.initiative WHERE id = $1`, initiativeID).Scan(&firma)
 		}
-		if firma == "quantbot" {
+		if firma == "quantbot" && (proposedAction == "re-dispatch" || proposedAction == "stage-promotion") {
 			proposedAction = "escalate"
 		}
 
@@ -227,7 +227,6 @@ func runSteward(p *pgxpool.Pool, vkDB string) error {
 		reportBuilder.WriteString(fmt.Sprintf("   Bead:      %s\n", beadDisplay))
 		reportBuilder.WriteString(fmt.Sprintf("   Klasse:    %s\n", sageClass))
 		reportBuilder.WriteString(fmt.Sprintf("   Aktion:    %s\n\n", proposedAction))
-
 		// Check for idempotence: does an identical sage_action event already exist for this workspace?
 		var exists bool
 		err := p.QueryRow(ctx, `
