@@ -32,9 +32,22 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 
 	testBeadID := "bead-flow-manager-hierarchy-test"
 
-	// Ensure clean state in lease table
+	// Ensure clean state in lease, heal_count, events, and initiatives table for our test initiative/bead
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", testBeadID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_heal_count WHERE bead_id = $1", testBeadID)
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = 'init-fm-hierarchy-test'")
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = 'init-fm-hierarchy-test'")
+
+	// Insert the test initiative to satisfy foreign key constraints
+	_, err = p.Exec(ctx, "INSERT INTO portfolio.initiative (id, title, stage, firma) VALUES ('init-fm-hierarchy-test', 'Test FM Hierarchy', 'now', 'stayawesome')")
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
+
 	defer p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", testBeadID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.sage_heal_count WHERE bead_id = $1", testBeadID)
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = 'init-fm-hierarchy-test'")
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = 'init-fm-hierarchy-test'")
 
 	// Test Case 1: No lower layers engaged
 	beads := []LinkedBead{
@@ -97,6 +110,52 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 		t.Errorf("expected engaged in Case 4 (active lease exists), but got not engaged")
 	} else if !strings.Contains(reason, "active vk-Sage lease exists") {
 		t.Errorf("unexpected reason in Case 4: %s", reason)
+	}
+
+	// Test Case 5: Open Reactor attempt exists
+	// First delete any lease to isolate Case 5
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = $1", testBeadID)
+
+	// Insert a dispatched event (recent) for initiative 'init-fm-hierarchy-test'
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+		VALUES ('init-fm-hierarchy-test', 'dispatched', 'github', '{}', 'test', NOW() - INTERVAL '2 minutes')
+	`)
+	if err != nil {
+		t.Fatalf("failed to insert test event for Case 5: %v", err)
+	}
+
+	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-fm-hierarchy-test", beads, workspaces)
+	if err != nil {
+		t.Fatalf("unexpected error in Case 5: %v", err)
+	}
+	if !engaged {
+		t.Errorf("expected engaged in Case 5 (open Reactor attempt exists), but got not engaged")
+	} else if !strings.Contains(reason, "open Reactor attempt exists") {
+		t.Errorf("unexpected reason in Case 5: %s", reason)
+	}
+
+	// Test Case 6: vk-Sage healing retry in progress (heal_count > 0 and heal_count < 2)
+	// Clean up Case 5 events
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = 'init-fm-hierarchy-test'")
+
+	// Insert into sage_heal_count
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.sage_heal_count (bead_id, heal_count, escalated, updated_at)
+		VALUES ($1, 1, false, NOW())
+	`, testBeadID)
+	if err != nil {
+		t.Fatalf("failed to insert into sage_heal_count for Case 6: %v", err)
+	}
+
+	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-fm-hierarchy-test", beads, workspaces)
+	if err != nil {
+		t.Fatalf("unexpected error in Case 6: %v", err)
+	}
+	if !engaged {
+		t.Errorf("expected engaged in Case 6 (vk-Sage retry in progress), but got not engaged")
+	} else if !strings.Contains(reason, "vk-Sage retry/healing is in progress") {
+		t.Errorf("unexpected reason in Case 6: %s", reason)
 	}
 }
 

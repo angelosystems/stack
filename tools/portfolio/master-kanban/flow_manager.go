@@ -675,6 +675,59 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 		}
 	}
 
+	// 4. Check for open Reactor attempt (kein offener Reactor-Versuch)
+	eventRows, err := p.Query(ctx, `
+		SELECT kind, source_backend, COALESCE(from_stage, ''), COALESCE(to_stage, ''), COALESCE(payload::text, '{}'), COALESCE(actor, ''), at 
+		FROM portfolio.initiative_event 
+		WHERE initiative_id = $1 
+		ORDER BY at DESC 
+		LIMIT 5
+	`, initID)
+	if err == nil {
+		var events []FlowEvent
+		for eventRows.Next() {
+			var ev FlowEvent
+			if err := eventRows.Scan(&ev.Kind, &ev.SourceBackend, &ev.FromStage, &ev.ToStage, &ev.Payload, &ev.Actor, &ev.At); err == nil {
+				events = append(events, ev)
+			}
+		}
+		eventRows.Close()
+
+		if hasOpenReactorAttempt(events) {
+			return true, "open Reactor attempt exists", nil
+		}
+	}
+
+	// 5. Check if in vk-Sage's queue (healing or retry in progress: heal_count > 0 and heal_count < 2)
+	if len(beads) > 0 {
+		var beadRefs []string
+		for _, b := range beads {
+			beadRefs = append(beadRefs, b.Ref)
+		}
+
+		var hasActiveHeals bool
+		err = p.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM portfolio.sage_heal_count
+				WHERE bead_id = ANY($1) AND heal_count > 0 AND heal_count < 2
+			)
+		`, beadRefs).Scan(&hasActiveHeals)
+		if err == nil && hasActiveHeals {
+			// Double check if an escalation event has already been logged.
+			var hasEscalated bool
+			err = p.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM portfolio.initiative_event
+					WHERE initiative_id = $1 AND kind = 'sage_action'
+					  AND payload->>'action' = 'escalate'
+				)
+			`, initID).Scan(&hasEscalated)
+			if err == nil && !hasEscalated {
+				return true, "vk-Sage retry/healing is in progress (in vk-Sage's queue)", nil
+			}
+		}
+	}
+
 	return false, "", nil
 }
 
