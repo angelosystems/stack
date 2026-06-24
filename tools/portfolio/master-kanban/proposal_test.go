@@ -407,7 +407,10 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 	// 3. Start master-kanban serve command in a background goroutine
 	http.DefaultServeMux = http.NewServeMux()
 	srvCmd := cmdServe()
-	testPort := "17771"
+	testPort, err := getFreePort()
+	if err != nil {
+		t.Fatalf("Failed to find free port: %v", err)
+	}
 	srvCmd.SetArgs([]string{"--port", testPort})
 	go func() {
 		_ = srvCmd.Execute()
