@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -242,8 +244,28 @@ func TestDispatchHack(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
+	// Mock vk-delegate so the hack lane does not spawn a real workspace.
+	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440001"
+	mockScriptPath := filepath.Join(t.TempDir(), "vk-delegate")
+	scriptContent := fmt.Sprintf(`#!/bin/sh
+echo "workspace_id:        %s"
+echo "execution_process:   %s"
+echo "workspace_url:       http://localhost:54682/workspaces/%s"
+`, testWorkspaceID, testWorkspaceID, testWorkspaceID)
+	if err := os.WriteFile(mockScriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("failed to write mock vk-delegate script: %v", err)
+	}
+	oldVkPath := vkDelegatePath
+	vkDelegatePath = mockScriptPath
+	defer func() { vkDelegatePath = oldVkPath }()
+
 	testID := "sk-test-dispatch-hack"
-	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+	cleanup := func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testID)
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
+	}
+	cleanup()
+	defer cleanup()
 
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
@@ -251,7 +273,6 @@ func TestDispatchHack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}
-	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
 
 	// Setup payload
 	bodyMap := map[string]string{
@@ -272,13 +293,14 @@ func TestDispatchHack(t *testing.T) {
 
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		t.Fatalf("expected status 200, got %d, body: %s", resp.StatusCode, w.Body.String())
 	}
 
 	var result struct {
-		Ok   bool   `json:"ok"`
-		Ref  string `json:"ref"`
-		Path string `json:"path"`
+		Ok          bool   `json:"ok"`
+		Ref         string `json:"ref"`
+		Path        string `json:"path"`
+		WorkspaceID string `json:"workspace_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -286,6 +308,10 @@ func TestDispatchHack(t *testing.T) {
 
 	if !result.Ok {
 		t.Errorf("expected Ok to be true")
+	}
+
+	if result.WorkspaceID != testWorkspaceID {
+		t.Errorf("expected workspace_id %s, got %s", testWorkspaceID, result.WorkspaceID)
 	}
 
 	if result.Path != "" {
