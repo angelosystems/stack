@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -268,6 +270,19 @@ func TestCheckFirmaProposalsAndEndpoints(t *testing.T) {
 	}
 }
 
+func getFreePort() (string, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return "", err
+	}
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	defer l.Close()
+	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port), nil
+}
+
 func TestApiDispatch(t *testing.T) {
 	// 1. Connect to development database
 	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
@@ -324,7 +339,10 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 	// 3. Start master-kanban serve command in a background goroutine
 	http.DefaultServeMux = http.NewServeMux()
 	srvCmd := cmdServe()
-	testPort := "17771"
+	testPort, err := getFreePort()
+	if err != nil {
+		t.Fatalf("Failed to get free port: %v", err)
+	}
 	srvCmd.SetArgs([]string{"--port", testPort})
 	go func() {
 		_ = srvCmd.Execute()
