@@ -17,6 +17,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func waitForServer(t *testing.T, port string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		conn, err := net.DialTimeout("tcp", "localhost:"+port, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not become ready on port %s: %v", port, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestFirmaPrefix(t *testing.T) {
 	expected := map[string]string{
 		"stayawesome": "sa",
@@ -412,8 +428,9 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 	go func() {
 		_ = srvCmd.Execute()
 	}()
-	// Allow server to boot up
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the server accepts connections instead of a fixed sleep,
+	// which races under load and makes this test flaky.
+	waitForServer(t, testPort, 10*time.Second)
 
 	// 4. Test POS /api/dispatch
 	payload := map[string]string{
