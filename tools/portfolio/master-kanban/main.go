@@ -3987,7 +3987,7 @@ func guessFirmaFromCWD() string {
 		return ""
 	}
 	cwd = strings.ToLower(cwd)
-	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") || strings.Contains(cwd, "/opt/stack") {
+	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") || strings.Contains(cwd, "/opt/stack") || strings.Contains(cwd, "/stack/") || strings.HasSuffix(cwd, "/stack") {
 		return "stack"
 	}
 	if strings.Contains(cwd, "stayawesome") {
