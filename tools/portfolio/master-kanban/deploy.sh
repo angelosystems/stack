@@ -34,6 +34,15 @@ if [ "${BUILD_ONLY:-0}" = "1" ]; then
   exit 0
 fi
 
+# Release-Ledger-Zeile bei Deploy-START (Release-Pipeline-PRD WP3): Zeile wird
+# 'deploying' geschrieben, die 60-s-Probe (Reconciler) bestätigt nur noch →
+# 'live'. Idempotenz/Quarantäne-Semantik lebt in ledger-record.sh; kein
+# Ledger-Eintrag ⇒ kein Deploy (set -e). Not-Ausstieg: LEDGER_SKIP=1.
+HEALTH_URL="http://127.0.0.1:7780/api/version"
+DEPLOY_PREV_VERSION="${DEPLOY_PREV_VERSION:-$(curl -s -m 2 "${HEALTH_URL}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)}" \
+DEPLOY_METHOD="${DEPLOY_METHOD:-mk-deploy-sh}" \
+  "${REPO_DIR}/tools/portfolio/ledger-record.sh" "${BINARY_NAME}" http "${VERSION}" "${SHA}" "${HEALTH_URL}"
+
 echo "Atomic swap of binary to /opt/stack/bin/${BINARY_NAME}"
 mv "${OUT}" "/opt/stack/bin/${BINARY_NAME}"
 
