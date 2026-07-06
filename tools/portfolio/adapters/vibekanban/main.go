@@ -49,6 +49,9 @@ var (
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
 
 func main() {
+	if maybeRunVersion() { // /version-Vertrag (WP2/D18) — vor flag.Parse
+		return
+	}
 	flag.Parse()
 	if !*once && !*watch {
 		*once = true

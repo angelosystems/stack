@@ -86,6 +86,9 @@ type frontmatter struct {
 }
 
 func main() {
+	if maybeRunVersion() { // /version-Vertrag (WP2/D18) — vor flag.Parse
+		return
+	}
 	flag.Parse()
 	if !*once && !*watch {
 		*once = true
