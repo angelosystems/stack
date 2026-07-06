@@ -1,0 +1,20 @@
+# deploy-reactor.slice — ressourcen-isolierte Slice für den Deploy-Reaktor
+# UND seinen `go build` (Release-Pipeline WP5 · D14/D16).
+#
+# Warum getrennt: deploy-gt.sh restartet Ziel-Units und `halt`t fremde
+# Prozesse; liefe der Reaktor in derselben Slice, hielte er sich mitten im
+# Deploy selbst an (D14). Und `go build` in der Fork-Storm-Slice
+# (solartown.slice: TasksMax=600, swapless) neben QuantBot-live schmilzt die
+# Box (D16) — hier gedeckelt.
+#
+# ANLEGEN, NICHT INSTALLIEREN: diese Datei lebt im Repo. Das Scharfschalten
+# (nach /etc/systemd + `systemctl enable`) ist WP7-Arbeit hinter dem Test-Gate.
+[Unit]
+Description=Deploy-Reaktor Slice — isoliert vom Restart-Ziel (D14/D16)
+Before=slices.target
+
+[Slice]
+MemoryHigh=3G
+MemoryMax=4G
+TasksMax=256
+CPUWeight=50

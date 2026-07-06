@@ -1,0 +1,21 @@
+# deploy-reactor-outbox.timer — taktet den Outbox-Drain (Release-Pipeline WP7).
+#
+# ── DISABLED bis WP7 ─────────────────────────────────────────────────────────
+# NUR im Repo, NICHT installiert/enabled. Das Scharfschalten (nach /etc/systemd
+# + `systemctl enable --now deploy-reactor-outbox.timer`) ist der WP7-Re-Arm-
+# Griff hinter dem Test-Gate. Der WP7-Burn-Ratio-Not-Aus maskt bei Überschreitung
+# genau diesen Timer wieder (ein Griff zurück, wie im PRD Reversibilität).
+#
+# Analog zu mk-health.timer (60-s-Reconciler): der Drain ist idempotent, ein
+# verpasster Tick wird beim nächsten nachgeholt (Tabelle ist Wahrheit, D10).
+[Unit]
+Description=Deploy-Reaktor Outbox-Drain Takt — DISABLED bis WP7
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=deploy-reactor-outbox.service
+
+[Install]
+WantedBy=timers.target

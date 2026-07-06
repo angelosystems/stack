@@ -1,0 +1,37 @@
+# deploy-reactor-manifest.yaml — Service-Rezepte für den Outbox-Deploy-Reaktor
+# (Release-Pipeline WP5). Die Outbox-Zeile trägt nur service/environment/git_sha;
+# dieses Manifest liefert dem Reaktor, WIE ein Service gebaut und gesmoked wird.
+#
+# ── .example — NICHT scharf ──────────────────────────────────────────────────
+# Kopiere nach /opt/stack/deploy-reactor-manifest.yaml und prüfe jede Zeile
+# gegen die real laufenden Units, BEVOR WP7 den Timer scharfschaltet
+# (Pre-Arm-Abgleich, PRD „Voraussetzungen"). Ein Rezept, dessen unit `not-found`
+# ist, meldete sonst Falsch-Grün.
+#
+# probe_kind (D18):
+#   http — health_url = /version-URL (sha-Match) + smoke_url = echte Business-
+#          Route (2xx). unit = systemd-Unit, die den Swap aufnimmt.
+#   cli  — health_url = ABSOLUTER Binary-Pfad; Smoke = `<pfad> version --json`
+#          (sha-Match). unit leer (kein Prozess zu restarten).
+
+repo: /opt/stack
+
+services:
+  # ACHTUNG master-kanban: /opt/stack/bin/master-kanban wird auch von der
+  # STAGING-Unit (:7770) ausgeführt — ein Swap trifft live UND staging. Für WP7
+  # bewusst so gewollt (ein Binary, zwei Ports); der Smoke prüft :7780 (live).
+  master-kanban:
+    src: tools/portfolio/master-kanban
+    bin: /opt/stack/bin/master-kanban
+    unit: master-kanban-serve.service
+    probe_kind: http
+    health_url: http://127.0.0.1:7780/api/version
+    smoke_url: http://127.0.0.1:7780/api/initiatives
+
+  # Adapter sind cli-Services (kein HTTP-Server) — Smoke via `version --json`.
+  planfile-adapter:
+    src: adapters/solartown        # Pfad an den echten Adapter-Quellbaum anpassen
+    bin: /opt/stack/bin/planfile-adapter
+    unit: master-kanban-planfile.service
+    probe_kind: cli
+    health_url: /opt/stack/bin/planfile-adapter

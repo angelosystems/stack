@@ -1,0 +1,33 @@
+# deploy-reactor-outbox.service — der Outbox-konsumierende Deploy-Reaktor als
+# single-shot Drain (Release-Pipeline WP5/WP7).
+#
+# ── DISABLED bis WP7 ─────────────────────────────────────────────────────────
+# Diese Unit liegt bewusst NUR im Repo — sie ist NICHT nach /etc/systemd
+# installiert und NICHT enabled. Das kontinuierliche Re-Arm (Timer scharf,
+# hinter dem Test-Gate + Burn-Ratio-Not-Aus) ist WP7 und liegt bei HAUPT.
+# Bis dahin läuft der Reaktor ausschließlich beaufsichtigt: `--once`.
+#
+# Type=oneshot + der begleitende .timer takten den Drain — kein langlebiger
+# Prozess, der eine Lease über einen Absturz hinweg hält. Gestrandete
+# deploying-Zeilen holt der nächste Drain zurück (D11-Unstick, reclaimStranded).
+[Unit]
+Description=Deploy-Reaktor Outbox-Drain (single-shot) — DISABLED bis WP7
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Slice=deploy-reactor.slice
+User=root
+ExecStart=/opt/stack/bin/master-kanban deploy-reactor-outbox --once \
+  --manifest /opt/stack/deploy-reactor-manifest.yaml \
+  --script /opt/stack/tools/portfolio/deploy-gt.sh
+Environment=DEPLOY_STATE_DIR=/opt/stack/var/deploy-reactor
+Environment=DEPLOY_EVENTS_DIR=/opt/solartown/events/refinery
+Environment=DEPLOY_BUILD_SLICE=deploy-reactor.slice
+# Totmann (D17): kein Drain hängt länger als diese harte Frist.
+TimeoutStartSec=600
+
+# WP7 setzt hier den Ledger-DSN + ggf. PORTFOLIO_DSN via EnvironmentFile.
+# [Install] fehlt absichtlich NICHT — WP7 aktiviert über den .timer, nicht die
+# .service direkt. Diese .service bleibt WantedBy-los (nur vom Timer getriggert).
