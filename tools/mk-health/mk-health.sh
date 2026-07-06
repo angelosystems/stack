@@ -43,9 +43,9 @@ Solartown|🏗️|Epic-Completion-Reactor|live|svc:epic-completion-reactor.servi
 Solartown|🏗️|Kartograph-Listener|live|svc:kartograph-listener.service|-
 Solartown|🏗️|Solartown-Public|live|svc:master-kanban-solartown.service http:8889|solartown.stayawesome.app
 Solartown|🏗️|gt-llm-sidecar|gebaut|port:4100|-
-Hacker-Lane|🛠️|Vibe-Kanban|live|svc:vibe-kanban.service|-
-Hacker-Lane|🛠️|VK-Overseer|live|svc:vk-overseer.service|-
-Hacker-Lane|🛠️|VK-Watcher|live|svc:vk-watcher.service|-
+Vibe Kanban|🛠️|Vibe-Kanban|live|svc:vibe-kanban.service|-
+Vibe Kanban|🛠️|VK-Overseer|live|svc:vk-overseer.service|-
+Vibe Kanban|🛠️|VK-Watcher|live|svc:vk-watcher.service|-
 GrafitMedia|🎬|Kingdom|live|svc:kingdom.service http:3333|kingdom.grafitmedia.de
 GrafitMedia|🎬|Paperclip|live|svc:paperclip.service http:3100|paperclip.grafitmedia.de
 GrafitMedia|🎬|Activepieces|live|svc:activepieces.service|-

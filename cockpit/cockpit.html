@@ -233,7 +233,7 @@
       <section class="bg-white rounded-lg shadow-sm">
         <header class="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
           <h2 class="font-semibold uppercase tracking-wide text-sm">Backlog</h2>
-          <span class="text-xs text-slate-400">offene Beads ohne lane:*-Label · Triage routet in Hacker- oder Plan-Lane</span>
+          <span class="text-xs text-slate-400">offene Beads ohne lane:*-Label · Triage routet nach Vibe Kanban oder Solartown</span>
           <select x-model="backlogRig" @change="loadBacklog()" class="ml-auto text-xs border border-slate-300 rounded px-2 py-1">
             <option value="">alle rigs</option>
             <option value="clean">clean</option>
@@ -349,14 +349,14 @@
       <div class="grid grid-cols-2 gap-3 text-xs">
         <div>
           <label class="block text-slate-500 mb-1 font-semibold uppercase tracking-wider">Vorgeschlagene Lane</label>
-          <div class="bg-white border border-slate-200 rounded px-2.5 py-1.5 font-semibold text-sky-800" x-text="getProposedLaneForDetail() === 'hack' ? 'Hacker-Lane (hack)' : 'Plan-Pipeline (plan)'"></div>
+          <div class="bg-white border border-slate-200 rounded px-2.5 py-1.5 font-semibold text-sky-800" x-text="getProposedLaneForDetail() === 'hack' ? 'Vibe Kanban (hack)' : 'Solartown (plan)'"></div>
         </div>
         <div>
           <label class="block text-slate-500 mb-1 font-semibold uppercase tracking-wider">Ausgewählte Lane</label>
           <select x-model="dispatchDrawerLane" class="w-full border border-slate-200 rounded px-2 py-1.5 bg-white text-slate-800 font-semibold focus:ring-2 focus:ring-sky-300">
-            <option value="hack">Hacker-Lane (hack)</option>
-            <option value="plan">Plan-Pipeline (plan)</option>
-            <option value="plan-deep">Plan-Pipeline Deep (plan-deep)</option>
+            <option value="hack">Vibe Kanban (hack)</option>
+            <option value="plan">Solartown (plan)</option>
+            <option value="plan-deep">Solartown Deep-Review (plan-deep)</option>
           </select>
         </div>
       </div>
@@ -590,7 +590,7 @@
           <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Lane Vorschlag</label>
           <div class="flex items-center gap-2">
             <span class="text-xs bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded font-semibold" 
-                  x-text="getProposedLane(dispatchBead) === 'hack' ? 'Hacker-Lane (hack)' : 'Plan-Pipeline (' + getProposedLane(dispatchBead) + ')'"></span>
+                  x-text="getProposedLane(dispatchBead) === 'hack' ? 'Vibe Kanban (hack)' : 'Solartown (' + getProposedLane(dispatchBead) + ')'"></span>
           </div>
         </div>
 
