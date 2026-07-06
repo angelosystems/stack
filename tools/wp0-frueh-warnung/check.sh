@@ -29,8 +29,17 @@ slice_pct() {
   [[ "$cur" =~ ^[0-9]+$ && "$high" =~ ^[0-9]+$ && "$high" -gt 0 ]] || { echo 0; return; }
   echo $((cur*100/high))
 }
+task_pct() { # Lehre 06.07.: cf.slice stand bei 98/100 Tasks, kein Reflex sah es
+  local cur max
+  cur=$(systemctl show "$1" -p TasksCurrent --value 2>/dev/null)
+  max=$(systemctl show "$1" -p TasksMax --value 2>/dev/null)
+  [[ "$cur" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ && "$max" -gt 0 ]] || { echo 0; return; }
+  echo $((cur*100/max))
+}
 VK_PCT=$(slice_pct vk.slice)
 USER_PCT=$(slice_pct user.slice)
+VK_TASK_PCT=$(task_pct vk.slice)
+USER_TASK_PCT=$(task_pct user.slice)
 
 verdict() { # name wert warn_ab crit_ab richtung(gt|lt)
   local v=$2 w=$3 c=$4 d=$5
@@ -66,6 +75,8 @@ report swap_used     "$(verdict swp $((SWAP_USED_KB/1024/1024)) 1 4 gt)" "Swap=$
 report restart_sturm "$(verdict rst $RESTART_DELTA 10 40 gt)" "NRestarts-Delta=$RESTART_DELTA/Tick (warn>10, crit>40)"
 report vk_slice      "$(verdict vks $VK_PCT 80 95 gt)" "vk.slice=${VK_PCT}% von MemoryHigh"
 report user_slice    "$(verdict uss $USER_PCT 80 95 gt)" "user.slice=${USER_PCT}% von MemoryHigh"
+report vk_tasks      "$(verdict vkt $VK_TASK_PCT 75 90 gt)" "vk.slice Tasks=${VK_TASK_PCT}% von TasksMax"
+report user_tasks    "$(verdict ust $USER_TASK_PCT 75 90 gt)" "user.slice Tasks=${USER_TASK_PCT}% von TasksMax"
 
 if [ "${1:-}" = "--selftest" ]; then
   curl -sf -m 10 -X POST "$WA_URL" -H 'Content-Type: application/json' \
