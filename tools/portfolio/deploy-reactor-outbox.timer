@@ -9,7 +9,7 @@
 # Analog zu mk-health.timer (60-s-Reconciler): der Drain ist idempotent, ein
 # verpasster Tick wird beim nächsten nachgeholt (Tabelle ist Wahrheit, D10).
 [Unit]
-Description=Deploy-Reaktor Outbox-Drain Takt — DISABLED bis WP7
+Description=Deploy-Reaktor Outbox-Drain Takt (WP7 armed 2026-07-06)
 
 [Timer]
 OnBootSec=2min

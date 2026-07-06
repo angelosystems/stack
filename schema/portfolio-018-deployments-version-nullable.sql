@@ -1,0 +1,25 @@
+-- portfolio-018-deployments-version-nullable.sql — version-Spalten-Kontrakt
+-- (Code-Fabrik Release-Pipeline, WP7 Pre-Arm-Abgleich).
+--
+-- Warum: die MR_MERGED_GREEN-Outbox-Zeile ist eine TATSACHE mit nur
+-- service/environment/git_sha (PRD D10 — der Merger adressiert keinen
+-- Konsumenten und kennt die version NICHT; die entsteht erst beim Build).
+-- Der Produzent (mq-auto-merger.py: emit_merged_green_outbox) INSERTet
+-- entsprechend OHNE version; der Konsument (deploy_reactor_outbox.go) liest
+-- `COALESCE(version,'')` und setzt version=git_sha erst beim Claim
+-- (pending→deploying). portfolio-017 hat die Spalte aber `NOT NULL` ohne
+-- Default angelegt — damit schlägt der Merger-INSERT (und jede bare
+-- Outbox-Zeile) mit einer NOT-NULL-Verletzung fehl, das Grün-Event verwaist
+-- (genau der Bug, den WP5 fixen soll). Diese Migration gleicht den Live-Stand
+-- an den D10-Kontrakt an: eine pending-Zeile darf noch keine version tragen.
+--
+-- Nicht 017 nachträglich editiert: 017 ist bereits angewandt; ein Retro-Edit
+-- an einer angewandten Migration ist genau die „an git vorbei"-Drift, vor der
+-- 017 selbst warnt (portfolio-014 lane-Spalte). Neue Migration = saubere
+-- History. Additiv + reversibel (das Re-Setzen von NOT NULL wäre ein Schritt
+-- zurück, würde aber pending-Zeilen ohne version verbieten).
+--
+-- Idempotent: DROP NOT NULL ist auf einer bereits nullable Spalte ein No-op.
+-- Anwendung: psql -1 -f portfolio-018-deployments-version-nullable.sql
+
+ALTER TABLE portfolio.deployments ALTER COLUMN version DROP NOT NULL;

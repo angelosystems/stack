@@ -1,25 +1,30 @@
 # deploy-reactor-outbox.service — der Outbox-konsumierende Deploy-Reaktor als
 # single-shot Drain (Release-Pipeline WP5/WP7).
 #
-# ── DISABLED bis WP7 ─────────────────────────────────────────────────────────
-# Diese Unit liegt bewusst NUR im Repo — sie ist NICHT nach /etc/systemd
-# installiert und NICHT enabled. Das kontinuierliche Re-Arm (Timer scharf,
-# hinter dem Test-Gate + Burn-Ratio-Not-Aus) ist WP7 und liegt bei HAUPT.
-# Bis dahin läuft der Reaktor ausschließlich beaufsichtigt: `--once`.
+# ── ARMED 2026-07-06 (WP7) ───────────────────────────────────────────────────
+# Installiert nach /etc/systemd/system + über den .timer enabled (kontinuierliches
+# Re-Arm hinter dem Test-Gate). Not-Aus: ConditionPathExists unten — `touch
+# /etc/solartown/deploy-reactor.halt` hält den Drain sofort an (nächster Tick
+# wird übersprungen), `rm` gibt ihn frei. Harter Rollback: `systemctl disable
+# --now deploy-reactor-outbox.timer`. Der Burn:Done-Ratio-Automat
+# (autonomy-reactivation WP6, Re-Mask bei >5:1) kann genau diese Halt-Datei als
+# Aktion setzen. Trotz Timer je Tick ein beaufsichtigter --once-Drain.
 #
 # Type=oneshot + der begleitende .timer takten den Drain — kein langlebiger
 # Prozess, der eine Lease über einen Absturz hinweg hält. Gestrandete
 # deploying-Zeilen holt der nächste Drain zurück (D11-Unstick, reclaimStranded).
 [Unit]
-Description=Deploy-Reaktor Outbox-Drain (single-shot) — DISABLED bis WP7
+Description=Deploy-Reaktor Outbox-Drain (single-shot, WP7 armed)
 After=network-online.target postgresql.service
 Wants=network-online.target
+# Not-Aus (WP7): Halt-Datei präsent → Drain wird übersprungen (poka-yoke).
+ConditionPathExists=!/etc/solartown/deploy-reactor.halt
 
 [Service]
 Type=oneshot
 Slice=deploy-reactor.slice
 User=root
-ExecStart=/opt/stack/bin/master-kanban deploy-reactor-outbox --once \
+ExecStart=/opt/stack/bin/deploy-reactor deploy-reactor-outbox --once \
   --manifest /opt/stack/deploy-reactor-manifest.yaml \
   --script /opt/stack/tools/portfolio/deploy-gt.sh
 Environment=DEPLOY_STATE_DIR=/opt/stack/var/deploy-reactor
@@ -28,6 +33,13 @@ Environment=DEPLOY_BUILD_SLICE=deploy-reactor.slice
 # Totmann (D17): kein Drain hängt länger als diese harte Frist.
 TimeoutStartSec=600
 
-# WP7 setzt hier den Ledger-DSN + ggf. PORTFOLIO_DSN via EnvironmentFile.
-# [Install] fehlt absichtlich NICHT — WP7 aktiviert über den .timer, nicht die
-# .service direkt. Diese .service bleibt WantedBy-los (nur vom Timer getriggert).
+# DSN: der Reaktor verbindet über PORTFOLIO_DSN (root-Persistent-Flag-Default =
+# Live-Ledger :5434 mario_brain) — dieselbe DB, die mk-health versöhnt. Kein
+# EnvironmentFile nötig; die Merger-Env (MERGER_LEDGER_PG_URI) liegt in stack.env
+# und betrifft nur den Produzenten (mq-auto-merger), nicht diesen Konsumenten.
+# ExecStart nutzt das DEDIZIERTE /opt/stack/bin/deploy-reactor (aus HEAD gebaut),
+# NICHT das Live-Board-Binary /opt/stack/bin/master-kanban — so berührt das
+# Scharfschalten kein live-serving/-versöhnendes Binary (D14-Isolation).
+# ponytail: das Reaktor-Binary wird bei Board-Deploys nicht mitgefrischt; bei
+# Reaktor-Code-Änderungen `go build -o /opt/stack/bin/deploy-reactor .` neu bauen.
+# [Install] fehlt absichtlich — der .timer triggert die .service (WantedBy-los).
