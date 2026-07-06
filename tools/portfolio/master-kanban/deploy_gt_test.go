@@ -81,7 +81,7 @@ func TestDeployGt_ShaPinnedBuildAndSwap(t *testing.T) {
 	shaA := commitMarker(t, repo, "A")
 	shaB := commitMarker(t, repo, "B") // HEAD steht jetzt auf B
 
-	bin := filepath.Join(t.TempDir(), "victim-bin")
+	bin := filepath.Join(t.TempDir(), "opfer-bin")
 
 	run := func(ref string) string {
 		t.Helper()
