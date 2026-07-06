@@ -45,27 +45,32 @@ references:
   /api/initiatives-Pfad). ✓
 - Beweis-Zeilen (`wp3-beweis-*`) geräumt; Ledger hält genau den wahren Ist-Stand.
 
-## Was AUSSTEHT (Mario-Wort nötig — Auto-Klassifizierer hat Live-Deploy zurecht geblockt)
+## Deploy-Ergebnis (Mario-Go „Push deploy", 2026-07-06 ~15:00 UTC)
 
-Reihenfolge wichtig (Binary zuerst, sonst ruft mk-health ein Subcommand ins Leere):
+Alle Schritte gefahren; Sequenz aus diesem Report 1:1:
 
-```bash
-cd /opt/stack
-# 1) master-kanban neu (Reconciler + /api/releases im Serve-Binary) — schreibt selbst die Ledger-Zeile
-DEPLOY_ACTOR="mario@werkstatt" DEPLOY_INITIATIVE="sk-cicd-stack-tooling" bash tools/portfolio/master-kanban/deploy.sh
-# 2) Health-Probe-Verdrahtung (Reconcile alle 60 s)
-cp tools/mk-health/mk-health.sh /usr/local/bin/mk-health.sh
-# 3) Cockpit mit Releases-Tab + Karten-Badge
-cp cockpit/cockpit.html /var/www/master/cockpit.html
-# 4) Adapter mit /version-Vertrag (je eine Ledger-Zeile, Reconciler bestätigt binnen 60 s)
-bash tools/portfolio/adapters/planfile/deploy.sh
-bash tools/portfolio/adapters/vibekanban/deploy.sh
-bash tools/portfolio/adapters/solartown/deploy.sh
-# 5) Smoke: Vertrag + Releases-API + Ledger
-curl -s http://127.0.0.1:7780/api/version; curl -s http://127.0.0.1:7780/api/releases | python3 -m json.tool | head -30
-# 6) Beweis-Stage-Binary aufräumen
-rm -f /opt/stack/bin/master-kanban.stage-releases
-```
+- **master-kanban @ bb3a8b2 live** (Ledger #7, `prev_version=fb22123` erfasst,
+  Initiative `sk-cicd-stack-tooling`), `/api/version` + neuer `/api/releases`
+  antworten.
+- **planfile-/vibekanban-adapter @ bb3a8b2 live** (Ledger #8/#9, cli-Probe),
+  Units active.
+- **solartown-adapter: Binary geswappt + Vertrag ok, Unit blieb MASKIERT**
+  (Notbremse 06.07. — Entmasken steht Session B nicht zu). deploy.sh brach
+  per `set -e` nach dem fehlgeschlagenen `systemctl restart` korrekt ab.
+  Ledger #10 sagt `live` — **bewusste Phase-1-Grenze: die cli-Probe bestätigt
+  das Artefakt, nicht den laufenden Prozess**; Prozess-Wahrheit bringt
+  `--selfcheck` (D18-Vollausbau) mit WP5. Beim späteren Unmask stimmt alles
+  ohne Nacharbeit.
+- **mk-health.timer versöhnt produktiv:** die 15:01/15:02-Läufe schrieben die
+  `deploying→live`-Übergänge selbst (`--quiet`); manueller Kontroll-Lauf
+  danach: 4 Head-Zeilen, 0 Übergänge (Steady State). Karte zeigt
+  `live · bb3a8b2`. Stage-Beweis-Binary geräumt.
+
+## Was AUSSTEHT
+
+- **git push** — vom Auto-Klassifizierer geblockt (auch nach Mario-Go).
+  Manuell: `git -C /opt/stack push origin main` (8 Commits ahead), oder
+  Permission-Regel für `git push` setzen.
 
 ## Limitations / Befunde am Rand
 
