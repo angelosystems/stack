@@ -39,6 +39,8 @@ tools/*
 !tools/master-kanban/**
 !tools/secrets-broker/
 !tools/secrets-broker/**
+!tools/wp0-frueh-warnung/
+!tools/wp0-frueh-warnung/**
 !tools/twenty/
 !tools/twenty/**
 
