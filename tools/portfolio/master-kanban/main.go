@@ -331,7 +331,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -2511,6 +2511,9 @@ func cmdServe() *cobra.Command {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				json.NewEncoder(w).Encode(versionInfo())
 			})
+			// /api/releases - Release-Ledger-Head-Zeilen je (service,environment):
+			// „was läuft mit welchem Commit" (Release-Pipeline-PRD WP4).
+			http.HandleFunc("/api/releases", handleReleases(p))
 			// /api/unlinked - Unlinked-Lane endpoint showing work-items without initiative-link (Capture-Completeness, L1)
 			http.HandleFunc("/api/unlinked", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
