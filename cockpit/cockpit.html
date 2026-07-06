@@ -40,6 +40,8 @@
           <span x-show="v.id==='backlog' && backlog.length" class="ml-1 text-[10px] bg-amber-200 text-amber-900 rounded-full px-1.5" x-text="backlog.length"></span>
         </button>
       </template>
+      <a href="/ressourcen" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Ressourcen</a>
+      <a href="/health" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Health</a>
     </nav>
 
     <div class="flex gap-2 flex-1" x-show="view==='board'">
@@ -52,10 +54,48 @@
           <span class="opacity-60 text-xs ml-1" x-text="counts[f.id] || 0"></span>
         </button>
       </template>
+      <span class="w-px bg-slate-200 mx-1"></span>
+      <template x-for="t in tiers" :key="t.id">
+        <button @click="tierFilter = (tierFilter === t.id ? '' : t.id)"
+          :class="tierFilter === t.id ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-300'"
+          class="px-2.5 py-1 rounded-full text-xs font-medium hover:opacity-80" :title="'Tier: ' + t.label">
+          <span x-text="t.icon"></span><span x-text="t.label"></span>
+        </button>
+      </template>
+      <select x-model="softwareFilter"
+        class="text-xs border border-slate-300 rounded-full px-2.5 py-1 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
+        title="nach Software filtern">
+        <option value="">alle Software</option>
+        <template x-for="s in allSoftware" :key="s"><option :value="s" x-text="s"></option></template>
+      </select>
     </div>
     <div class="flex-1" x-show="view!=='board'"></div>
 
-    <div class="text-xs text-slate-500 flex gap-3 items-center">
+    <div class="text-xs text-slate-500 flex gap-3 items-center relative">
+      <button @click="driftOpen = !driftOpen" x-show="drift && drift.drift_total > 0"
+        class="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-medium hover:bg-amber-200"
+        title="Drift: Board-stage vs. Evidenz (Beads/Pläne)">
+        🩺 <span x-text="drift ? drift.drift_total : 0"></span> Drift
+      </button>
+      <div x-show="driftOpen" x-cloak @click.outside="driftOpen=false"
+        class="absolute right-0 top-9 z-40 w-96 bg-white border border-slate-200 rounded-lg shadow-xl p-3 text-left">
+        <div class="font-semibold text-slate-700 mb-2 flex justify-between items-center">
+          <span>🩺 Drift-Befunde</span>
+          <span class="text-[10px] text-slate-400" x-text="drift ? (drift.drift_total + ' / ' + drift.active_initiatives + ' aktiv') : ''"></span>
+        </div>
+        <ul class="space-y-1.5">
+          <template x-for="f in (drift ? drift.findings : [])" :key="f.id">
+            <li class="flex items-start gap-2">
+              <span class="text-[10px] px-1 rounded shrink-0 bg-amber-100 text-amber-800" x-text="f.drift"></span>
+              <div class="min-w-0">
+                <button @click="driftOpen=false; openDetail(f.id)" class="font-mono text-[11px] text-sky-700 hover:underline" x-text="f.id"></button>
+                <div class="text-[11px] text-slate-500 font-normal" x-text="f.detail"></div>
+              </div>
+            </li>
+          </template>
+        </ul>
+        <div x-show="drift && drift.drift_total===0" class="text-slate-400 text-xs">Kein Drift 🎉</div>
+      </div>
       <span x-text="lastFetched"></span>
       <button @click="refresh()" class="px-2 py-1 border border-slate-300 rounded hover:bg-slate-100">↻</button>
     </div>
@@ -66,109 +106,6 @@
     <!-- ════ BOARD-VIEW (Portfolio, wie gehabt + Plan-Baum pro Karte) ════ -->
     <template x-if="view==='board'">
       <div class="space-y-6" x-init="$nextTick(() => initFirmaSort($el))">
-        <!-- 🧓 Sage Steward & Dangling Workspaces Dashboard (P4.1, SC6, R-E) -->
-        <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-6 divide-y md:divide-y-0 md:divide-x divide-slate-200">
-            
-            <!-- Sage Liveness Heartbeat -->
-            <div class="space-y-4 pr-0 md:pr-6">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                  <span class="text-xl">🧓</span>
-                  <h3 class="font-bold text-slate-800 text-sm tracking-wide uppercase">Sage Steward Liveness</h3>
-                </div>
-                <span x-show="sageStatus.status === 'healthy'" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                  <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  HEALTHY
-                </span>
-                <span x-show="sageStatus.status === 'alarm'" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200 animate-bounce">
-                  <span class="h-2 w-2 rounded-full bg-red-600"></span>
-                  🚨 ALARM / OUTAGE
-                </span>
-              </div>
-              
-              <div class="space-y-1.5 text-xs text-slate-600">
-                <div class="flex justify-between">
-                  <span>Letzter Heartbeat:</span>
-                  <span class="font-mono font-medium" x-text="sageStatus.last_run ? fmtDateTime(sageStatus.last_run) : 'Nie'"></span>
-                </div>
-                <div class="flex justify-between">
-                  <span>Status im Backend:</span>
-                  <span class="font-semibold" :class="sageStatus.status === 'alarm' ? 'text-red-600 font-bold' : 'text-emerald-600'" x-text="sageStatus.status"></span>
-                </div>
-                <div x-show="sageStatus.error_message" class="bg-red-50 text-red-700 p-2 rounded border border-red-100 font-mono text-[10px]" x-text="sageStatus.error_message"></div>
-              </div>
-
-              <div class="pt-2 flex items-center gap-2">
-                <button x-show="!sageStatus.outage_simulated" @click="simulateSageOutage(true)" class="text-xs px-3 py-1.5 rounded font-semibold text-white bg-red-500 hover:bg-red-600 transition shadow-sm">
-                  ⚠️ Ausfall simulieren
-                </button>
-                <button x-show="sageStatus.outage_simulated" @click="simulateSageOutage(false)" class="text-xs px-3 py-1.5 rounded font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition shadow-sm">
-                  ✅ Simulation beenden
-                </button>
-                <span class="text-[10px] text-slate-400 font-italic" x-show="sageStatus.outage_simulated">(Lauf blockiert, Status altert)</span>
-              </div>
-            </div>
-
-            <!-- Dangling Workspaces Metric -->
-            <div class="space-y-4 pt-6 md:pt-0 md:pl-6">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                  <span class="text-xl">📊</span>
-                  <h3 class="font-bold text-slate-800 text-sm tracking-wide uppercase">Dangling Workspaces (SC6)</h3>
-                </div>
-                <span class="bg-slate-100 text-slate-700 text-xs px-2.5 py-0.5 rounded-full font-bold">
-                  Baseline: 4
-                </span>
-              </div>
-
-              <div class="grid grid-cols-2 gap-4">
-                <div class="bg-slate-50 border border-slate-100 rounded-lg p-3 text-center">
-                  <div class="text-[10px] font-semibold text-slate-500 uppercase">Aktuelle Anzahl</div>
-                  <div class="text-3xl font-black text-slate-800 mt-1" x-text="sageStatus.dangling_count"></div>
-                </div>
-                <div class="bg-slate-50 border border-slate-100 rounded-lg p-3 text-center flex flex-col justify-center">
-                  <div class="text-[10px] font-semibold text-slate-500 uppercase">Trend gegen ~0</div>
-                  <div class="flex items-center justify-center gap-2 mt-1">
-                    <span class="text-xs font-mono font-bold text-slate-400">4</span>
-                    <span class="text-slate-400">➔</span>
-                    <span class="text-lg font-bold" :class="sageStatus.dangling_count === 0 ? 'text-emerald-600' : (sageStatus.dangling_count < 4 ? 'text-amber-600' : 'text-red-500')" x-text="sageStatus.dangling_count"></span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Collapsible Dangling Workspaces List -->
-              <div x-data="{ open: false }">
-                <button @click="open = !open" :disabled="!sageStatus.dangling_count" class="w-full text-left text-xs font-medium text-slate-500 hover:text-slate-700 flex items-center justify-between py-1 border-b border-slate-100 disabled:opacity-50 disabled:cursor-not-allowed">
-                  <span x-text="open ? '▲ Liste ausblenden' : '▼ Liste anzeigen (' + sageStatus.dangling_count + ')'"></span>
-                  <span class="font-mono text-[10px]" x-show="sageStatus.dangling_count">(archived=0, terminal, kein PR, >12h)</span>
-                </button>
-                
-                <div x-show="open && sageStatus.dangling_count" class="mt-2 space-y-2 max-h-48 overflow-y-auto pr-1">
-                  <template x-for="ws in sageStatus.dangling_workspaces" :key="ws.id">
-                    <div class="p-2 bg-slate-50 border border-slate-100 rounded text-[11px] flex items-center justify-between">
-                      <div class="min-w-0 flex-1">
-                        <div class="flex items-center gap-1.5 font-semibold text-slate-700">
-                          <span class="font-mono bg-slate-200 px-1 py-0.2 rounded text-[10px]" x-text="ws.id.slice(0, 8)"></span>
-                          <span class="truncate" x-text="ws.name"></span>
-                        </div>
-                        <div class="text-[10px] text-slate-400 mt-0.5">
-                          Erstellt: <span x-text="fmtDateTime(ws.created_at)"></span>
-                        </div>
-                      </div>
-                      <div class="flex items-center gap-2 ml-4">
-                        <span class="px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider uppercase font-mono bg-amber-100 text-amber-800" x-text="ws.ep_status"></span>
-                        <span class="font-mono bg-slate-200 px-1 rounded font-bold text-slate-600" x-text="ws.exit_code !== null ? 'exit ' + ws.exit_code : '—'"></span>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-              </div>
-
-            </div>
-          </div>
-        </div>
-
         <template x-for="f in orderedFirmas" :key="f.id">
           <section x-show="filter[f.id]" :data-firma="f.id" :class="'lane-stripe-' + f.id" class="bg-white rounded-lg shadow-sm">
             <header class="px-5 py-3 flex items-center justify-between border-b border-slate-200">
@@ -183,75 +120,52 @@
               <div class="text-xs text-slate-500">
                 now: <span x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span>
                 <span x-show="nowCount(f.id) > f.wip" class="ml-2 text-red-600 font-semibold">WIP überschritten</span>
-                <span class="mx-2">|</span>
-                soon: <span x-text="soonCount(f.id)"></span> / <span x-text="f.wipSoon || 5"></span>
-                <span x-show="soonCount(f.id) > (f.wipSoon || 5)" class="ml-2 text-red-600 font-semibold">WIP soon überschritten</span>
               </div>
             </header>
             <div class="grid grid-cols-5 divide-x divide-slate-200">
               <template x-for="stage in stages" :key="stage">
                 <div class="p-3 min-h-[120px]"
-                  :class="(stage === 'now' && nowCount(f.id) > f.wip) || (stage === 'soon' && soonCount(f.id) > (f.wipSoon || 5)) ? 'col-now-overflow' : ''"
+                  :class="stage === 'now' && nowCount(f.id) > f.wip ? 'col-now-overflow' : ''"
                   :data-firma="f.id" :data-stage="stage"
-                  x-init="$nextTick(() => initSortable($el))">                  <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center justify-between">
+                  x-init="$nextTick(() => initSortable($el))">
+                  <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center justify-between">
                     <span x-text="stageLabel[stage]"></span>
                     <span class="text-slate-400 font-normal" x-text="cardsIn(f.id, stage).length"></span>
                   </div>
                   <template x-for="c in cardsIn(f.id, stage)" :key="c.id">
-                    <article :data-id="c.id" @click="if (!isProposal(c)) openDetail(c.id)"
-                      :class="isProposal(c) ? 'no-drag mb-2 bg-amber-50 border border-amber-200 rounded-md p-3 text-sm shadow-sm' : 'card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm'">
-
-                      <template x-if="isProposal(c)">
-                        <div>
-                          <div class="flex items-center justify-between mb-1">
-                            <span class="inline-block px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 uppercase tracking-wide">✨ Vorschlag</span>
-                            <span class="text-[10px] text-slate-400 font-mono" x-text="getProposalData(c).bead_id"></span>
+                    <article :data-id="c.id" @click="openDetail(c.id)"
+                      class="card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm">
+                      <div class="font-medium leading-snug" x-text="c.title"></div>
+                      <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+                        <span class="text-[10px] text-slate-400" x-text="c.id"></span>
+                        <span x-show="c.tier" class="text-[10px] px-1 rounded font-medium" :class="tierChip(c.tier)" x-text="tierLabel(c.tier)"></span>
+                        <template x-for="sw in (c.softwares || [])" :key="sw">
+                          <span class="text-[10px] px-1 rounded bg-indigo-50 text-indigo-700" x-text="sw"></span>
+                        </template>
+                        <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
+                        <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
+                        <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
+                        <button x-show="c.plan_count > 0" @click.stop="toggleTree(c.id)"
+                          class="text-[11px] px-1 rounded border border-slate-300 hover:bg-white"
+                          :title="c.plan_count + ' plan-files — Baum auf/zu'">
+                          📄<span class="ml-0.5" x-text="c.plan_count"></span>
+                          <span x-text="expanded[c.id] ? '▾' : '▸'"></span>
+                        </button>
+                        <span class="activity-spark" :class="freshClass(c.last_activity)" :title="'last activity: ' + (c.last_activity || '—')"></span>
+                      </div>
+                      <!-- Plan-Hierarchie: Vision ▸ Phasen ▸ PRDs (P4.1/P4.2) -->
+                      <div x-show="expanded[c.id]" class="mt-2 pt-2 border-t border-slate-200 space-y-0.5" @click.stop>
+                        <template x-for="it in treeOf(c.id)" :key="it.id">
+                          <div class="flex items-center gap-1.5 text-xs" :style="'padding-left:' + (it.depth*14) + 'px'">
+                            <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
+                            <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" :title="'Review-Workbench öffnen'" x-text="it.title"></a>
+                            <span class="px-1 rounded text-[10px]" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
+                            <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500"
+                              :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
                           </div>
-                          <div class="font-medium leading-snug text-slate-900" x-text="c.title"></div>
-                          <div class="text-xs text-slate-600 italic leading-normal my-1.5" x-text="getProposalData(c).reasoning"></div>
-                          <div class="flex items-center gap-1.5 mt-2">
-                            <button @click.stop="acceptProposal(c)" class="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition-colors">Annehmen</button>
-                            <button @click.stop="rejectProposal(c)" class="px-2 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-sm transition-colors">Verwerfen</button>
-                          </div>
-                        </div>
-                      </template>
-
-                      <template x-if="!isProposal(c)">
-                        <div>
-                          <div class="font-medium leading-snug" x-text="c.title"></div>
-                          <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
-                            <span class="text-[10px] text-slate-400" x-text="c.id"></span>
-                            <span class="px-1.5 py-0.5 rounded text-[10px] font-medium"
-                                  :class="c.lane === 'hacker' ? 'bg-amber-100 text-amber-800' : (c.lane === 'plan' ? 'bg-sky-100 text-sky-800' : 'bg-slate-100 text-slate-600')"
-                                  x-text="c.lane === 'hacker' ? '⚡ Hacker (vk)' : (c.lane === 'plan' ? '🏭 Solartown (Polecats)' : '○ untriagiert')">
-                            </span>
-                            <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
-                            <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
-                            <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
-                            <button x-show="c.plan_count > 0" @click.stop="toggleTree(c.id)"
-                              class="text-[11px] px-1 rounded border border-slate-300 hover:bg-white"
-                              :title="c.plan_count + ' plan-files — Baum auf/zu'">
-                              📄<span class="ml-0.5" x-text="c.plan_count"></span>
-                              <span x-text="expanded[c.id] ? '▾' : '▸'"></span>
-                            </button>
-                            <span class="activity-spark" :class="freshClass(c.last_activity)" :title="'last activity: ' + (c.last_activity || '—')"></span>
-                          </div>
-                          <!-- Plan-Hierarchie: Vision ▸ Phasen ▸ PRDs (P4.1/P4.2) -->
-                          <div x-show="expanded[c.id]" class="mt-2 pt-2 border-t border-slate-200 space-y-0.5" @click.stop>
-                            <template x-for="it in treeOf(c.id)" :key="it.id">
-                              <div class="flex items-center gap-1.5 text-xs" :style="'padding-left:' + (it.depth*14) + 'px'">
-                                <span x-text="layerIcon(it.layer)" :title="it.layer || 'plan'"></span>
-                                <a :href="'/review?id=' + it.id" class="hover:underline text-slate-700 truncate" :title="'Review-Workbench öffnen'" x-text="it.title"></a>
-                                <span class="px-1 rounded text-[10px]" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
-                                <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500"
-                                  :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
-                              </div>
-                            </template>
-                            <div x-show="!treeOf(c.id).length" class="text-[11px] text-slate-400">lade…</div>
-                          </div>
-                        </div>
-                      </template>
-
+                        </template>
+                        <div x-show="!treeOf(c.id).length" class="text-[11px] text-slate-400">lade…</div>
+                      </div>
                     </article>
                   </template>
                   <!-- Karte anlegen (P5): + Neu → Inline-Input, Enter erstellt -->
@@ -331,10 +245,6 @@
             <li class="px-5 py-2 flex items-center gap-3 text-sm hover:bg-slate-50">
               <span class="text-[10px] text-slate-400 w-20 shrink-0" x-text="b.id"></span>
               <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 shrink-0" x-text="b.rig"></span>
-              <span class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
-                    :class="b.lane === 'hacker' ? 'bg-amber-100 text-amber-800' : (b.lane === 'plan' ? 'bg-sky-100 text-sky-800' : 'bg-slate-100 text-slate-600')"
-                    x-text="b.lane === 'hacker' ? '⚡ Hacker (vk)' : (b.lane === 'plan' ? '🏭 Solartown (Polecats)' : '○ untriagiert')">
-              </span>
               <span class="flex-1 truncate" x-text="b.title"></span>
               <span class="text-[10px] text-slate-400 shrink-0" x-text="ageOf(b.created_at)"></span>
               <button @click="openDispatch(b)" class="shrink-0 text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>
@@ -342,816 +252,6 @@
           </template>
         </ul>
         <div x-show="!backlogFiltered.length" class="px-5 py-8 text-center text-sm text-slate-400">Backlog leer 🎉</div>
-      </section>
-    </template>
-
-    <!-- ════ MANAGER-VIEW (Kanban Flow Manager, P1.6 / Phase 1) ════ -->
-    <template x-if="view==='manager'">
-      <section class="space-y-6">
-        <!-- Header / status row -->
-        <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-5 flex items-center justify-between flex-wrap gap-4">
-          <div>
-            <h2 class="font-bold uppercase tracking-wide text-sm flex items-center gap-1.5 text-slate-800">
-              <span>🩺</span> Kanban Flow-Manager
-            </h2>
-            <p class="text-xs text-slate-400 mt-1">Überwacht den Kartenfluss, diagnostiziert Stagnation und schlägt Aktionen vor.</p>
-          </div>
-          <div class="text-xs flex items-center gap-3">
-            <span class="text-slate-500 font-medium font-semibold">Status:</span>
-            <span class="px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider text-[10px]"
-              :class="managerStatus === 'healthy' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800 border border-red-200'"
-              x-text="managerStatus"></span>
-            <span class="text-slate-400">|</span>
-            <span class="text-slate-500 font-semibold">Letzter Lauf:</span>
-            <span class="font-medium text-slate-700" x-text="managerLastRun ? fmtDateTime(managerLastRun) : 'nie'"></span>
-          </div>
-        </div>
-
-        <!-- Digest box -->
-        <div class="bg-gradient-to-r from-sky-500 to-indigo-600 rounded-lg shadow-sm p-6 text-white flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <div class="space-y-1 bg-transparent">
-            <span class="text-xs font-semibold uppercase tracking-wider text-sky-100 bg-transparent">Aktueller Review-Digest</span>
-            <h3 class="text-lg font-bold leading-tight bg-transparent" x-text="managerSummaryText || 'Keine blockierten Karten auf dem Board. Hervorragender Fluss! 🚀'"></h3>
-          </div>
-          <div class="flex gap-4 shrink-0 bg-transparent">
-            <div class="bg-white/10 px-4 py-2.5 rounded-lg text-center backdrop-blur-sm min-w-[80px]">
-              <div class="text-2xl font-black bg-transparent" x-text="managerSummary.stockend || 0"></div>
-              <div class="text-[10px] uppercase font-bold tracking-wider text-sky-100 bg-transparent">Stockend</div>
-            </div>
-            <div class="bg-white/10 px-4 py-2.5 rounded-lg text-center backdrop-blur-sm min-w-[80px]">
-              <div class="text-2xl font-black bg-transparent" x-text="managerSummary.promote_reif || 0"></div>
-              <div class="text-[10px] uppercase font-bold tracking-wider text-sky-100 bg-transparent">Promote-reif</div>
-            </div>
-            <div class="bg-white/10 px-4 py-2.5 rounded-lg text-center backdrop-blur-sm min-w-[80px]">
-              <div class="text-2xl font-black bg-transparent" x-text="managerSummary.veraltet || 0"></div>
-              <div class="text-[10px] uppercase font-bold tracking-wider text-sky-100 bg-transparent">Veraltet</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Flagged Cards Grid / Sections -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          <!-- Column 1: Stockend (Stagnation / Failed Workspaces) -->
-          <div class="space-y-4">
-            <h3 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center justify-between border-b border-slate-200 pb-2">
-              <span class="flex items-center gap-1.5 text-red-600">⚠️ Stockend / Stagnation</span>
-              <span class="bg-red-100 text-red-800 rounded-full px-2 py-0.5 text-[10px] font-black" x-text="managerFlaggedCards.filter(c => c.category === 'wartet-auf-Mensch' || c.category === 'Workspace-gescheitert').length"></span>
-            </h3>
-            <div class="space-y-3">
-              <template x-for="c in managerFlaggedCards.filter(c => c.category === 'wartet-auf-Mensch' || c.category === 'Workspace-gescheitert')" :key="c.id">
-                <div class="bg-white border border-red-100 rounded-xl p-4 shadow-sm space-y-3 relative overflow-hidden">
-                  <div class="absolute top-0 left-0 w-1 h-full bg-red-500"></div>
-                  <div class="flex items-center justify-between text-[10px]">
-                    <span class="font-mono font-bold text-slate-400" x-text="c.id"></span>
-                    <span class="px-2 py-0.5 rounded-full font-bold uppercase" 
-                          :class="c.category === 'Workspace-gescheitert' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-amber-50 text-amber-700 border border-amber-100'"
-                          x-text="c.category"></span>
-                  </div>
-                  <div>
-                    <h4 class="font-bold text-slate-800 text-sm leading-snug" x-text="c.title"></h4>
-                    <span class="text-[10px] text-slate-400 mt-1 block">Firma: <b class="text-slate-600" x-text="c.firma"></b> · Stage: <b class="text-slate-600" x-text="c.stage"></b></span>
-                  </div>
-                  <!-- Flagged Reasons -->
-                  <div class="flex flex-wrap gap-1">
-                    <template x-for="r in c.flagged_reasons" :key="r">
-                      <span class="bg-slate-100 text-slate-600 text-[9px] font-medium px-2 py-0.5 rounded" x-text="r"></span>
-                    </template>
-                  </div>
-                  <!-- Diagnosis Reasoning -->
-                  <div class="p-2.5 bg-slate-50 rounded-lg text-xs text-slate-600 leading-relaxed border border-slate-100" x-text="c.reasoning"></div>
-                  <!-- Proposed Action -->
-                  <div x-show="c.proposed_action" class="text-xs bg-red-50 text-red-950 p-2.5 rounded-lg border border-red-100 flex items-center gap-1.5 font-semibold">
-                    <span>⚡ Actionable:</span>
-                    <span x-text="c.proposed_action"></span>
-                  </div>
-                </div>
-              </template>
-              <div x-show="managerFlaggedCards.filter(c => c.category === 'wartet-auf-Mensch' || c.category === 'Workspace-gescheitert').length === 0" class="text-center py-8 text-xs text-slate-400 bg-white rounded-lg border border-dashed border-slate-200">
-                Keine stagnierenden Karten 🎉
-              </div>
-            </div>
-          </div>
-
-          <!-- Column 2: Promote-reif (All verlinked beads closed) -->
-          <div class="space-y-4">
-            <h3 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center justify-between border-b border-slate-200 pb-2">
-              <span class="flex items-center gap-1.5 text-emerald-600">🚀 Promote-reif</span>
-              <span class="bg-emerald-100 text-emerald-800 rounded-full px-2 py-0.5 text-[10px] font-black" x-text="managerFlaggedCards.filter(c => c.category === 'fertig-nicht-promotet').length"></span>
-            </h3>
-            <div class="space-y-3">
-              <template x-for="c in managerFlaggedCards.filter(c => c.category === 'fertig-nicht-promotet')" :key="c.id">
-                <div class="bg-white border border-emerald-100 rounded-xl p-4 shadow-sm space-y-3 relative overflow-hidden">
-                  <div class="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
-                  <div class="flex items-center justify-between text-[10px]">
-                    <span class="font-mono font-bold text-slate-400" x-text="c.id"></span>
-                    <span class="px-2 py-0.5 rounded-full font-bold uppercase bg-emerald-50 text-emerald-700 border border-emerald-100" x-text="c.category"></span>
-                  </div>
-                  <div>
-                    <h4 class="font-bold text-slate-800 text-sm leading-snug" x-text="c.title"></h4>
-                    <span class="text-[10px] text-slate-400 mt-1 block">Firma: <b class="text-slate-600" x-text="c.firma"></b> · Stage: <b class="text-slate-600" x-text="c.stage"></b></span>
-                  </div>
-                  <!-- Flagged Reasons -->
-                  <div class="flex flex-wrap gap-1">
-                    <template x-for="r in c.flagged_reasons" :key="r">
-                      <span class="bg-slate-100 text-slate-600 text-[9px] font-medium px-2 py-0.5 rounded" x-text="r"></span>
-                    </template>
-                  </div>
-                  <!-- Diagnosis Reasoning -->
-                  <div class="p-2.5 bg-slate-50 rounded-lg text-xs text-slate-600 leading-relaxed border border-slate-100" x-text="c.reasoning"></div>
-                  <!-- Proposed Action -->
-                  <div x-show="c.proposed_action" class="text-xs bg-emerald-50 text-emerald-950 p-2.5 rounded-lg border border-emerald-100 flex items-center gap-1.5 font-semibold">
-                    <span>⚡ Actionable:</span>
-                    <span x-text="c.proposed_action"></span>
-                  </div>
-                </div>
-              </template>
-              <div x-show="managerFlaggedCards.filter(c => c.category === 'fertig-nicht-promotet').length === 0" class="text-center py-8 text-xs text-slate-400 bg-white rounded-lg border border-dashed border-slate-200">
-                Keine promote-reifen Karten 💸
-              </div>
-            </div>
-          </div>
-
-          <!-- Column 3: Backlog-Fäule / Veraltet (Backlog rot) -->
-          <div class="space-y-4">
-            <h3 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center justify-between border-b border-slate-200 pb-2">
-              <span class="flex items-center gap-1.5 text-amber-600">🗃 Veraltet / Backlog-Fäule</span>
-              <span class="bg-amber-100 text-amber-800 rounded-full px-2 py-0.5 text-[10px] font-black" x-text="managerFlaggedCards.filter(c => c.category === 'verlassen').length"></span>
-            </h3>
-            <div class="space-y-3">
-              <template x-for="c in managerFlaggedCards.filter(c => c.category === 'verlassen')" :key="c.id">
-                <div class="bg-white border border-amber-100 rounded-xl p-4 shadow-sm space-y-3 relative overflow-hidden">
-                  <div class="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>
-                  <div class="flex items-center justify-between text-[10px]">
-                    <span class="font-mono font-bold text-slate-400" x-text="c.id"></span>
-                    <span class="px-2 py-0.5 rounded-full font-bold uppercase bg-amber-50 text-amber-700 border border-amber-100" x-text="c.category"></span>
-                  </div>
-                  <div>
-                    <h4 class="font-bold text-slate-800 text-sm leading-snug" x-text="c.title"></h4>
-                    <span class="text-[10px] text-slate-400 mt-1 block">Firma: <b class="text-slate-600" x-text="c.firma"></b> · Stage: <b class="text-slate-600" x-text="c.stage"></b></span>
-                  </div>
-                  <!-- Flagged Reasons -->
-                  <div class="flex flex-wrap gap-1">
-                    <template x-for="r in c.flagged_reasons" :key="r">
-                      <span class="bg-slate-100 text-slate-600 text-[9px] font-medium px-2 py-0.5 rounded" x-text="r"></span>
-                    </template>
-                  </div>
-                  <!-- Diagnosis Reasoning -->
-                  <div class="p-2.5 bg-slate-50 rounded-lg text-xs text-slate-600 leading-relaxed border border-slate-100" x-text="c.reasoning"></div>
-                  <!-- Proposed Action -->
-                  <div x-show="c.proposed_action" class="text-xs bg-amber-50 text-amber-950 p-2.5 rounded-lg border border-amber-100 flex items-center gap-1.5 font-semibold">
-                    <span>⚡ Actionable:</span>
-                    <span x-text="c.proposed_action"></span>
-                  </div>
-                </div>
-              </template>
-              <div x-show="managerFlaggedCards.filter(c => c.category === 'verlassen').length === 0" class="text-center py-8 text-xs text-slate-400 bg-white rounded-lg border border-dashed border-slate-200">
-                Keine veralteten Karten 🍃
-              </div>
-            </div>
-          </div>
-
-        </div>
-      </section>
-    </template>
-
-    <!-- ════ UNLINKED-VIEW (Capture-Completeness, L1) ════ -->
-    <template x-if="view==='unlinked'">
-      <section class="bg-white rounded-lg shadow-sm">
-        <header class="px-5 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-3">
-          <div class="flex items-center gap-3">
-            <h2 class="font-semibold uppercase tracking-wide text-sm">⚠ Unlinked — braucht Zuhause</h2>
-            <span class="text-xs text-slate-400">Arbeit-ohne-Zuhause: orphane Beads und unverlinkte vk-Workspaces</span>
-          </div>
-          <!-- Detector status widget (Liveness & Nenner-Ehrlichkeit, SC1a/SC1b/PRD-Must-Fix) -->
-          <div class="text-xs flex items-center gap-2 flex-wrap">
-            <span class="text-slate-500 font-medium">Leak-Detektor:</span>
-            <span class="px-2 py-0.5 rounded-full font-bold uppercase tracking-wider text-[10px]"
-              :class="detectorStatusClass(detectorStatus.status)"
-              x-text="detectorStatus.status || 'unknown'"></span>
-            <span class="text-slate-400">|</span>
-            <span class="text-slate-500">Letzter Lauf:</span>
-            <span class="font-medium text-slate-700" x-text="detectorStatus.last_run ? fmtDateTime(detectorStatus.last_run) : '—'"></span>
-            <span x-show="detectorStatus.unreachable_rigs && detectorStatus.unreachable_rigs.length" class="text-amber-600 font-medium ml-2"
-              :title="'Unerreichbare Rigs: ' + detectorStatus.unreachable_rigs.join(', ')">
-              ⚠️ <span x-text="detectorStatus.unreachable_rigs.length"></span> Rigs offline
-            </span>
-          </div>
-        </header>
-
-        <!-- Detector crash/not-running alert -->
-        <template x-if="detectorStatus.status === 'danger' || detectorStatus.status === 'unknown'">
-          <div class="mx-5 my-3 p-4 bg-red-50 border border-red-200 text-red-950 rounded-md flex items-start gap-3">
-            <span class="text-xl">🚨</span>
-            <div>
-              <h3 class="font-bold text-sm text-red-900">Achtung: Leak-Detektor läuft nicht!</h3>
-              <p class="text-xs mt-1 text-red-700 leading-relaxed">
-                Der Reconciler ist offline oder hat seit längerem keinen Heartbeat gesendet (Letzter Lauf: <span class="font-semibold" x-text="detectorStatus.last_run ? fmtDateTime(detectorStatus.last_run) : 'nie'"></span>). 
-                Die angezeigten unlinked Items spiegeln möglicherweise nicht den aktuellen Stand wider.
-              </p>
-            </div>
-          </div>
-        </template>
-
-        <!-- Main grouping by Company (Stay Awesome, Solartown, etc.) -->
-        <div class="p-5 space-y-6">
-          <template x-for="f in orderedFirmas" :key="f.id">
-            <div x-show="unlinkedItemsByFirma(f.id).length > 0" class="border border-slate-100 rounded-lg p-4 bg-slate-50/50">
-              <h3 class="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
-                <span x-text="f.icon"></span>
-                <span x-text="f.label"></span>
-                <span class="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full font-bold" x-text="unlinkedItemsByFirma(f.id).length"></span>
-              </h3>
-
-              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                <template x-for="item in unlinkedItemsByFirma(f.id)" :key="item.id">
-                  <div class="bg-white border border-slate-200 rounded-md p-3 text-sm shadow-sm flex flex-col justify-between">
-                    <div>
-                      <div class="flex items-center justify-between gap-2 mb-1">
-                        <span class="font-mono text-xs font-semibold px-2 py-0.5 rounded"
-                          :class="item.kind === 'bead' ? 'bg-amber-100 text-amber-800' : (item.kind === 'rig' ? 'bg-red-100 text-red-800' : 'bg-indigo-100 text-indigo-800')"
-                          x-text="item.kind === 'bead' ? '🐝 bead' : (item.kind === 'rig' ? '🚨 rig-offline' : '🔧 vk-workspace')"></span>
-                        <span class="text-[11px] text-slate-400" x-text="fmtRel(item.discovered_at)"></span>
-                      </div>
-                      <h4 class="font-medium text-slate-800 truncate" :title="item.title" x-text="item.title"></h4>
-                      <div class="text-[11px] text-slate-500 mt-1 font-mono break-all" x-text="'ID: ' + item.id"></div>
-                      <div x-show="item.join_key" class="text-[11px] text-slate-500 mt-1">
-                        Join-Key: <code class="bg-slate-100 px-1 py-0.2 rounded text-rose-600 font-mono" x-text="item.join_key"></code>
-                      </div>
-                      <div class="text-[11px] text-slate-500 mt-0.5">
-                        Fehler: 
-                        <span class="font-medium text-rose-600"
-                          x-text="item.kind === 'rig' ? 'Quelle unerreichbar (Blindstelle)' : ({no_join_key: 'Kein Join-Key (Kein spec_id oder plan:<slug> Label)', no_match: 'Join-Key passt auf keine Initiative', no_link: 'Kein initiative_link verknüpft'}[item.reason] || item.reason)"></span>
-                      </div>
-                    </div>
-                    
-                    <!-- Quick action triage helper for beads (PRD steady-state-triage) -->
-                    <div class="mt-3 pt-2 border-t border-slate-100 flex justify-between items-center gap-2">
-                      <template x-if="item.kind !== 'rig'">
-                        <button @click="openLinkModal(item)" class="text-xs px-2.5 py-1 rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold border border-emerald-200 flex items-center gap-1">🔗 Zuweisen…</button>
-                      </template>
-                      <template x-if="item.kind === 'rig'">
-                        <span class="text-xs text-rose-600 font-semibold italic flex items-center gap-1">⚠️ Offline / nicht erfasst</span>
-                      </template>
-                      <div class="flex gap-1">
-                        <template x-if="item.kind === 'bead'">
-                          <button @click="openDispatch(item)" class="text-xs px-2.5 py-1 rounded bg-sky-100 hover:bg-sky-200 text-sky-900 font-semibold border border-sky-200">Triage…</button>
-                        </template>
-                        <template x-if="item.kind === 'vk_workspace'">
-                          <a :href="'http://' + location.hostname + ':54682/workspaces/' + item.id" target="_blank" rel="noopener" class="text-xs px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-semibold border border-indigo-200 flex items-center gap-1">Öffnen ↗</a>
-                        </template>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </div>
-            </div>
-          </template>
-
-          <div x-show="unlinkedItems.length === 0" class="py-12 text-center text-slate-400">
-            <span class="text-3xl">🎉</span>
-            <div class="mt-2 font-semibold">Keine unlinked Items!</div>
-            <div class="text-xs mt-1">Alles hat ein ordentliches Zuhause. Jede Arbeit ist rückverfolgbar.</div>
-          </div>
-        </div>
-      </section>
-    </template>
-
-          <div x-show="unlinkedItems.length === 0" class="py-12 text-center text-slate-400">
-            <span class="text-3xl">🎉</span>
-            <div class="mt-2 font-semibold">Keine unlinked Items!</div>
-            <div class="text-xs mt-1">Alles hat ein ordentliches Zuhause. Jede Arbeit ist rückverfolgbar.</div>
-          </div>
-        </div>
-      </section>
-    </template>
-
-    <!-- ════ CAPACITY-HOST-VIEW (P2.1) ════ -->
-    <template x-if="view==='capacity_host'">
-      <section class="bg-white rounded-lg shadow-sm border border-slate-200">
-        <header class="px-5 py-3 border-b border-slate-200 flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <h2 class="font-semibold uppercase tracking-wide text-sm">⚡ Host-Kapazität & Systemgesundheit</h2>
-            <span class="text-xs text-slate-400">Echtzeit-Metriken aus dem kanonischen Collector-Datensatz</span>
-          </div>
-          <!-- Liveness & Stand-Indikator -->
-          <div class="flex items-center gap-2 text-xs font-medium" x-show="capacityHost">
-            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider"
-              :class="capacityHost.liveness === 'alive' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'"
-              x-text="'Collector: ' + capacityHost.liveness"></span>
-            <span class="text-slate-400">|</span>
-            <span class="text-slate-500">Stand:</span>
-            <span class="font-mono text-slate-800" x-text="'vor ' + capacityHost.age_seconds + 's'"></span>
-          </div>
-        </header>
-
-        <div class="p-6">
-          <!-- Fallback when no data -->
-          <template x-if="!capacityHost">
-            <div class="py-12 text-center text-slate-400">
-              <span class="text-3xl animate-pulse">⏳</span>
-              <div class="mt-2 font-semibold">Lade Host-Kapazitätsdaten...</div>
-            </div>
-          </template>
-
-          <template x-if="capacityHost">
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              
-              <!-- Left: Visual Column / Kapazitäts-Säule -->
-              <div class="bg-slate-50 rounded-xl p-5 border border-slate-100 flex flex-col items-center justify-center min-h-[400px]">
-                <h3 class="font-bold text-slate-700 text-sm uppercase tracking-wider mb-6 text-center">Kapazitäts-Säule</h3>
-                
-                <!-- The physical pillar graphic -->
-                <div class="relative w-28 h-72 bg-slate-200 rounded-2xl border-4 border-slate-300 shadow-inner overflow-hidden flex flex-col justify-end">
-                  
-                  <!-- RAM Portion -->
-                  <div class="w-full transition-all duration-500 ease-out flex items-center justify-center text-white font-mono text-xs font-bold"
-                    :style="'height: ' + capacityHost.ram + '%;'"
-                    :class="capacityHost.ram >= 90 ? 'bg-red-500' : (capacityHost.ram >= 75 ? 'bg-amber-500' : 'bg-sky-500')">
-                    <span x-text="Math.round(capacityHost.ram) + '% RAM'"></span>
-                  </div>
-                  
-                  <!-- Headroom Indicator Overlay / Label at top if room -->
-                  <div class="absolute inset-x-0 top-2 text-center font-semibold text-xs text-slate-600 flex flex-col items-center">
-                    <span>Headroom</span>
-                    <span class="font-mono text-emerald-600 font-bold text-sm" x-text="Math.round(capacityHost.headroom) + '%'"></span>
-                  </div>
-                </div>
-
-                <div class="mt-6 text-center space-y-1 text-xs text-slate-500">
-                  <div class="font-semibold text-slate-700">Verfügbarer Headroom: <span class="font-mono text-emerald-600 font-bold" x-text="capacityHost.headroom.toFixed(1) + '%'"></span></div>
-                  <div>(Puffer für Agenten-Instanziierung)</div>
-                </div>
-              </div>
-
-              <!-- Middle: Detailed Metrics & Progress Bars -->
-              <div class="space-y-6 lg:col-span-2">
-                
-                <!-- Verdict Alert Banner -->
-                <div class="p-4 rounded-xl border flex items-center gap-4 transition"
-                  :class="capacityHost.governor_verdict === 'healthy' ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : (capacityHost.governor_verdict === 'freeze' ? 'bg-amber-50 border-amber-200 text-amber-950 animate-pulse' : 'bg-red-50 border-red-200 text-red-950')">
-                  <span class="text-2xl" x-text="capacityHost.governor_verdict === 'healthy' ? '🟢' : (capacityHost.governor_verdict === 'freeze' ? '⚠️' : '🚨')"></span>
-                  <div class="flex-1">
-                    <div class="font-bold text-sm uppercase tracking-wider">Governor-Verdict: <span x-text="capacityHost.governor_verdict"></span></div>
-                    <div class="text-xs mt-0.5" x-text="capacityHost.governor_verdict === 'healthy' ? 'Systemauslastung im grünen Bereich. Dispatches uneingeschränkt zulässig.' : 'WARNUNG: Hohe Systemlast! Governor erzwingt Freeze-Marge.'"></div>
-                  </div>
-                </div>
-
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  
-                  <!-- Resources Card -->
-                  <div class="bg-white border border-slate-150 rounded-xl p-5 shadow-sm space-y-4">
-                    <h4 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
-                      <span>📊</span> System-Ressourcen
-                    </h4>
-                    
-                    <!-- CPU progress -->
-                    <div class="space-y-1">
-                      <div class="flex justify-between text-xs">
-                        <span class="text-slate-600 font-medium">CPU-Last</span>
-                        <span class="font-mono font-bold text-slate-800" x-text="capacityHost.cpu.toFixed(1) + '%'"></span>
-                      </div>
-                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                        <div class="h-full bg-slate-600 transition-all duration-500" :style="'width: ' + capacityHost.cpu + '%'"></div>
-                      </div>
-                    </div>
-
-                    <!-- RAM progress -->
-                    <div class="space-y-1">
-                      <div class="flex justify-between text-xs">
-                        <span class="text-slate-600 font-medium">RAM-Belegung</span>
-                        <span class="font-mono font-bold text-slate-800" x-text="capacityHost.ram.toFixed(1) + '%'"></span>
-                      </div>
-                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                        <div class="h-full bg-sky-500 transition-all duration-500" :style="'width: ' + capacityHost.ram + '%'"></div>
-                      </div>
-                    </div>
-
-                    <!-- Disk progress -->
-                    <div class="space-y-1">
-                      <div class="flex justify-between text-xs">
-                        <span class="text-slate-600 font-medium">Disk-Belegung</span>
-                        <span class="font-mono font-bold text-slate-800" x-text="capacityHost.disk.toFixed(1) + '%'"></span>
-                      </div>
-                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                        <div class="h-full bg-amber-600 transition-all duration-500" :style="'width: ' + capacityHost.disk + '%'"></div>
-                      </div>
-                    </div>
-
-                    <!-- Swap progress -->
-                    <div class="space-y-1">
-                      <div class="flex justify-between text-xs">
-                        <span class="text-slate-600 font-medium">Swap-Belegung</span>
-                        <span class="font-mono font-bold text-slate-800" x-text="capacityHost.swap.toFixed(1) + '%'"></span>
-                      </div>
-                      <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                        <div class="h-full bg-indigo-500 transition-all duration-500" :style="'width: ' + capacityHost.swap + '%'"></div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- PSI Pressure Stalls Card -->
-                  <div class="bg-white border border-slate-150 rounded-xl p-5 shadow-sm space-y-4">
-                    <h4 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
-                      <span>⏳</span> System-Druck (PSI)
-                    </h4>
-                    
-                    <div class="space-y-4">
-                      <!-- PSI CPU -->
-                      <div class="flex items-center justify-between border-b border-slate-50 pb-2">
-                        <div>
-                          <div class="text-xs font-medium text-slate-700">PSI CPU</div>
-                          <div class="text-[10px] text-slate-400">Verzögerung durch CPU-Mangel</div>
-                        </div>
-                        <span class="font-mono font-bold text-sm text-slate-800" x-text="capacityHost.psi_cpu.toFixed(2) + '%'"></span>
-                      </div>
-
-                      <!-- PSI Memory -->
-                      <div class="flex items-center justify-between border-b border-slate-50 pb-2">
-                        <div>
-                          <div class="text-xs font-medium text-slate-700">PSI Memory</div>
-                          <div class="text-[10px] text-slate-400">Verzögerung durch RAM-Mangel</div>
-                        </div>
-                        <span class="font-mono font-bold text-sm text-slate-800" x-text="capacityHost.psi_memory.toFixed(2) + '%'"></span>
-                      </div>
-
-                      <!-- PSI IO -->
-                      <div class="flex items-center justify-between">
-                        <div>
-                          <div class="text-xs font-medium text-slate-700">PSI IO</div>
-                          <div class="text-[10px] text-slate-400">Verzögerung durch Festplatten-I/O</div>
-                        </div>
-                        <span class="font-mono font-bold text-sm text-slate-800" x-text="capacityHost.psi_io.toFixed(2) + '%'"></span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- Freeze-Marge Card -->
-                  <div class="bg-white border border-slate-150 rounded-xl p-5 shadow-sm space-y-4 md:col-span-2">
-                    <h4 class="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
-                      <span>❄️</span> Freeze-Marge & Stabilität
-                    </h4>
-                    
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <!-- Committed Ratio -->
-                      <div class="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
-                        <div>
-                          <div class="text-xs font-semibold text-slate-700">Committed Ratio</div>
-                          <div class="text-[10px] text-slate-400">Zugeordneter vs physischer Speicher</div>
-                        </div>
-                        <span class="font-mono font-bold text-base text-slate-800" x-text="capacityHost.committed_ratio.toFixed(3)"></span>
-                      </div>
-
-                      <!-- Swap Trend -->
-                      <div class="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
-                        <div>
-                          <div class="text-xs font-semibold text-slate-700">Swap-Trend</div>
-                          <div class="text-[10px] text-slate-400">Verlaufstendenz der Auslagerung</div>
-                        </div>
-                        <span class="font-mono font-bold text-sm px-2.5 py-1 rounded"
-                          :class="capacityHost.swap_trend === 'stable' ? 'bg-slate-200 text-slate-700' : (capacityHost.swap_trend === 'rising' ? 'bg-red-100 text-red-800 animate-pulse' : 'bg-emerald-100 text-emerald-800')"
-                          x-text="capacityHost.swap_trend"></span>
-                      </div>
-                    </div>
-                  </div>
-
-                </div>
-              </div>
-
-            </div>
-          </template>
-        </div>
-      </section>
-    </template>
-
-    <!-- ════ CAPACITY-VIEW (Resource-Fleet-Manager, P2.1) ════ -->
-    <template x-if="view==='capacity_tab'">
-      <section class="bg-white rounded-lg shadow-sm border border-slate-200">
-        <header class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <h2 class="font-bold text-slate-800 text-sm tracking-wide uppercase">🔌 Server-Kapazität & Metriken</h2>
-            <span class="text-xs text-slate-400">Echtzeit-Host-Ressourcen aus dem Collector-Datensatz</span>
-          </div>
-          <div class="flex items-center gap-2 text-xs">
-            <span class="text-slate-500">Liveness:</span>
-            <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide"
-              :class="hostCapacity.collector_liveness === 'healthy' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800 animate-pulse'"
-              x-text="hostCapacity.collector_liveness || 'unknown'"></span>
-            <span class="text-slate-400">|</span>
-            <span class="text-slate-500">Stand:</span>
-            <span class="font-mono text-slate-700" x-text="hostCapacity.last_updated_seconds_ago !== undefined ? 'vor ' + hostCapacity.last_updated_seconds_ago + 's' : '—'"></span>
-          </div>
-        </header>
-
-        <div class="p-6 space-y-6">
-          <!-- KPI Metrics Row -->
-          <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <!-- CPU Indicator -->
-            <div class="bg-slate-50 border border-slate-150 rounded-xl p-4 flex flex-col justify-between">
-              <div>
-                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">CPU-Auslastung</span>
-                <div class="text-2xl font-black text-slate-800 mt-1" x-text="(hostCapacity.cpu_pct !== undefined ? hostCapacity.cpu_pct.toFixed(1) : '0.0') + '%'"></div>
-              </div>
-              <div class="mt-4">
-                <div class="w-full bg-slate-200 rounded-full h-2">
-                  <div class="bg-sky-500 h-2 rounded-full" :style="'width: ' + Math.min(hostCapacity.cpu_pct || 0, 100) + '%'"></div>
-                </div>
-                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
-                  <span>Headroom: <b class="text-slate-600 font-mono" x-text="(hostCapacity.cpu_headroom_pct !== undefined ? hostCapacity.cpu_headroom_pct.toFixed(1) : '0.0') + '%'"></b></span>
-                  <span x-text="hostCapacity.nproc + ' Kerne'"></span>
-                </div>
-              </div>
-            </div>
-
-            <!-- RAM Indicator -->
-            <div class="bg-slate-50 border border-slate-150 rounded-xl p-4 flex flex-col justify-between">
-              <div>
-                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">RAM-Auslastung</span>
-                <div class="text-2xl font-black text-slate-800 mt-1" x-text="(hostCapacity.ram_pct !== undefined ? hostCapacity.ram_pct.toFixed(1) : '0.0') + '%'"></div>
-              </div>
-              <div class="mt-4">
-                <div class="w-full bg-slate-200 rounded-full h-2">
-                  <div class="bg-emerald-500 h-2 rounded-full" :style="'width: ' + Math.min(hostCapacity.ram_pct || 0, 100) + '%'"></div>
-                </div>
-                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
-                  <span>Verfügbar: <b class="text-slate-600 font-mono" x-text="(hostCapacity.mem_avail_gb !== undefined ? hostCapacity.mem_avail_gb.toFixed(1) : '0.0') + ' GB'"></b></span>
-                  <span>Gesamt: <b class="font-mono" x-text="(hostCapacity.mem_total_gb !== undefined ? hostCapacity.mem_total_gb.toFixed(1) : '0.0') + ' GB'"></b></span>
-                </div>
-              </div>
-            </div>
-
-            <!-- Swap Indicator -->
-            <div class="bg-slate-50 border border-slate-150 rounded-xl p-4 flex flex-col justify-between">
-              <div>
-                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Swap-Belegung</span>
-                <div class="text-2xl font-black text-slate-800 mt-1" x-text="(hostCapacity.swap_pct !== undefined ? hostCapacity.swap_pct.toFixed(1) : '0.0') + '%'"></div>
-              </div>
-              <div class="mt-4">
-                <div class="w-full bg-slate-200 rounded-full h-2">
-                  <div class="bg-amber-500 h-2 rounded-full" :style="'width: ' + Math.min(hostCapacity.swap_pct || 0, 100) + '%'"></div>
-                </div>
-                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
-                  <span>Benutzt: <b class="text-slate-600 font-mono" x-text="(hostCapacity.swap_used_gb !== undefined ? hostCapacity.swap_used_gb.toFixed(1) : '0.0') + ' GB'"></b></span>
-                  <span>Trend: <span class="font-bold text-slate-600" x-text="hostCapacity.swap_trend || 'stable'"></span></span>
-                </div>
-              </div>
-            </div>
-
-            <!-- Disk Indicator -->
-            <div class="bg-slate-50 border border-slate-150 rounded-xl p-4 flex flex-col justify-between">
-              <div>
-                <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Disk-Belegung (Root)</span>
-                <div class="text-2xl font-black text-slate-800 mt-1" x-text="(hostCapacity.disk_pct !== undefined ? hostCapacity.disk_pct.toFixed(1) : '0.0') + '%'"></div>
-              </div>
-              <div class="mt-4">
-                <div class="w-full bg-slate-200 rounded-full h-2">
-                  <div class="bg-indigo-500 h-2 rounded-full" :style="'width: ' + Math.min(hostCapacity.disk_pct || 0, 100) + '%'"></div>
-                </div>
-                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
-                  <span>Status: <b class="text-slate-600" x-text="hostCapacity.disk_pct < 80 ? 'Gesund' : 'Kritisch'"></b></span>
-                  <span>Ziel-Host: <b class="font-mono">nuernberg</b></span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Governor & System Details -->
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <!-- Capacity Governor Status & Verdict -->
-            <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4">
-              <div class="flex items-center justify-between border-b border-slate-200 pb-3">
-                <h3 class="font-bold text-slate-800 text-xs tracking-wide uppercase">👮 Capacity Governor Verdict</h3>
-                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold"
-                  :class="hostCapacity.governor_verdict === 'OK' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-red-100 text-red-800 border border-red-200 animate-pulse'">
-                  <span class="h-2 w-2 rounded-full" :class="hostCapacity.governor_verdict === 'OK' ? 'bg-emerald-500' : 'bg-red-600'"></span>
-                  <span x-text="hostCapacity.governor_verdict || 'OK'"></span>
-                </span>
-              </div>
-              
-              <div class="space-y-2 text-sm text-slate-600">
-                <div class="flex justify-between">
-                  <span>Active Load (1m):</span>
-                  <span class="font-mono font-bold text-slate-800" x-text="hostCapacity.load1"></span>
-                </div>
-                <div class="flex justify-between">
-                  <span>Available Memory:</span>
-                  <span class="font-mono font-bold text-slate-800" x-text="(hostCapacity.mem_avail_gb !== undefined ? hostCapacity.mem_avail_gb.toFixed(2) : '0.00') + ' GB'"></span>
-                </div>
-                <div class="flex justify-between">
-                  <span>Committed Ratio:</span>
-                  <span class="font-mono font-bold text-slate-800" x-text="(hostCapacity.committed_ratio !== undefined ? (hostCapacity.committed_ratio * 100).toFixed(1) : '0.0') + '%'"></span>
-                </div>
-                <div class="flex justify-between">
-                  <span>PSI Memory Some (10s avg):</span>
-                  <span class="font-mono font-bold text-slate-800" x-text="(hostCapacity.psi_mem_some_avg10 !== undefined ? hostCapacity.psi_mem_some_avg10.toFixed(2) : '0.00')"></span>
-                </div>
-              </div>
-
-              <!-- Verdict reasons list -->
-              <div x-show="hostCapacity.governor_reasons" class="bg-red-50 text-red-700 p-3 rounded-md border border-red-100 text-xs">
-                <div class="font-bold uppercase tracking-wider mb-1">Ausschlaggebende Gründe:</div>
-                <div class="font-mono" x-text="hostCapacity.governor_reasons"></div>
-              </div>
-            </div>
-
-            <!-- Freeze-Marge (Memory Commits & Safety) -->
-            <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4">
-              <div class="flex items-center justify-between border-b border-slate-200 pb-3">
-                <h3 class="font-bold text-slate-800 text-xs tracking-wide uppercase">❄️ Freeze-Marge & Limits</h3>
-                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold"
-                  :class="hostCapacity.freeze_marge > 15 ? 'bg-indigo-100 text-indigo-800 border border-indigo-200' : 'bg-rose-100 text-rose-800 border border-rose-200'">
-                  <span x-text="(hostCapacity.freeze_marge !== undefined ? hostCapacity.freeze_marge.toFixed(1) : '0.0') + '% Free'"></span>
-                </span>
-              </div>
-
-              <div class="space-y-3.5 text-xs text-slate-600 leading-relaxed">
-                <p>
-                  Die <b>Freeze-Marge</b> spiegelt das Verhältnis von zugesichertem Speicher (<code>Committed_AS</code>) zum harten Kernel-Limit (<code>CommitLimit</code>) wider. 
-                  Sinkt diese Marge nahe Null, gerät das System in Gefahr und der Kernel verweigert jegliche weitere Allokationen (OOM/Freeze).
-                </p>
-                <div class="space-y-1 bg-slate-100 p-3 rounded border border-slate-200 text-xs font-mono">
-                  <div class="flex justify-between">
-                    <span>Committed_AS:</span>
-                    <span class="font-semibold text-slate-800" x-text="hostCapacity.committed_ratio !== undefined ? (hostCapacity.committed_ratio * 100).toFixed(1) + '%' : '—'"></span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span>Soft-Reserve Limit:</span>
-                    <span class="font-semibold text-slate-800">85.0%</span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span>Stress-Throttle Limit:</span>
-                    <span class="font-semibold text-rose-600 font-bold">90.0%</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-    </template>
-
-    <!-- ════ 🩺 MANAGER-VIEW (Kanban-Flow-Manager, P1.6) ════ -->
-    <template x-if="view==='manager'">
-      <section class="bg-white rounded-lg shadow-sm border border-slate-200">
-        <header class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <h2 class="font-bold text-slate-800 text-sm tracking-wide uppercase">🩺 Kanban Flow-Manager Board Review</h2>
-            <span class="text-xs text-slate-400">Letzte Diagnose-Einträge des Flow-Managers</span>
-          </div>
-          <div class="flex items-center gap-2 text-xs" x-show="managerDigest">
-            <span class="text-slate-500">Status:</span>
-            <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide"
-              :class="managerDigest.status === 'healthy' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800 animate-pulse'"
-              x-text="managerDigest.status || 'unknown'"></span>
-            <span class="text-slate-400">|</span>
-            <span class="text-slate-500">Letzter Lauf:</span>
-            <span class="font-mono text-slate-700" x-text="managerDigest.last_run ? fmtDateTime(managerDigest.last_run) : '—'"></span>
-          </div>
-        </header>
-
-        <div class="p-6 space-y-8">
-          <!-- Fallback when no digest data -->
-          <template x-if="!managerDigest">
-            <div class="py-12 text-center text-slate-400">
-              <span class="text-3xl animate-pulse">⏳</span>
-              <div class="mt-2 font-semibold">Lade Flow-Manager Digest...</div>
-            </div>
-          </template>
-
-          <template x-if="managerDigest">
-            <div class="space-y-8">
-              
-              <!-- Stagnant Cards -->
-              <div class="space-y-4">
-                <h3 class="font-bold text-slate-700 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
-                  <span>🐌</span> Stockend (Stagnation)
-                  <span class="ml-1 bg-amber-100 text-amber-800 text-[10px] px-2 py-0.5 rounded-full font-bold" x-text="managerDigest.stagnant ? managerDigest.stagnant.length : 0"></span>
-                </h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  <template x-for="flag in managerDigest.stagnant || []" :key="flag.initiative_id">
-                    <div class="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-4 shadow-sm flex flex-col justify-between space-y-4">
-                      <div class="space-y-2">
-                        <div class="flex items-center justify-between">
-                          <span class="text-[10px] font-mono text-slate-400" x-text="flag.initiative_id"></span>
-                          <span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-amber-100 text-amber-800" x-text="flag.firma"></span>
-                        </div>
-                        <h4 class="font-bold text-slate-800 text-sm hover:underline cursor-pointer" @click="openDetail(flag.initiative_id)" x-text="flag.title"></h4>
-                        <p class="text-xs text-slate-600 leading-relaxed" x-text="flag.description"></p>
-                      </div>
-                      <!-- Actions -->
-                      <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100" x-show="flag.actions && flag.actions.length">
-                        <template x-for="act in flag.actions" :key="act.label">
-                          <button @click="executeManagerAction(act)" 
-                            class="text-xs px-2.5 py-1.5 rounded-md font-semibold border transition"
-                            :class="act.label.includes('Promote') || act.label.includes('Heal') ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-transparent' : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'"
-                            x-text="act.label"></button>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-                <div x-show="!managerDigest.stagnant || !managerDigest.stagnant.length" class="text-xs text-slate-400 italic">Keine stockenden Karten erkannt.</div>
-              </div>
-
-              <!-- Promote-Ready Cards -->
-              <div class="space-y-4">
-                <h3 class="font-bold text-slate-700 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
-                  <span>🚀</span> Promote-Reif
-                  <span class="ml-1 bg-emerald-100 text-emerald-800 text-[10px] px-2 py-0.5 rounded-full font-bold" x-text="managerDigest.promote_ready ? managerDigest.promote_ready.length : 0"></span>
-                </h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  <template x-for="flag in managerDigest.promote_ready || []" :key="flag.initiative_id">
-                    <div class="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-4 shadow-sm flex flex-col justify-between space-y-4">
-                      <div class="space-y-2">
-                        <div class="flex items-center justify-between">
-                          <span class="text-[10px] font-mono text-slate-400" x-text="flag.initiative_id"></span>
-                          <span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-emerald-100 text-emerald-800" x-text="flag.firma"></span>
-                        </div>
-                        <h4 class="font-bold text-slate-800 text-sm hover:underline cursor-pointer" @click="openDetail(flag.initiative_id)" x-text="flag.title"></h4>
-                        <p class="text-xs text-slate-600 leading-relaxed" x-text="flag.description"></p>
-                      </div>
-                      <!-- Actions -->
-                      <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100" x-show="flag.actions && flag.actions.length">
-                        <template x-for="act in flag.actions" :key="act.label">
-                          <button @click="executeManagerAction(act)" 
-                            class="text-xs px-2.5 py-1.5 rounded-md font-semibold border transition bg-emerald-600 hover:bg-emerald-700 text-white border-transparent"
-                            x-text="act.label"></button>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-                <div x-show="!managerDigest.promote_ready || !managerDigest.promote_ready.length" class="text-xs text-slate-400 italic">Keine promote-reifen Karten erkannt.</div>
-              </div>
-
-              <!-- Stale Cards (Backlog-Fäule) -->
-              <div class="space-y-4">
-                <h3 class="font-bold text-slate-700 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
-                  <span>🍂</span> Veraltet (Backlog-Fäule)
-                  <span class="ml-1 bg-rose-100 text-rose-800 text-[10px] px-2 py-0.5 rounded-full font-bold" x-text="managerDigest.stale ? managerDigest.stale.length : 0"></span>
-                </h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  <template x-for="flag in managerDigest.stale || []" :key="flag.initiative_id">
-                    <div class="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-4 shadow-sm flex flex-col justify-between space-y-4">
-                      <div class="space-y-2">
-                        <div class="flex items-center justify-between">
-                          <span class="text-[10px] font-mono text-slate-400" x-text="flag.initiative_id"></span>
-                          <span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-rose-100 text-rose-800" x-text="flag.firma"></span>
-                        </div>
-                        <h4 class="font-bold text-slate-800 text-sm hover:underline cursor-pointer" @click="openDetail(flag.initiative_id)" x-text="flag.title"></h4>
-                        <p class="text-xs text-slate-600 leading-relaxed" x-text="flag.description"></p>
-                      </div>
-                      <!-- Actions -->
-                      <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100" x-show="flag.actions && flag.actions.length">
-                        <template x-for="act in flag.actions" :key="act.label">
-                          <button @click="executeManagerAction(act)" 
-                            class="text-xs px-2.5 py-1.5 rounded-md font-semibold border transition bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
-                            x-text="act.label"></button>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-                <div x-show="!managerDigest.stale || !managerDigest.stale.length" class="text-xs text-slate-400 italic">Keine veralteten Karten im Backlog.</div>
-              </div>
-
-              <!-- WIP Overflow Cards -->
-              <div class="space-y-4">
-                <h3 class="font-bold text-slate-700 text-xs uppercase tracking-wider flex items-center gap-1.5 border-b pb-2">
-                  <span>⚠️</span> WIP-Überlauf
-                  <span class="ml-1 bg-red-100 text-red-800 text-[10px] px-2 py-0.5 rounded-full font-bold" x-text="managerDigest.wip_overflow ? managerDigest.wip_overflow.length : 0"></span>
-                </h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  <template x-for="flag in managerDigest.wip_overflow || []" :key="flag.initiative_id">
-                    <div class="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-4 shadow-sm flex flex-col justify-between space-y-4">
-                      <div class="space-y-2">
-                        <div class="flex items-center justify-between">
-                          <span class="text-[10px] font-mono text-slate-400" x-text="flag.initiative_id"></span>
-                          <span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-red-100 text-red-800" x-text="flag.firma"></span>
-                        </div>
-                        <h4 class="font-bold text-slate-800 text-sm hover:underline cursor-pointer" @click="openDetail(flag.initiative_id)" x-text="flag.title"></h4>
-                        <p class="text-xs text-slate-600 leading-relaxed" x-text="flag.description"></p>
-                      </div>
-                      <!-- Actions -->
-                      <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100" x-show="flag.actions && flag.actions.length">
-                        <template x-for="act in flag.actions" :key="act.label">
-                          <button @click="executeManagerAction(act)" 
-                            class="text-xs px-2.5 py-1.5 rounded-md font-semibold border transition bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
-                            x-text="act.label"></button>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-                <div x-show="!managerDigest.wip_overflow || !managerDigest.wip_overflow.length" class="text-xs text-slate-400 italic">Keine WIP-Grenzüberschreitungen.</div>
-              </div>
-
-            </div>
-          </template>
-        </div>
-      </section>
-    </template>
-        </div>
       </section>
     </template>
 
@@ -1457,44 +557,6 @@
     </div>
   </div>
 
-  <!-- ════ LINKING MODAL (Phase 3a) ════ -->
-  <div x-show="linkOpen" x-cloak class="fixed inset-0 bg-slate-900/40 z-50 flex items-center justify-center p-4" @click.self="closeLinkModal()">
-    <div class="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden flex flex-col"
-         x-show="linkOpen"
-         x-transition:enter="transition ease-out duration-150"
-         x-transition:enter-start="opacity-0 scale-95"
-         x-transition:enter-end="opacity-100 scale-100"
-         x-transition:leave="transition ease-in duration-100"
-         x-transition:leave-start="opacity-100 scale-100"
-         x-transition:leave-end="opacity-0 scale-95"
-         @click.stop>
-      <header class="px-5 py-3 border-b border-slate-200 flex justify-between items-center">
-        <h3 class="font-semibold text-slate-800">Element verknüpfen (Zuweisen)</h3>
-        <button @click="closeLinkModal()" class="text-slate-400 hover:text-slate-600">✕</button>
-      </header>
-      <main class="px-5 py-4 space-y-4 text-sm text-slate-600">
-        <div>
-          <span class="text-xs font-mono text-slate-400" x-text="linkItem ? (linkItem.kind === 'bead' ? '🐝 bead' : '🔧 vk-workspace') + ' · ' + linkItem.id : ''"></span>
-          <h4 class="font-medium text-slate-900 text-base" x-text="linkItem ? linkItem.title : ''"></h4>
-        </div>
-        
-        <div class="space-y-1.5">
-          <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Initiative auswählen (<span x-text="linkItem ? (firmas.find(f => f.id === linkItem.firma) || {label: linkItem.firma}).label : ''"></span>)</label>
-          <select x-model="linkInitiativeId" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300 bg-white">
-            <option value="">-- Initiative auswählen --</option>
-            <template x-for="c in linkCandidates" :key="c.id">
-              <option :value="c.id" x-text="c.title + ' (' + c.id + ')'"></option>
-            </template>
-          </select>
-        </div>
-      </main>
-      <footer class="px-5 py-3 border-t border-slate-200 bg-slate-50 flex justify-end gap-2">
-        <button @click="closeLinkModal()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-100 bg-white">Abbrechen</button>
-        <button @click="submitLink()" :disabled="!linkInitiativeId" class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold">Verknüpfen</button>
-      </footer>
-    </div>
-  </div>
-
   <!-- Toasts Container -->
   <div class="fixed bottom-5 right-5 z-50 space-y-2">
     <template x-for="t in toasts" :key="t.id">
@@ -1517,20 +579,16 @@ function liveKanban() {
     view: 'board',
     views: [
       { id: 'board',    label: 'Board' },
-      { id: 'manager',  label: '🩺 Manager' },
       { id: 'pipeline', label: 'Pipeline' },
       { id: 'backlog',  label: 'Backlog' },
-      { id: 'unlinked', label: '⚠ Unlinked — braucht Zuhause' },
-      { id: 'capacity_host', label: '⚡ Kapazität (Host)' },
-      { id: 'capacity_tab', label: '🔋 Kapazität' },
     ],
     firmas: [
-      { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 3, wipSoon: 5 },
-      { id: 'solartown',   label: 'Solartown',    icon: '⚡', wip: 3, wipSoon: 5 },
-      { id: 'quantbot',    label: 'QuantBot',     icon: '💰', wip: 3, wipSoon: 5 },
-      { id: 'mariobrain',  label: 'mario-brain',  icon: '🧠', wip: 3, wipSoon: 5 },
-      { id: 'stack',       label: 'Stack (Plattform)', icon: '🧱', wip: 3, wipSoon: 5 },
-      { id: 'angeloos',    label: 'AngeloOS',     icon: '⚙',  wip: 3, wipSoon: 5 },
+      { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 4 },
+      { id: 'solartown',   label: 'Solartown',    icon: '⚡', wip: 6 },
+      { id: 'quantbot',    label: 'QuantBot',     icon: '💰', wip: 4 },
+      { id: 'mariobrain',  label: 'mario-brain',  icon: '🧠', wip: 4 },
+      { id: 'stack',       label: 'Stack (Plattform)', icon: '🧱', wip: 4 },
+      { id: 'angeloos',    label: 'AngeloOS',     icon: '⚙',  wip: 4 },
     ],
     prefixFirma: { sa: 'stayawesome', st: 'solartown', qb: 'quantbot', mb: 'mariobrain', ag: 'stack', sk: 'stack' },
     ghRepos: {
@@ -1550,51 +608,26 @@ function liveKanban() {
       { id: 'done',        label: 'Done' },
     ],
     filter: { stayawesome: true, solartown: true, quantbot: true, mariobrain: true, angeloos: true, stack: true },
+    softwareFilter: '',
+    tierFilter: '',
+    tiers: [
+      { id: 'code-fabrik', label: 'Fabrik',  icon: '⚙ ' },
+      { id: 'library',     label: 'Library', icon: '📚 ' },
+      { id: 'product',     label: 'Product', icon: '◆ ' },
+    ],
     cards: [],
     allPlans: [],
     plansCache: {},
     expanded: {},
     backlog: [],
     backlogRig: '',
-    unlinkedItems: [],
-    detectorStatus: { status: 'unknown', unreachable_rigs: [] },
-    sageStatus: { status: 'unknown', last_run: null, dangling_count: 0, dangling_baseline: 4, outage_simulated: false, dangling_workspaces: [] },
-    hostCapacity: {
-      cpu_pct: 0,
-      ram_pct: 0,
-      disk_pct: 0,
-      mem_total_gb: 0,
-      mem_avail_gb: 0,
-      swap_total_gb: 0,
-      swap_free_gb: 0,
-      swap_used_gb: 0,
-      swap_pct: 0,
-      swap_trend: '',
-      psi_mem_some_avg10: 0,
-      committed_ratio: 0,
-      freeze_marge: 0,
-      load1: 0,
-      nproc: 0,
-      cpu_headroom_pct: 0,
-      governor_verdict: '',
-      governor_reasons: '',
-      last_updated_seconds_ago: 0,
-      collector_liveness: ''
-    },
     lastFetched: '',
-    managerStatus: 'unknown',
-    managerLastRun: null,
-    managerFlaggedCards: [],
-    managerSummary: { stockend: 0, promote_reif: 0, veraltet: 0, wip_overflows: [] },
-    managerSummaryText: '',
+    drift: null,
+    driftOpen: false,
 
     dispatchOpen: false,
     dispatchBead: null,
     dispatchLane: 'hack',
-
-    linkOpen: false,
-    linkItem: null,
-    linkInitiativeId: '',
 
     dispatchDrawerOpen: false,
     dispatchDrawerLane: 'hack',
@@ -1616,8 +649,6 @@ function liveKanban() {
 
     rollup: {},
     capacity: {},
-    capacityHost: null,
-    managerDigest: null,
     toasts: [],
     showToast(message, type = 'success') {
       const id = Date.now() + Math.random();
@@ -1628,19 +659,10 @@ function liveKanban() {
     },
     async init() {
       await this.refresh();
-      await this.loadWipLimits();
       this.loadRollup();
       this.loadCapacity();
-      this.loadCapacityHost();
-      this.loadUnlinked();
-      this.loadManagerDigest();
-      setInterval(() => {
-        this.refresh(true);
-        this.loadCapacity();
-        this.loadCapacityHost();
-        if (this.view === 'capacity_tab') this.loadHostCapacity();
-        if (this.view === 'manager') this.loadManagerDigest();
-      }, 30000);
+      this.loadDrift();
+      setInterval(() => { this.refresh(true); this.loadCapacity(); }, 30000);
       // Deep-Link: #<initiative-id> öffnet Karte + Baum
       const h = location.hash.slice(1);
       if (h) this.$nextTick(async () => {
@@ -1929,62 +951,11 @@ function liveKanban() {
         if (r.ok) this.capacity = await r.json();
       } catch (e) { console.error('capacity fetch:', e); }
     },
-async loadCapacityHost() {
-  try {
-    const r = await fetch(this.apiBase + '/api/capacity-host');
-    if (r.ok) this.capacityHost = await r.json();
-  } catch (e) { console.error('capacityHost fetch:', e); }
-},
-async loadHostCapacity() {
-  try {
-    const r = await fetch(this.apiBase + '/api/host-capacity');
-    if (r.ok) this.hostCapacity = await r.json();
-  } catch (e) { console.error('host capacity fetch error:', e); }
-},
-async loadManagerDigest() {
-  try {
-    const r = await fetch(this.apiBase + '/api/manager/digest');
-    if (r.ok) this.managerDigest = await r.json();
-  } catch (e) { console.error('managerDigest fetch:', e); }
-},
-async executeManagerAction(act) {
-  try {
-    const r = await fetch(this.apiBase + act.endpoint, {
-      method: act.method,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': 'dev-secret'
-      },
-      body: JSON.stringify(act.payload)
-    });
-    if (r.ok) {
-      this.showToast('Aktion "' + act.label + '" erfolgreich ausgeführt!');
-      await this.loadManagerDigest();
-      await this.refresh(true);
-    } else {
-      const text = await r.text();
-      this.showToast('Fehler bei Aktion: ' + text, 'error');
-    }
-  } catch (e) {
-    console.error(e);
-    this.showToast('Netzwerkfehler bei Aktion: ' + e.message, 'error');
-  }
-},
-    async loadWipLimits() {
+    async loadDrift() {
       try {
-        const r = await fetch(this.apiBase + '/api/wip-limits');
-        if (r.ok) {
-          const limits = await r.json();
-          this.firmas.forEach(f => {
-            if (limits[f.id]) {
-              f.wip = limits[f.id].now;
-              f.wipSoon = limits[f.id].soon;
-            }
-          });
-        }
-      } catch (e) {
-        console.warn('Could not load WIP limits:', e);
-      }
+        const r = await fetch(this.apiBase + '/drift.json', { cache: 'no-store' });
+        if (r.ok) this.drift = await r.json();
+      } catch (e) { /* drift.json optional */ }
     },
 
     async refresh(silent) {
@@ -1993,14 +964,9 @@ async executeManagerAction(act) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.cards = await r.json();
         this.apiOk = true;
-        await this.loadSageStatus();
+        this.loadDrift();
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
-        if (this.view === 'unlinked') await this.loadUnlinked();
-        if (this.view === 'manager') await this.loadManager();
-        if (this.view === 'capacity_host') await this.loadCapacityHost();
-        if (this.view === 'capacity_tab') await this.loadHostCapacity();
-        if (this.view === 'manager') await this.loadManagerDigest();
         const t = new Date().toLocaleTimeString('de-DE');
         this.lastFetched = (silent ? 'auto-refresh' : 'geladen') + ' ' + t;
       } catch (e) {
@@ -2013,78 +979,6 @@ async executeManagerAction(act) {
       this.view = v;
       if (v === 'pipeline') await this.loadAllPlans();
       if (v === 'backlog') await this.loadBacklog();
-      if (v === 'unlinked') await this.loadUnlinked();
-      if (v === 'manager') await this.loadManager();
-      if (v === 'capacity_host') await this.loadCapacityHost();
-      if (v === 'capacity_tab') await this.loadHostCapacity();
-      if (v === 'manager') await this.loadManagerDigest();
-    },
-
-    async loadUnlinked() {
-      try {
-        const r = await fetch(this.apiBase + '/api/unlinked');
-        if (r.ok) {
-          const res = await r.json();
-          this.unlinkedItems = res.items || [];
-          this.detectorStatus = res.detector_status || { status: 'unknown', unreachable_rigs: [] };
-        }
-      } catch (e) {
-        console.error('unlinked fetch error:', e);
-      }
-    },
-
-    async loadManager() {
-      try {
-        const r = await fetch(this.apiBase + '/api/manager');
-        if (r.ok) {
-          const res = await r.json();
-          this.managerStatus = res.status || 'unknown';
-          this.managerLastRun = res.last_run;
-          this.managerFlaggedCards = res.flagged_cards || [];
-          this.managerSummary = res.summary || { stockend: 0, promote_reif: 0, veraltet: 0, wip_overflows: [] };
-          this.managerSummaryText = res.summary_text || '';
-        }
-      } catch (e) {
-        console.error('manager fetch error:', e);
-      }
-    },
-    unlinkedItemsByFirma(firmaId) {
-      return this.unlinkedItems.filter(item => item.firma === firmaId);
-    },
-    detectorStatusClass(status) {
-      return {
-        healthy: 'bg-emerald-100 text-emerald-800',
-        warning: 'bg-amber-100 text-amber-800 border border-amber-200',
-        danger: 'bg-red-100 text-red-800 border border-red-200',
-        unknown: 'bg-slate-100 text-slate-500',
-      }[status] || 'bg-slate-100 text-slate-500';
-    },
-    async loadSageStatus() {
-      try {
-        const r = await fetch(this.apiBase + '/api/sage/status');
-        if (r.ok) {
-          this.sageStatus = await r.json();
-        }
-      } catch (e) {
-        console.error('sage status fetch error:', e);
-      }
-    },
-    async simulateSageOutage(simulate) {
-      try {
-        const r = await fetch(this.apiBase + '/api/sage/simulate-outage', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ simulate })
-        });
-        if (r.ok) {
-          this.showToast(simulate ? 'Outage simuliert!' : 'Outage Simulation beendet.', 'success');
-          await this.loadSageStatus();
-        } else {
-          this.showToast('Fehler beim Ändern der Simulation', 'error');
-        }
-      } catch (e) {
-        this.showToast('Fehler: ' + e.message, 'error');
-      }
     },
 
     // ── Plan-Baum (P4.1) ──
@@ -2200,56 +1094,17 @@ async executeManagerAction(act) {
       }
     },
 
-    openLinkModal(item) {
-      this.linkItem = item;
-      const candidates = this.linkCandidates;
-      const catchAll = candidates.find(c => c.id.endsWith('-catch-all') || c.id.endsWith('-catchall'));
-      this.linkInitiativeId = catchAll ? catchAll.id : '';
-      this.linkOpen = true;
-    },
-    closeLinkModal() {
-      this.linkOpen = false;
-      this.linkItem = null;
-      this.linkInitiativeId = '';
-    },
-    get linkCandidates() {
-      if (!this.linkItem) return [];
-      const items = this.cards.filter(c => c.firma === this.linkItem.firma);
-      return items.sort((a, b) => {
-        const aCatch = a.id.endsWith('-catch-all') || a.id.endsWith('-catchall');
-        const bCatch = b.id.endsWith('-catch-all') || b.id.endsWith('-catchall');
-        if (aCatch && !bCatch) return -1;
-        if (!aCatch && bCatch) return 1;
-        return a.title.localeCompare(b.title);
-      });
-    },
-    async submitLink() {
-      if (!this.linkItem || !this.linkInitiativeId) return;
-      try {
-        const r = await fetch(this.apiBase + '/api/link', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            initiative_id: this.linkInitiativeId,
-            kind: this.linkItem.kind,
-            ref: this.linkItem.id
-          }),
-        });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        this.showToast('Erfolgreich zugewiesen!');
-        this.unlinkedItems = this.unlinkedItems.filter(x => x.id !== this.linkItem.id);
-        this.closeLinkModal();
-        await this.refresh(true);
-      } catch (e) {
-        this.showToast('Zuweisung misslungen: ' + e.message, 'error');
-      }
-    },
-
     // ── Board (unverändert) ──
     toggleFirma(id) { this.filter[id] = !this.filter[id]; },
-    cardsIn(firma, stage) { return this.cards.filter(c => c.firma === firma && c.stage === stage); },
+    cardsIn(firma, stage) {
+      return this.cards.filter(c => c.firma === firma && c.stage === stage
+        && (!this.softwareFilter || (c.softwares || []).includes(this.softwareFilter))
+        && (!this.tierFilter || c.tier === this.tierFilter));
+    },
+    get allSoftware() { const s = new Set(); this.cards.forEach(c => (c.softwares || []).forEach(x => s.add(x))); return [...s].sort(); },
+    tierChip(t) { return { 'code-fabrik': 'bg-amber-100 text-amber-800', library: 'bg-emerald-100 text-emerald-800', product: 'bg-sky-100 text-sky-800' }[t] || 'bg-slate-100 text-slate-600'; },
+    tierLabel(t) { return { 'code-fabrik': '⚙ Fabrik', library: '📚 Lib', product: '◆ Prod' }[t] || t; },
     nowCount(firma) { return this.cardsIn(firma, 'now').length; },
-    soonCount(firma) { return this.cardsIn(firma, 'soon').length; },
     firmaOrder: [],
     get orderedFirmas() {
       const idx = id => { const i = this.firmaOrder.indexOf(id); return i === -1 ? 100 : i; };
@@ -2277,49 +1132,6 @@ async executeManagerAction(act) {
         },
       });
     },
-    isProposal(c) {
-      if (!c.status_dot) return false;
-      try {
-        const data = JSON.parse(c.status_dot);
-        return !!data.proposed;
-      } catch (e) {
-        return false;
-      }
-    },
-    getProposalData(c) {
-      if (!c.status_dot) return {};
-      try {
-        return JSON.parse(c.status_dot);
-      } catch (e) {
-        return {};
-      }
-    },
-    async acceptProposal(c) {
-      try {
-        const r = await fetch(this.apiBase + '/api/proposal/accept', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: c.id }),
-        });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        await this.refresh();
-      } catch (e) {
-        alert('Accept proposal failed: ' + e.message);
-      }
-    },
-    async rejectProposal(c) {
-      try {
-        const r = await fetch(this.apiBase + '/api/proposal/reject', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: c.id }),
-        });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        await this.refresh();
-      } catch (e) {
-        alert('Reject proposal failed: ' + e.message);
-      }
-    },
     get counts() { const o = {}; this.firmas.forEach(f => o[f.id] = this.cards.filter(c => c.firma === f.id).length); return o; },
     freshClass(la) {
       if (!la) return 'activity-stale';
@@ -2333,7 +1145,6 @@ async executeManagerAction(act) {
         animation: 150,
         ghostClass: 'opacity-30',
         draggable: 'article[data-id]',
-        filter: '.no-drag',
         onStart() { self.dragging = true; },
         async onEnd(evt) {
           setTimeout(() => self.dragging = false, 0); // Click-Event nach Drop verpufft
