@@ -332,9 +332,10 @@ func envDuration(key string, def time.Duration) time.Duration {
 
 // handleReleases — GET /api/releases (WP4): der Live-Stand je (service,
 // environment) aus den Head-Zeilen, plus Initiative-Titel fürs Board.
-func handleReleases(p *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rows, err := p.Query(r.Context(), `
+// releasesBaseSelect ist der Head-je-(service,environment)-Read hinter
+// /api/releases (WP4). Als Konstante + reine buildReleasesQuery gebaut, damit
+// der Filter-Kontrakt ohne DB testbar ist.
+const releasesBaseSelect = `
 SELECT DISTINCT ON (d.service, d.environment)
        d.service, d.environment, d.status, d.version, d.git_sha,
        d.deployed_at, d.deployed_by, COALESCE(d.deploy_method,''),
@@ -342,8 +343,29 @@ SELECT DISTINCT ON (d.service, d.environment)
        d.probe_kind, COALESCE(d.health_url,''), COALESCE(d.log_url,''),
        COALESCE(d.migration_version,''), d.owned_by IS NOT NULL AND d.owned_until > now() AS leased
   FROM portfolio.deployments d
-  LEFT JOIN portfolio.initiative i ON i.id = d.initiative_id
- ORDER BY d.service, d.environment, d.deployed_at DESC`)
+  LEFT JOIN portfolio.initiative i ON i.id = d.initiative_id`
+
+const releasesOrderBy = `
+ ORDER BY d.service, d.environment, d.deployed_at DESC`
+
+// buildReleasesQuery hängt optional einen service-Filter an den Head-Read an.
+// ACI-Kalibrier-Knopf: `/api/releases?service=master-kanban` liefert nur die
+// Head-Zeile(n) des gefragten Service statt aller — das Board/der CD-Reconciler
+// fragt gezielt, ohne clientseitig die Vollmenge zu filtern. Parametrisiert
+// ($1) statt String-Interpolation (poka-yoke gegen SQL-Injection). Leerer/
+// whitespace Wert = kein Filter = altes Verhalten.
+func buildReleasesQuery(service string) (string, []any) {
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return releasesBaseSelect + releasesOrderBy, nil
+	}
+	return releasesBaseSelect + "\n WHERE d.service = $1" + releasesOrderBy, []any{service}
+}
+
+func handleReleases(p *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sql, args := buildReleasesQuery(r.URL.Query().Get("service"))
+		rows, err := p.Query(r.Context(), sql, args...)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return

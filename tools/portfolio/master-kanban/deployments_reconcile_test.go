@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -150,5 +151,40 @@ func TestProbeRow_OhneHealthURL(t *testing.T) {
 	row.HealthURL = nil
 	if res := probeRow(context.Background(), row, time.Second); res.Reached {
 		t.Fatalf("Zeile ohne health_url darf nicht Reached sein: %+v", res)
+	}
+}
+
+func TestBuildReleasesQuery(t *testing.T) {
+	// Kein Filter: Basis-Query, keine Args, kein WHERE.
+	sql, args := buildReleasesQuery("")
+	if len(args) != 0 {
+		t.Fatalf("ohne service-Param: keine Args erwartet, bekam %v", args)
+	}
+	if strings.Contains(sql, "WHERE") {
+		t.Fatalf("ohne service-Param: kein WHERE erwartet, bekam:\n%s", sql)
+	}
+	if !strings.Contains(sql, "DISTINCT ON (d.service, d.environment)") ||
+		!strings.HasSuffix(strings.TrimSpace(sql), "d.deployed_at DESC") {
+		t.Fatalf("Basis-Query verstümmelt:\n%s", sql)
+	}
+
+	// Whitespace zählt als leer (poka-yoke gegen versehentlichen Leerfilter).
+	if _, a := buildReleasesQuery("   "); len(a) != 0 {
+		t.Fatalf("Whitespace-service darf nicht filtern, bekam Args %v", a)
+	}
+
+	// Mit Filter: parametrisiertes WHERE + genau ein getrimmtes Arg, ORDER BY bleibt hinten.
+	sql, args = buildReleasesQuery("  master-kanban  ")
+	if len(args) != 1 || args[0] != "master-kanban" {
+		t.Fatalf("service-Arg getrimmt='master-kanban' erwartet, bekam %v", args)
+	}
+	if !strings.Contains(sql, "WHERE d.service = $1") {
+		t.Fatalf("parametrisiertes WHERE erwartet, bekam:\n%s", sql)
+	}
+	if strings.Contains(sql, "master-kanban") {
+		t.Fatalf("Service-Wert darf NICHT ins SQL interpoliert werden (Injection):\n%s", sql)
+	}
+	if strings.Index(sql, "WHERE") > strings.Index(sql, "ORDER BY") {
+		t.Fatalf("WHERE muss vor ORDER BY stehen:\n%s", sql)
 	}
 }
