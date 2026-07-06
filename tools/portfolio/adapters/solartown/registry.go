@@ -45,8 +45,8 @@ func LoadRegistry(configStr string) (*Registry, error) {
 			{Prefix: "sk", Dir: "/opt/stack"},
 			{Prefix: "so", Dir: "/root/stayawesomeOS"},
 			{Prefix: "sa", Dir: "/root/stayawesomeOS"},
-			{Prefix: "cl", Dir: "/opt/angeloos"},
-			{Prefix: "ag", Dir: "/opt/angeloos"},
+			{Prefix: "cl", Dir: "/root/solartown"},
+			{Prefix: "ag", Dir: "/root/solartown"},
 			{Prefix: "mb", Dir: "/root/solartown/mario-brain"},
 		}
 		for _, r := range defaults {
