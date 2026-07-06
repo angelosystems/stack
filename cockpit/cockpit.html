@@ -139,6 +139,9 @@
                       <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
                         <span class="text-[10px] text-slate-400" x-text="c.id"></span>
                         <span x-show="c.tier" class="text-[10px] px-1 rounded font-medium" :class="tierChip(c.tier)" x-text="tierLabel(c.tier)"></span>
+                        <span x-show="c.deploy_state" class="text-[10px] px-1 rounded font-semibold" :class="deployChip(c.deploy_state)"
+                          :title="'Release-Ledger: ' + c.deploy_state + (c.live_sha ? ' @ ' + c.live_sha : '')"
+                          x-text="'⏚ ' + c.deploy_state + (c.live_version ? ' ' + c.live_version : '')"></span>
                         <template x-for="sw in (c.softwares || [])" :key="sw">
                           <span class="text-[10px] px-1 rounded bg-indigo-50 text-indigo-700" x-text="sw"></span>
                         </template>
@@ -252,6 +255,57 @@
           </template>
         </ul>
         <div x-show="!backlogFiltered.length" class="px-5 py-8 text-center text-sm text-slate-400">Backlog leer 🎉</div>
+      </section>
+    </template>
+
+    <!-- ════ RELEASES-VIEW (Release-Ledger: was läuft mit welchem Commit, WP4) ════ -->
+    <template x-if="view==='releases'">
+      <section class="bg-white rounded-lg shadow-sm">
+        <header class="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
+          <h2 class="font-semibold uppercase tracking-wide text-sm">Releases</h2>
+          <span class="text-xs text-slate-400">jüngste Ledger-Zeile je (service, environment) · SoT: portfolio.deployments (:5434) · Probe versöhnt alle 60 s</span>
+          <button @click="loadReleases()" class="ml-auto text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">↻ neu laden</button>
+        </header>
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200">
+              <th class="px-5 py-2">Service</th>
+              <th class="px-2 py-2">Env</th>
+              <th class="px-2 py-2">Status</th>
+              <th class="px-2 py-2">Version</th>
+              <th class="px-2 py-2">Commit</th>
+              <th class="px-2 py-2">deployt</th>
+              <th class="px-2 py-2">von</th>
+              <th class="px-2 py-2">Initiative</th>
+              <th class="px-5 py-2">Probe</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="rel in releases" :key="rel.service + '/' + rel.environment">
+              <tr class="border-b border-slate-100 hover:bg-slate-50">
+                <td class="px-5 py-2 font-medium" x-text="rel.service"></td>
+                <td class="px-2 py-2 text-xs text-slate-500" x-text="rel.environment"></td>
+                <td class="px-2 py-2">
+                  <span class="text-[11px] px-1.5 py-0.5 rounded font-semibold" :class="deployChip(rel.status)" x-text="rel.status"></span>
+                  <span x-show="rel.leased" title="geleast (Deploy-Reaktor arbeitet, D13)">🔒</span>
+                </td>
+                <td class="px-2 py-2 font-mono text-xs" x-text="rel.version"></td>
+                <td class="px-2 py-2 font-mono text-xs text-slate-500" :title="rel.git_sha" x-text="(rel.git_sha || '').slice(0, 9)"></td>
+                <td class="px-2 py-2 text-xs text-slate-500" :title="rel.deployed_at" x-text="ageOf(rel.deployed_at)"></td>
+                <td class="px-2 py-2 text-xs text-slate-500" x-text="rel.deployed_by + (rel.deploy_method ? ' · ' + rel.deploy_method : '')"></td>
+                <td class="px-2 py-2 text-xs">
+                  <button x-show="rel.initiative_id" @click="openDetail(rel.initiative_id)"
+                    class="text-sky-700 hover:underline text-left" :title="rel.initiative_id" x-text="rel.initiative_title || rel.initiative_id"></button>
+                  <span x-show="!rel.initiative_id" class="text-slate-300">—</span>
+                </td>
+                <td class="px-5 py-2 text-[11px] text-slate-400 font-mono truncate max-w-[220px]" :title="rel.health_url" x-text="rel.probe_kind + (rel.health_url ? ' · ' + rel.health_url : ' · nicht sondierbar')"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div x-show="!releases.length" class="px-5 py-8 text-center text-sm text-slate-400">
+          Noch keine Ledger-Zeilen — die erste entsteht beim nächsten Deploy über deploy.sh (WP3).
+        </div>
       </section>
     </template>
 
@@ -581,6 +635,7 @@ function liveKanban() {
       { id: 'board',    label: 'Board' },
       { id: 'pipeline', label: 'Pipeline' },
       { id: 'backlog',  label: 'Backlog' },
+      { id: 'releases', label: 'Releases' },
     ],
     firmas: [
       { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 4 },
@@ -621,6 +676,7 @@ function liveKanban() {
     expanded: {},
     backlog: [],
     backlogRig: '',
+    releases: [],
     lastFetched: '',
     drift: null,
     driftOpen: false,
@@ -967,6 +1023,7 @@ function liveKanban() {
         this.loadDrift();
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
+        if (this.view === 'releases') await this.loadReleases();
         const t = new Date().toLocaleTimeString('de-DE');
         this.lastFetched = (silent ? 'auto-refresh' : 'geladen') + ' ' + t;
       } catch (e) {
@@ -979,6 +1036,24 @@ function liveKanban() {
       this.view = v;
       if (v === 'pipeline') await this.loadAllPlans();
       if (v === 'backlog') await this.loadBacklog();
+      if (v === 'releases') await this.loadReleases();
+    },
+
+    // ── Releases (Release-Ledger, WP4) ──
+    async loadReleases() {
+      try {
+        const r = await fetch(this.apiBase + '/api/releases');
+        this.releases = r.ok ? await r.json() : [];
+      } catch (e) { this.releases = []; }
+    },
+    deployChip(s) {
+      return {
+        live:        'bg-emerald-100 text-emerald-800',
+        deploying:   'bg-sky-100 text-sky-800',
+        pending:     'bg-amber-100 text-amber-800',
+        errored:     'bg-red-100 text-red-800',
+        rolled_back: 'bg-orange-100 text-orange-800',
+      }[s] || 'bg-slate-100 text-slate-500';
     },
 
     // ── Plan-Baum (P4.1) ──
@@ -1040,8 +1115,12 @@ function liveKanban() {
     },
     get backlogFiltered() { return this.backlog.filter(b => !this.backlogRig || b.rig === this.backlogRig); },
     ageOf(ts) {
-      const d = Math.floor((Date.now() - new Date(ts).getTime()) / 86400000);
-      return d === 0 ? 'heute' : d + 'd';
+      const ms = Date.now() - new Date(ts).getTime();
+      const d = Math.floor(ms / 86400000);
+      if (d > 0) return d + 'd';
+      const h = Math.floor(ms / 3600000);
+      if (h > 0) return h + 'h';
+      return Math.max(0, Math.floor(ms / 60000)) + 'm';
     },
     async triage(b, lane) {
       try {
