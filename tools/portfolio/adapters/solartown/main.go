@@ -57,6 +57,9 @@ type beadStatus struct {
 }
 
 func main() {
+	if maybeRunVersion() { // /version-Vertrag (WP2/D18) — vor flag.Parse
+		return
+	}
 	flag.Parse()
 	initRegistry()
 	if !*once && !*watch && !*listen && !*link {
@@ -490,7 +493,7 @@ func runLink(p *pgxpool.Pool) error {
 	newlyLinked := 0
 	alreadyLinked := 0
 	totalOrphaned := 0
-	var unreachableRigs []string
+	unreachableRigs := []string{}
 
 	scanOrder := []string{"st", "tr", "qu", "sk", "sa", "so", "cl", "ag", "mb"}
 	for _, prefix := range scanOrder {

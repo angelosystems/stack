@@ -30,8 +30,35 @@ var (
 	pool    *pgxpool.Pool
 	stPool  *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
 	qbPool  *pgxpool.Pool // Quantbot-Ledger (read KPI events)
-	Version string        = "dev"
+	// Build-Stamp — via `-ldflags "-X main.Version=… -X main.Sha=… -X main.BuiltAt=…"`
+	// gesetzt (siehe deploy.sh). Defaults markieren einen ungestampten Build.
+	Version string = "dev"
+	Sha     string = "unknown"
+	BuiltAt string = "unknown"
 )
+
+// VersionInfo ist der einheitliche /version-Vertrag (Release-Pipeline-PRD, D18):
+// dieselben 5 Felder für HTTP GET /api/version und CLI `version --json`.
+type VersionInfo struct {
+	Service string `json:"service"`
+	Version string `json:"version"`
+	Sha     string `json:"sha"`
+	BuiltAt string `json:"built_at"`
+	Env     string `json:"env"`
+}
+
+// versionInfo baut den /version-Vertrag. `env` ist ein Laufzeit-Fakt (dieselbe
+// Binary läuft prod-mvp und staging), daher via MK_ENV überschreibbar; version/
+// sha/built_at sind Build-Fakten aus den ldflags.
+func versionInfo() VersionInfo {
+	return VersionInfo{
+		Service: "master-kanban",
+		Version: Version,
+		Sha:     Sha,
+		BuiltAt: BuiltAt,
+		Env:     envOr("MK_ENV", "prod-mvp"),
+	}
+}
 
 func quantbotPool() (*pgxpool.Pool, error) {
 	if qbPool != nil {
@@ -304,12 +331,34 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// cmdVersion — CLI-Oberfläche des /version-Vertrags (D18). Erlaubt der
+// Haupt-Session, ein gestampftes Stage-Binary zu prüfen, OHNE den laufenden
+// Service anzufassen: `master-kanban.stage version --json`.
+func cmdVersion() *cobra.Command {
+	var asJSON bool
+	c := &cobra.Command{
+		Use:   "version",
+		Short: "Zeigt service/version/sha/built_at/env (einheitlicher /version-Vertrag)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			info := versionInfo()
+			if asJSON {
+				return json.NewEncoder(os.Stdout).Encode(info)
+			}
+			fmt.Printf("%s %s (sha %s, built %s, env %s)\n",
+				info.Service, info.Version, info.Sha, info.BuiltAt, info.Env)
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&asJSON, "json", false, "Ausgabe als JSON-Vertrag (service,version,sha,built_at,env)")
+	return c
 }
 
 func envOr(k, def string) string {
@@ -2455,12 +2504,16 @@ func cmdServe() *cobra.Command {
 				}
 				fmt.Fprintf(w, `{"ok":true,"matched":%d}`+"\n", matched)
 			})
-			// /api/version - Version und SHA-Endpoint für das CD-Gate/Health-Check (SC1)
+			// /api/version - einheitlicher /version-Vertrag (service,version,sha,built_at,env)
+			// für CD-Gate/Health-Check/Reconciler (Release-Pipeline-PRD WP2/D18).
 			http.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Access-Control-Allow-Origin", "*")
-				json.NewEncoder(w).Encode(map[string]string{"version": Version})
+				json.NewEncoder(w).Encode(versionInfo())
 			})
+			// /api/releases - Release-Ledger-Head-Zeilen je (service,environment):
+			// „was läuft mit welchem Commit" (Release-Pipeline-PRD WP4).
+			http.HandleFunc("/api/releases", handleReleases(p))
 			// /api/unlinked - Unlinked-Lane endpoint showing work-items without initiative-link (Capture-Completeness, L1)
 			http.HandleFunc("/api/unlinked", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")

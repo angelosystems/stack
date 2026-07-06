@@ -327,9 +327,17 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 					if resp.StatusCode == 200 {
 						var body struct {
 							Version string `json:"version"`
+							Sha     string `json:"sha"`
 						}
 						if err := json.NewDecoder(resp.Body).Decode(&body); err == nil {
-							if strings.HasPrefix(sha, body.Version) || strings.HasPrefix(body.Version, sha) || body.Version == sha {
+							// Identität ist der git_sha (Vertrag D12); version kann ein
+							// git-describe-Tag (v1.4.2) sein und matcht die SHA nicht.
+							// Fallback auf version für Services ohne sha-Feld.
+							live := body.Sha
+							if live == "" {
+								live = body.Version
+							}
+							if strings.HasPrefix(sha, live) || strings.HasPrefix(live, sha) || live == sha {
 								// Base version check passed. Now perform Feature-Smoke!
 								smokeURL := strings.Replace(svc.HealthProbe, "/api/version", "/api/initiatives", 1)
 								if smokeURL != svc.HealthProbe {
@@ -356,7 +364,7 @@ func makeGithubWebhookHandler(p *pgxpool.Pool, manifestPath string) http.Handler
 									probeSuccess = true
 								}
 							} else {
-								fmt.Println(fmt.Sprintf("Version mismatch: erwartet %s, erhalten %s", sha, body.Version))
+								fmt.Println(fmt.Sprintf("Version mismatch: erwartet %s, erhalten %s", sha, live))
 							}
 						} else {
 							fmt.Println(fmt.Sprintf("Failed to decode version json: %v", err))
