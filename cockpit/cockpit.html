@@ -276,6 +276,7 @@
               <th class="px-2 py-2">Commit</th>
               <th class="px-2 py-2">deployt</th>
               <th class="px-2 py-2">von</th>
+              <th class="px-2 py-2">Methode</th>
               <th class="px-2 py-2">Initiative</th>
               <th class="px-5 py-2">Probe</th>
             </tr>
@@ -292,7 +293,8 @@
                 <td class="px-2 py-2 font-mono text-xs" x-text="rel.version"></td>
                 <td class="px-2 py-2 font-mono text-xs text-slate-500" :title="rel.git_sha" x-text="(rel.git_sha || '').slice(0, 9)"></td>
                 <td class="px-2 py-2 text-xs text-slate-500" :title="rel.deployed_at" x-text="ageOf(rel.deployed_at)"></td>
-                <td class="px-2 py-2 text-xs text-slate-500" x-text="rel.deployed_by + (rel.deploy_method ? ' · ' + rel.deploy_method : '')"></td>
+                <td class="px-2 py-2 text-xs text-slate-500" x-text="rel.deployed_by"></td>
+                <td class="px-2 py-2 text-xs text-slate-500" x-text="rel.deploy_method || '—'"></td>
                 <td class="px-2 py-2 text-xs">
                   <button x-show="rel.initiative_id" @click="openDetail(rel.initiative_id)"
                     class="text-sky-700 hover:underline text-left" :title="rel.initiative_id" x-text="rel.initiative_title || rel.initiative_id"></button>

@@ -167,6 +167,15 @@ func TestBuildReleasesQuery(t *testing.T) {
 		!strings.HasSuffix(strings.TrimSpace(sql), "d.deployed_at DESC") {
 		t.Fatalf("Basis-Query verstümmelt:\n%s", sql)
 	}
+	// Ledger-Felder fürs Cockpit: wer (deployed_by) + womit (deploy_method)
+	// gedeployt hat, müssen im Head-Read stehen, sonst zeigt der Releases-Tab
+	// die Deploy-Loop-Herkunft nicht an.
+	if !strings.Contains(sql, "d.deployed_by") {
+		t.Fatalf("deployed_by fehlt im Select:\n%s", sql)
+	}
+	if !strings.Contains(sql, "d.deploy_method") {
+		t.Fatalf("deploy_method fehlt im Select:\n%s", sql)
+	}
 
 	// Whitespace zählt als leer (poka-yoke gegen versehentlichen Leerfilter).
 	if _, a := buildReleasesQuery("   "); len(a) != 0 {
