@@ -35,6 +35,14 @@ tools/*
 !tools/twenty/**
 !tools/portfolio/
 !tools/portfolio/**
+# Compiled Go binaries (main-package outputs) — built SHA-pinned on deploy,
+# never committed. A committed binary dirties the work tree on rebuild and
+# blocks the Merger push (release-pipeline durchstich befund #3).
+tools/portfolio/master-kanban/master-kanban
+tools/portfolio/adapters/coder/coder
+tools/portfolio/adapters/planfile/planfile
+tools/portfolio/adapters/solartown/solartown
+tools/portfolio/adapters/vibekanban/vibekanban
 !tools/master-kanban/
 !tools/master-kanban/**
 !tools/secrets-broker/
