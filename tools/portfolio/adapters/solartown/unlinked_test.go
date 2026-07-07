@@ -137,3 +137,21 @@ func TestReadBead_UnreachableRig(t *testing.T) {
 		t.Fatal("expected error for nonexistent rig dir, got nil")
 	}
 }
+
+// TestClassifyWorkspaces_ExcludesLinked verifies that already linked workspaces are excluded from classifyWorkspaces.
+func TestClassifyWorkspaces_ExcludesLinked(t *testing.T) {
+	linkedWS := vkWorkspace{ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Title: "Linked Task"}
+	unlinkedWS := vkWorkspace{ID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", Title: "Unlinked Task"}
+
+	linkedRefs := map[string]bool{
+		"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa": true,
+	}
+
+	got := classifyWorkspaces([]vkWorkspace{linkedWS, unlinkedWS}, linkedRefs)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 unlinked workspace, got %d (%+v)", len(got), got)
+	}
+	if got[0].Ref != "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" {
+		t.Fatalf("expected unlinked workspace reference bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, got %q", got[0].Ref)
+	}
+}
