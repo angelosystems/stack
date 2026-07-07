@@ -11,6 +11,11 @@ package main
 // Zeilen nicht an (D13). Zusätzlich ist er die EINZIGE Schreibquelle der
 // denormalisierten Board-Felder initiative.deploy_state/live_version/live_sha
 // (WP4) — nicht der Ledger-Zeilen anderer Akteure.
+//
+// befund #1: die Denormalisierung greift nur, wenn die Deploy-Zeile ein
+// initiative_id trägt (denormalizeInitiatives filtert IS NOT NULL). Der
+// Merger-Producer stampt es jetzt aus der service→initiative-Map — so folgt
+// die Board-Karte autonom jedem gegateten Merger-Deploy.
 
 import (
 	"context"
