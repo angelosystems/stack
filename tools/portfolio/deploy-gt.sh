@@ -78,6 +78,20 @@ done
 [[ -n "$BIN"     ]] || die64 "--bin <pfad> misst — wohin swappen?"
 [[ "${BIN:0:1}" == "/" ]] || die64 "--bin muss ein absoluter Pfad sein, war: $BIN"
 [[ -d "$REPO/.git" ]] || die64 "--repo $REPO ist kein git-Repo."
+
+# ── Trading-Wall (Mario-Go 2026-07-07/08; solartown-vollbetrieb-prd,
+#    Abschnitt SICHERHEITSBEFUND): Die Factory darf Live-Geld-Einheiten
+#    NIEMALS bauen, swappen oder restarten — egal was Outbox oder Manifest
+#    liefern. Bewusst breite Muster statt Unit-Liste und OHNE Override-Flag:
+#    Aufweichen heißt, diese Zeilen sehenden Auges zu editieren. Ergänzt die
+#    Repo-Wall (pre-receive auf /opt/quantbot), die nur den Push-Pfad deckt —
+#    hier wird der Deploy-/Restart-Pfad dicht gemacht.
+for _feld in "$SERVICE" "$UNIT" "$SRC" "$BIN" "$REPO"; do
+    case "$_feld" in
+        *quantbot*|*supervisor*|*strategies*|*dublin*|*live-trad*)
+            die64 "Trading-Wall: '$_feld' matcht ein Live-Geld-Muster (quantbot/supervisor/strategies/dublin/live-trad) — Deploy hart verweigert. Live-Geld-Deploys laufen NIE über die Factory." ;;
+    esac
+done
 git -C "$REPO" cat-file -e "${REF}^{commit}" 2>/dev/null \
     || die64 "--ref $REF ist im Repo $REPO nicht auffindbar — schon gefetcht?"
 [[ -d "$REPO/$SRC" ]] || warn "src $REPO/$SRC existiert im Live-Baum nicht (wird im Worktree geprüft)"
