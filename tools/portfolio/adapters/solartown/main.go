@@ -410,6 +410,11 @@ func scanRigBeads(p *pgxpool.Pool, slugToInitiative map[string]string, rig Rig, 
 				if title == "" {
 					title = b.ID
 				}
+				// Maschinerie-Transienten gehören nicht in die Inbox
+				// (Reconciliation-PRD §4 / Eingangs-Gate-PRD W2)
+				if isMachineryTransient(b.ID, title) {
+					continue
+				}
 				_, err = p.Exec(context.Background(),
 					`INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key)
 					 VALUES ($1, 'bead', $2, $3, $4, $5)
@@ -673,6 +678,27 @@ func sqlNullString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// isMachineryTransient: Rig-Infrastruktur-Beads (Rig-Wurzel, Witness,
+// Refinery, Polecat-Arbeitskopien, Merge-Artefakte) sind Betriebsrauschen,
+// keine Portfolio-Inbox-Kandidaten.
+func isMachineryTransient(id, title string) bool {
+	lid := strings.ToLower(id)
+	lt := strings.ToLower(title)
+	switch {
+	case strings.Contains(lid, "-rig-"),
+		strings.HasSuffix(lid, "-witness"),
+		strings.HasSuffix(lid, "-refinery"),
+		strings.Contains(lid, "-wisp-"):
+		return true
+	case lt == "mol-polecat-work",
+		strings.HasPrefix(lt, "merge:"),
+		strings.HasPrefix(lt, "witness for "),
+		strings.HasPrefix(lt, "refinery for "):
+		return true
+	}
+	return false
 }
 
 func getFirmaForRig(prefix string) string {

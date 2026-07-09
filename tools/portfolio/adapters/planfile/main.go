@@ -72,6 +72,43 @@ var firmaPrefix = map[string]string{
 	"mariobrain": "mb", "angeloos": "ag", "stack": "sk",
 }
 
+// Eingangs-Gate (master-kanban-eingangs-gate-prd): Repo-Default-tier,
+// explizites Frontmatter-Feld `tier:` gewinnt.
+var firmaDefaultTier = map[string]string{
+	"stayawesome": "product", "quantbot": "product", "mariobrain": "product",
+	"angeloos": "product", "solartown": "code-fabrik", "stack": "code-fabrik",
+}
+
+var validTiers = map[string]bool{"library": true, "code-fabrik": true, "product": true}
+
+// firma-Tag-Wert: product-Karten tragen ihre Firma, geteilte Tiers 'shared';
+// mariobrain heißt auf der Tag-Achse 'personal' (Reconciliation-PRD §8/D4).
+func firmaTagValue(firma, tier string) string {
+	if tier != "product" {
+		return "shared"
+	}
+	if firma == "mariobrain" {
+		return "personal"
+	}
+	return firma
+}
+
+// allRepos — für Cross-Repo-parent_plan-Auflösung (Dup-Fix W1).
+var allRepos []repo
+
+// repoForPath: Repo, dessen Wurzel den Pfad enthält; Fallback = Aufrufer-Repo.
+func repoForPath(path string, fallback repo) repo {
+	best := fallback
+	bestLen := 0
+	for _, r := range allRepos {
+		pfx := strings.TrimSuffix(r.root, "/") + "/"
+		if strings.HasPrefix(path, pfx) && len(pfx) > bestLen {
+			best, bestLen = r, len(pfx)
+		}
+	}
+	return best
+}
+
 type repo struct {
 	root  string // Repo-Wurzel
 	firma string
@@ -83,6 +120,11 @@ type frontmatter struct {
 	Status     string `yaml:"status"`
 	Layer      string `yaml:"layer"`
 	ParentPlan string `yaml:"parent_plan"`
+	Tier       string `yaml:"tier"`
+	Software   string `yaml:"software"`
+	// true wenn der Key parent_plan im YAML steht (auch mit Wert null) —
+	// unterscheidet bewusstes „kein Dach" von vergessenem Feld.
+	HasParentKey bool `yaml:"-"`
 }
 
 func main() {
@@ -98,6 +140,7 @@ func main() {
 	if err != nil {
 		die("config", err)
 	}
+	allRepos = repos
 
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
@@ -219,6 +262,11 @@ func resolveParentPath(r repo, childPath, pp string) string {
 // syncFileRec gibt die plan_item-id zurück ("" wenn übersprungen).
 // Parents werden vor Kindern gesynct (Rekursion, Zyklen via seen-Set gekappt).
 func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) string {
+	// Pfad kanonisieren — Brücken-Symlinks (coding-factory→code-factory)
+	// dürfen keine zweite Identität erzeugen.
+	if canon, err := filepath.EvalSymlinks(path); err == nil {
+		path = canon
+	}
 	if seen[path] {
 		return ""
 	}
@@ -241,12 +289,26 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 	id := firmaPrefix[r.firma] + "-" + fm.Slug
 	ctx := context.Background()
 
+	// Dedup-by-Path: dieselbe Datei bekommt nie eine zweite Identität,
+	// auch wenn sie über ein anderes Repo/Präfix erreicht wird. Adoptiert
+	// werden Item-ID UND Initiative der bestehenden Zeile (exakter
+	// ID-Treffer bevorzugt, sonst jüngste Zeile).
+	var adoptItemID, adoptInit string
+	_ = p.QueryRow(ctx,
+		`SELECT id, initiative_id FROM portfolio.plan_item WHERE path=$1
+		  ORDER BY (id=$2) DESC, updated_at DESC LIMIT 1`, path, id).Scan(&adoptItemID, &adoptInit)
+	if adoptItemID != "" {
+		id = adoptItemID
+	}
+
 	// Parent zuerst syncen, Initiative vom Parent erben
 	parentID := ""
 	initiativeID := id
 	if pp := normalizeParent(fm.ParentPlan); pp != "" {
 		if ppath := resolveParentPath(r, path, pp); ppath != "" {
-			parentID = syncFileRec(p, r, ppath, seen)
+			// Cross-Repo-Fix: Parent im besitzenden Repo syncen, nicht mit
+			// dem Firma-Präfix des Kindes (erzeugte vorher Dup-Initiativen).
+			parentID = syncFileRec(p, repoForPath(ppath, r), ppath, seen)
 		}
 		if parentID == "" {
 			// Parent evtl. schon aus früherem Lauf in der DB (z.B. anderes Repo)
@@ -259,6 +321,10 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 			parentID, initiativeID = "", id
 		}
 	}
+	// Ohne Parent: bestehende Initiative der adoptierten Zeile weiternutzen
+	if parentID == "" && adoptInit != "" {
+		initiativeID = adoptInit
+	}
 
 	isRootCard := parentID == "" &&
 		(strings.HasSuffix(path, "-prd.md") || fm.Layer == "prd" || fm.Layer == "vision" || fm.Layer == "roadmap")
@@ -266,18 +332,49 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 		return "" // lose Notiz ohne Eltern und ohne Karten-Layer — kein Board-Material
 	}
 
+	// Eingangs-Gate: tier aus Frontmatter, sonst Repo-Default
+	tier := fm.Tier
+	if !validTiers[tier] {
+		if tier != "" {
+			fmt.Fprintf(os.Stderr, "  ! %s: unbekannter tier %q, nehme Repo-Default\n", fm.Slug, tier)
+		}
+		tier = firmaDefaultTier[r.firma]
+	}
+
 	created := false
 	if isRootCard {
-		// Initiative nur anlegen, nie verschieben — Stage-Hoheit bleibt beim Board
-		tag, err := p.Exec(ctx,
-			`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-			 VALUES ($1,$2,'idea',$3,'plan_file') ON CONFLICT (id) DO NOTHING`,
-			id, r.firma, fm.Title)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ upsert %s: %v\n", id, err)
-			return ""
+		if initiativeID == id {
+			// Initiative nur anlegen, nie verschieben — Stage-Hoheit bleibt beim Board
+			tag, err := p.Exec(ctx,
+				`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend, tier)
+				 VALUES ($1,$2,'idea',$3,'plan_file',$4) ON CONFLICT (id) DO NOTHING`,
+				id, r.firma, fm.Title, tier)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ upsert %s: %v\n", id, err)
+				return ""
+			}
+			created = tag.RowsAffected() > 0
 		}
-		created = tag.RowsAffected() > 0
+
+		// Selbstheilung: tier-lose Bestandskarten füllen, nie überschreiben
+		_, _ = p.Exec(ctx,
+			`UPDATE portfolio.initiative SET tier=$2 WHERE id=$1 AND tier IS NULL`, initiativeID, tier)
+
+		// Tag-Achsen (Reconciliation-PRD §8): firma immer, software optional
+		upsertTag(p, ctx, initiativeID, "firma", firmaTagValue(r.firma, tier))
+		if s := strings.TrimSpace(fm.Software); s != "" {
+			upsertTag(p, ctx, initiativeID, "software", s)
+		}
+
+		// Überprojekt-Check: fehlender parent_plan-Key (≠ bewusstes null)
+		// markiert die Karte für Triage; bewusster Key räumt den Marker ab.
+		if fm.HasParentKey {
+			_, _ = p.Exec(ctx,
+				`DELETE FROM portfolio.initiative_tag
+				  WHERE initiative_id=$1 AND kind='triage' AND value='parent-check'`, initiativeID)
+		} else {
+			upsertTag(p, ctx, initiativeID, "triage", "parent-check")
+		}
 	}
 
 	// plan_item upsert — die Baum-Projektion (P4.1)
@@ -343,6 +440,14 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 	return id
 }
 
+func upsertTag(p *pgxpool.Pool, ctx context.Context, id, kind, value string) {
+	if _, err := p.Exec(ctx,
+		`INSERT INTO portfolio.initiative_tag (initiative_id, kind, value)
+		 VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, id, kind, value); err != nil {
+		fmt.Fprintf(os.Stderr, "  ✗ tag %s %s=%s: %v\n", id, kind, value, err)
+	}
+}
+
 func readFrontmatter(path string) (*frontmatter, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -373,6 +478,10 @@ func readFrontmatter(path string) (*frontmatter, error) {
 	var fm frontmatter
 	if err := yaml.Unmarshal([]byte(s[4:4+end]), &fm); err != nil {
 		return nil, err
+	}
+	var keys map[string]any
+	if err := yaml.Unmarshal([]byte(s[4:4+end]), &keys); err == nil {
+		_, fm.HasParentKey = keys["parent_plan"]
 	}
 	return &fm, nil
 }

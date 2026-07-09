@@ -4,7 +4,7 @@ slug: secrets-topologie
 status: approved
 layer: prd
 parent_plan: null
-scope: Definition der Secrets-Topologie im Portfolio: Abgrenzung privater vs. operativer Secrets, Trennung zwischen Companies, Setup von OpenBao auf der Vault-Box (178.105.55.184) im Namespace 'stayawesome' sowie die Spezifikation des Per-Tenant Secrets-Brokers (E3 st-4ugcp).
+scope: "Definition der Secrets-Topologie im Portfolio: Abgrenzung privater vs. operativer Secrets, Trennung zwischen Companies, Setup von OpenBao auf der Vault-Box (178.105.55.184) im Namespace 'stayawesome' sowie die Spezifikation des Per-Tenant Secrets-Brokers (E3 st-4ugcp)."
 created: 2026-06-22
 review:
   quick: auto
