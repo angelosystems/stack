@@ -283,6 +283,12 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 	if fm.Slug == "" {
 		fm.Slug = strings.TrimSuffix(strings.TrimSuffix(filepath.Base(path), ".md"), "-prd")
 	}
+	// Doppel-Präfix-Wache: Slugs, die das Firma-Präfix schon tragen
+	// (slug: sa-…) würden IDs wie sa-sa-… münzen und bestehende Karten
+	// verfehlen — Präfix strippen, damit die ID natürlich kollidiert.
+	if pfx := firmaPrefix[r.firma] + "-"; strings.HasPrefix(fm.Slug, pfx) {
+		fm.Slug = strings.TrimPrefix(fm.Slug, pfx)
+	}
 	if fm.Title == "" {
 		fm.Title = fm.Slug
 	}
