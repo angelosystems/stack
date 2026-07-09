@@ -112,6 +112,7 @@ func repoForPath(path string, fallback repo) repo {
 type repo struct {
 	root  string // Repo-Wurzel
 	firma string
+	tier  string // optionaler Default-tier aus PLANFILE_REPOS (pfad=firma:tier)
 }
 
 type frontmatter struct {
@@ -211,10 +212,22 @@ func parseRepos(spec string) ([]repo, error) {
 	var out []repo
 	for _, part := range strings.Split(spec, ",") {
 		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
-		if len(kv) != 2 || firmaPrefix[kv[1]] == "" {
-			return nil, fmt.Errorf("ungültiger Eintrag %q (pfad=firma, firma ∈ sa/qb/st/mb/ag-Familie)", part)
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("ungültiger Eintrag %q (erwartet pfad=firma oder pfad=firma:tier)", part)
 		}
-		out = append(out, repo{root: kv[0], firma: kv[1]})
+		// Registry-Eintrag (Panel-Ask 5): pfad=firma[:tier] — eine Quelle
+		// für Firma UND Default-tier statt zweiter Liste im Code.
+		firma, tier := kv[1], ""
+		if i := strings.IndexByte(firma, ':'); i >= 0 {
+			firma, tier = firma[:i], firma[i+1:]
+			if !validTiers[tier] {
+				return nil, fmt.Errorf("ungültiger tier %q in %q (erlaubt: library|code-fabrik|product)", tier, part)
+			}
+		}
+		if firmaPrefix[firma] == "" {
+			return nil, fmt.Errorf("ungültiger Eintrag %q (firma ∈ sa/qb/st/mb/ag/sk-Familie)", part)
+		}
+		out = append(out, repo{root: kv[0], firma: firma, tier: tier})
 	}
 	return out, nil
 }
@@ -338,13 +351,19 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 		return "" // lose Notiz ohne Eltern und ohne Karten-Layer — kein Board-Material
 	}
 
-	// Eingangs-Gate: tier aus Frontmatter, sonst Repo-Default
+	// Eingangs-Gate: tier aus Frontmatter > Repo-Registry > Firma-Default.
+	// Rand-Fälle (Panel-Ask 4): ungültiger Wert → laute Sync-Warnung +
+	// Default; gar kein Default auffindbar → NULL + triage:tier-check.
 	tier := fm.Tier
-	if !validTiers[tier] {
+	tierExplicit := validTiers[tier]
+	if !tierExplicit {
 		if tier != "" {
-			fmt.Fprintf(os.Stderr, "  ! %s: unbekannter tier %q, nehme Repo-Default\n", fm.Slug, tier)
+			fmt.Fprintf(os.Stderr, "  ! %s: unbekannter tier %q (erlaubt: library|code-fabrik|product) — nehme Default; Frontmatter fixen\n", fm.Slug, tier)
 		}
-		tier = firmaDefaultTier[r.firma]
+		tier = r.tier
+		if tier == "" {
+			tier = firmaDefaultTier[r.firma]
+		}
 	}
 
 	created := false
@@ -353,7 +372,7 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 			// Initiative nur anlegen, nie verschieben — Stage-Hoheit bleibt beim Board
 			tag, err := p.Exec(ctx,
 				`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend, tier)
-				 VALUES ($1,$2,'idea',$3,'plan_file',$4) ON CONFLICT (id) DO NOTHING`,
+				 VALUES ($1,$2,'idea',$3,'plan_file',NULLIF($4,'')) ON CONFLICT (id) DO NOTHING`,
 				id, r.firma, fm.Title, tier)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ upsert %s: %v\n", id, err)
@@ -364,7 +383,7 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 
 		// Selbstheilung: tier-lose Bestandskarten füllen, nie überschreiben
 		_, _ = p.Exec(ctx,
-			`UPDATE portfolio.initiative SET tier=$2 WHERE id=$1 AND tier IS NULL`, initiativeID, tier)
+			`UPDATE portfolio.initiative SET tier=NULLIF($2,'') WHERE id=$1 AND tier IS NULL`, initiativeID, tier)
 
 		// Tag-Achsen (Reconciliation-PRD §8): firma immer, software optional
 		upsertTag(p, ctx, initiativeID, "firma", firmaTagValue(r.firma, tier))
@@ -372,9 +391,24 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 			upsertTag(p, ctx, initiativeID, "software", s)
 		}
 
+		// tier-Herkunft sichtbar halten (Panel-Ask 1): Default-Klassifikation
+		// ist Digest-Material; explizites Frontmatter räumt den Marker ab.
+		if tierExplicit {
+			_, _ = p.Exec(ctx,
+				`DELETE FROM portfolio.initiative_tag
+				  WHERE initiative_id=$1 AND kind='tier-source' AND value='default'`, initiativeID)
+		} else if created {
+			upsertTag(p, ctx, initiativeID, "tier-source", "default")
+		}
+		if tier == "" {
+			upsertTag(p, ctx, initiativeID, "triage", "tier-check")
+		}
+
 		// Überprojekt-Check: fehlender parent_plan-Key (≠ bewusstes null)
-		// markiert die Karte für Triage; bewusster Key räumt den Marker ab.
-		if fm.HasParentKey {
+		// ODER deklarierter, aber nicht auflösbarer Parent markiert die
+		// Karte für Triage; sauberer Zustand räumt den Marker ab.
+		parentBroken := normalizeParent(fm.ParentPlan) != "" && parentID == ""
+		if fm.HasParentKey && !parentBroken {
 			_, _ = p.Exec(ctx,
 				`DELETE FROM portfolio.initiative_tag
 				  WHERE initiative_id=$1 AND kind='triage' AND value='parent-check'`, initiativeID)

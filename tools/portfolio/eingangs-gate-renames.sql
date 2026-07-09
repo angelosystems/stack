@@ -106,3 +106,23 @@ UPDATE portfolio.initiative SET archived_at=now(),
   description = COALESCE(description,'') || E'\n\n[D3 master-kanban-eingangs-gate 2026-07-09] Biz-Prozess ohne Code → weiterverfolgt als Notion-Menschen-Task (Stay-Awesome-Backlog); Board-Karte archiviert.'
 WHERE id IN ('sa-markthalle-buergschaft','sa-muse-klaerung') AND archived_at IS NULL;
 COMMIT;
+
+-- ── Panel-Ask 3 (Newman): Referenz-Sweep + Verifikation ─────────────────
+-- VOR dem Lauf optional prüfen, wo alte IDs noch vorkommen (rein lesend):
+--   grep -rn "sa-sa-\|angelo-vk-bridge\|mb-master-kanban-build" \
+--     /root/stayawesomeOS/docs /root/solartown/docs /opt/stack/docs
+-- NACH dem Lauf müssen alle vier Checks 0 liefern:
+SELECT 'alte initiative-ids'      AS check, count(*) FROM portfolio.initiative
+ WHERE id IN ('sa-sa-deploy-stufen','sa-sa-deployment-platform','sa-sa-mews-finance-reporting','st-angelo-vk-bridge','mb-master-kanban-build');
+SELECT 'links auf alte ids'       AS check, count(*) FROM portfolio.initiative_link
+ WHERE initiative_id IN ('sa-sa-deploy-stufen','sa-sa-deployment-platform','sa-sa-mews-finance-reporting','st-angelo-vk-bridge','mb-master-kanban-build');
+SELECT 'plan_items auf alte ids'  AS check, count(*) FROM portfolio.plan_item
+ WHERE initiative_id IN ('sa-sa-deploy-stufen','sa-sa-deployment-platform','sa-sa-mews-finance-reporting','st-angelo-vk-bridge','mb-master-kanban-build')
+    OR parent_id     IN ('sa-sa-deploy-stufen','sa-sa-deployment-platform','sa-sa-mews-finance-reporting','st-angelo-vk-bridge');
+SELECT 'events auf alte ids'      AS check, count(*) FROM portfolio.initiative_event
+ WHERE initiative_id IN ('sa-sa-deploy-stufen','sa-sa-deployment-platform','sa-sa-mews-finance-reporting','st-angelo-vk-bridge','mb-master-kanban-build');
+
+-- ── Panel-Minor (Newman): tier-Enum kanonisch in der DB verankern ────────
+ALTER TABLE portfolio.initiative
+  ADD CONSTRAINT initiative_tier_check
+  CHECK (tier IS NULL OR tier IN ('library','code-fabrik','product'));

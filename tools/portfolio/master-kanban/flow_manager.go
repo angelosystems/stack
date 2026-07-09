@@ -496,6 +496,16 @@ func buildZuordnungSection(ctx context.Context, p *pgxpool.Pool) string {
 		   FROM portfolio.initiative_tag t
 		   JOIN portfolio.initiative i ON i.id = t.initiative_id AND i.archived_at IS NULL
 		  WHERE t.kind='triage' AND t.value='parent-check' ORDER BY t.added_at DESC`)
+	total += collect("- **Karten ohne auflösbaren tier-Default** (`triage:tier-check`)",
+		`SELECT t.initiative_id, i.firma || ' / ' || i.stage
+		   FROM portfolio.initiative_tag t
+		   JOIN portfolio.initiative i ON i.id = t.initiative_id AND i.archived_at IS NULL
+		  WHERE t.kind='triage' AND t.value='tier-check' ORDER BY t.added_at DESC`)
+	total += collect("- **tier nur per Repo-Default gesetzt** (`tier-source=default` — Fehlklassifikations-Kandidaten)",
+		`SELECT t.initiative_id, i.firma || ' / ' || COALESCE(i.tier,'?')
+		   FROM portfolio.initiative_tag t
+		   JOIN portfolio.initiative i ON i.id = t.initiative_id AND i.archived_at IS NULL
+		  WHERE t.kind='tier-source' AND t.value='default' ORDER BY t.added_at DESC`)
 	total += collect("- **Inbox-Reste** (unlinked, nach Transienten-Filter)",
 		`SELECT id, COALESCE(firma,'?') || ' — ' || left(title, 80)
 		   FROM portfolio.unlinked_item ORDER BY discovered_at DESC`)
