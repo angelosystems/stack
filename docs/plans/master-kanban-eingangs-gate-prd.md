@@ -1,7 +1,7 @@
 ---
 title: Master-Kanban Eingangs-Gate — Zuordnung wird Code, nicht Disziplin
 slug: master-kanban-eingangs-gate
-status: approved-with-notes
+status: in-progress
 layer: prd
 parent_plan: coding-factory-reconciliation-prd.md
 scope: Neuzugänge aufs Board bekommen tier/Tags/Parent-Check deterministisch beim Eingang; Reconciliation-Reste (Backfill, Inbox-Filter, Renames) werden abgeschlossen; VK-Spawns verlinken sich selbst; Zuordnungs-Drift landet im Flow-Manager-Digest.
