@@ -66,9 +66,9 @@ Backup vor allen Schreibzugriffen:
   `st-angelo-vk-bridge`→`st-angelo-vk-dispatch`), D4-RETENANT
   (`mb-master-kanban-build`→`sk-master-kanban-build`, firma stack), D3-Archiv
   der 2 Biz-Karten. Bereit unter
-  `<scratchpad>/w2-renames.sql`; Ausführung:
-  `psql <DSN> -f w2-renames.sql` (Backup liegt vor, jede Karte eigene
-  Transaktion).
+  `/opt/stack/tools/portfolio/eingangs-gate-renames.sql`; Ausführung:
+  `psql <PORTFOLIO_DSN> -f eingangs-gate-renames.sql` (Backup liegt vor,
+  jede Karte eigene Transaktion).
 - **F2 — systemd-Unit-Zeile** (`/etc/systemd/system/master-kanban-planfile.service`):
   `PLANFILE_REPOS` um `/opt/code-factory=stack,` ergänzen + reload +
   Restart — dann synct der Watcher das Factory-Repo dauerhaft.
