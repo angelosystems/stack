@@ -38,10 +38,11 @@ import (
 // Die Outbox-Zeile trägt nur service/env/sha — das Rezept liefert den Rest.
 type ServiceRecipe struct {
 	Src       string `yaml:"src"`        // Go-Paket-Relpfad im Repo (deploy-gt.sh --src)
-	Bin       string `yaml:"bin"`        // Ziel-Binary, absoluter Pfad (--bin)
+	Bin       string `yaml:"bin"`        // Ziel-Binary, absoluter Pfad (--bin); bei box: Pfad auf der Ziel-Box
 	Unit      string `yaml:"unit"`       // systemd-Unit; leer = cli-Service ohne Restart
+	Box       string `yaml:"box"`        // ssh-Ziel (deploy-gt.sh --box); leer = lokaler Deploy (sa-deploy-stufen W2)
 	ProbeKind string `yaml:"probe_kind"` // 'http' | 'cli' (D18)
-	HealthURL string `yaml:"health_url"` // http: /version-URL · cli: absoluter Binary-Pfad
+	HealthURL string `yaml:"health_url"` // http: /version-URL · cli: absoluter Binary-/Wrapper-Pfad
 	SmokeURL  string `yaml:"smoke_url"`  // http: eine echte Business-Route (2xx erwartet, D18)
 }
 
@@ -141,11 +142,12 @@ func breakerOpens(consecutiveReds, k int) bool { return consecutiveReds >= k }
 // ── Reaktor (Orchestrierung; injizierbare Kanten für Tests) ──────────────────
 
 type reactor struct {
-	pool       *pgxpool.Pool
-	man        *reactorManifest
-	scriptPath string
-	owner      string
-	lease      time.Duration
+	pool        *pgxpool.Pool
+	man         *reactorManifest
+	scriptPath  string
+	owner       string
+	environment string // "" = alle Stufen draina; sonst nur diese (sa-deploy-stufen W2)
+	lease       time.Duration
 	maxSmoke   int
 	smokeSleep time.Duration
 	smokeDue   time.Duration
@@ -195,8 +197,15 @@ func (r *reactor) runOnce(ctx context.Context) error {
 		return nil
 	}
 
+	// environment-Filter (sa-deploy-stufen W2): leer = alle Stufen (rückwärts-
+	// kompatibel, heutiges Verhalten); gesetzt = NUR diese Stufe. So teilen sich
+	// der prod-Reaktor (environment='prod-mvp') und der sa-staging-drain
+	// (environment='staging') EINE portfolio.deployments-Tabelle, ohne sich
+	// gegenseitig fremde Zeilen wegzuschnappen (sonst errored jeder die Rezepte
+	// des anderen — genau die Kollision aus dem W1-Befund).
 	rows, err := r.pool.Query(ctx, `SELECT id, service, environment, git_sha, COALESCE(version,''), status
-	     FROM portfolio.deployments WHERE status='pending' ORDER BY deployed_at`)
+	     FROM portfolio.deployments
+	     WHERE status='pending' AND ($1='' OR environment=$1) ORDER BY deployed_at`, r.environment)
 	if err != nil {
 		return fmt.Errorf("pending-Zeilen lesen: %w", err)
 	}
@@ -242,7 +251,8 @@ func (r *reactor) runOnce(ctx context.Context) error {
 func (r *reactor) reclaimStranded(ctx context.Context) {
 	tag, err := r.pool.Exec(ctx, `UPDATE portfolio.deployments
 	     SET status='pending', owned_by=NULL, owned_until=NULL
-	     WHERE status='deploying' AND owned_until IS NOT NULL AND owned_until < now()`)
+	     WHERE status='deploying' AND owned_until IS NOT NULL AND owned_until < now()
+	       AND ($1='' OR environment=$1)`, r.environment)
 	if err == nil && tag.RowsAffected() > 0 {
 		r.logf("↺ %d gestrandete deploying-Zeile(n) zurück auf pending (Lease abgelaufen)", tag.RowsAffected())
 	}
@@ -329,6 +339,11 @@ func (r *reactor) deploy(ctx context.Context, rec ServiceRecipe, service, ref st
 		"--bin", rec.Bin, "--repo", r.man.Repo, "--json"}
 	if rec.Unit != "" {
 		args = append(args, "--unit", rec.Unit)
+	}
+	// Remote-Deploy (sa-deploy-stufen W2): deploy-gt.sh baut lokal SHA-gepinnt
+	// und shippt/swappt/restartet per ssh auf die Ziel-Box. Leer = lokal.
+	if rec.Box != "" {
+		args = append(args, "--box", rec.Box)
 	}
 	out, err := exec.CommandContext(ctx, r.scriptPath, args...).CombinedOutput()
 	return string(out), err
@@ -437,7 +452,7 @@ func defaultScriptPath() string {
 // das kontinuierliche Re-Arm (WP7) — die zugehörige Unit bleibt disabled, bis
 // HAUPT sie hinter dem Test-Gate scharfschaltet.
 func cmdDeployReactorOutbox() *cobra.Command {
-	var manifestPath, scriptPath, stateDir, eventsDir string
+	var manifestPath, scriptPath, stateDir, eventsDir, environment string
 	var once, loop bool
 	var interval, lease, smokeDue, probeTO, smokeSleep time.Duration
 	var maxSmoke, breakerK int
@@ -454,9 +469,16 @@ func cmdDeployReactorOutbox() *cobra.Command {
 				return err
 			}
 			host, _ := os.Hostname()
+			owner := "deploy-reactor@" + host
+			if environment != "" {
+				// Eigener owned_by je Stufe → im Ledger sofort sichtbar, welcher
+				// Drain die Lease hält, und keine CAS-Verwechslung zwischen den
+				// beiden Reaktoren.
+				owner = "deploy-reactor-" + environment + "@" + host
+			}
 			r := &reactor{
 				pool: connect(), man: man,
-				scriptPath: scriptPath, owner: "deploy-reactor@" + host,
+				scriptPath: scriptPath, owner: owner, environment: environment,
 				lease: lease, maxSmoke: maxSmoke, smokeSleep: smokeSleep,
 				smokeDue: smokeDue, probeTO: probeTO, breakerK: breakerK,
 				stateDir: stateDir, eventsDir: eventsDir,
@@ -484,6 +506,7 @@ func cmdDeployReactorOutbox() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&manifestPath, "manifest", envOr("DEPLOY_REACTOR_MANIFEST", "/opt/stack/deploy-reactor-manifest.yaml"), "Service-Rezepte (YAML)")
+	c.Flags().StringVar(&environment, "environment", envOr("DEPLOY_REACTOR_ENV", ""), "nur diese Ledger-Stufe draina (leer=alle; sa-deploy-stufen W2: 'staging' bzw. 'prod-mvp')")
 	c.Flags().StringVar(&scriptPath, "script", defaultScriptPath(), "Pfad zu deploy-gt.sh")
 	c.Flags().StringVar(&stateDir, "state-dir", envOr("DEPLOY_STATE_DIR", "/opt/stack/var/deploy-reactor"), "Circuit-Breaker-Marker")
 	c.Flags().StringVar(&eventsDir, "events-dir", envOr("DEPLOY_EVENTS_DIR", "/opt/solartown/events/refinery"), "durable Eskalations-Artefakte (D20c)")
