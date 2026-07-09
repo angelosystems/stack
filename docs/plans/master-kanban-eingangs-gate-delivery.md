@@ -82,3 +82,18 @@ Backup vor allen Schreibzugriffen:
   sa-hr-strecke-YAML-Fix wirkt auf Disk, ist dort aber nicht versioniert.
 - mk-verwalter bleibt ohne Live-Draht (bewusst, PRD W5-Ponytail):
   Zuordnungs-Findings laufen über den Flow-Manager-Digest an mariobrain/.
+
+## Nachtrag — Deep-Tech-Panel-Runde (2026-07-09)
+
+spec-panel critique (7 Experten-Stimmen aktiv, 7.8/10, advisory): 5 Asks,
+alle in derselben Session adressiert (Details: Sektion „Panel-Reaktion" im
+PRD). Neu deployt: planfile-adapter + master-kanban (tier-source-Marker,
+triage:tier-check, Registry-Format `pfad=firma[:tier]`, 2 neue
+Digest-Zähler). Freigabe-SQL um Referenz-Sweep + tier-CHECK-Constraint
+erweitert. Quick-Review danach erneut: approved-with-notes.
+
+Offen aus dem Panel (Folge-Arbeit, nicht blockierend):
+- Digest-Abgleich „VK-Workspaces ↔ initiative_link" (Nygard 2c)
+- Dach-Kandidaten-Vorschläge im Digest-Item (Cockburn)
+- Restore-Dry-Run auf Staging-DB (Nygard)
+- Negativ-Probe des Inbox-Filters als Adapter-Testfall (Adzic)

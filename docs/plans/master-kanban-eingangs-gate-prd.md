@@ -355,3 +355,15 @@ Umgesetzt in derselben Session (Eskalations-Pfad: Panel → nachschärfen → Qu
   starten. (Dry-Run des Restores auf Staging-DB steht aus.)
 - **Cockburn (Dach-Kandidaten im Digest), Adzic-Negativ-Probe als
   Testfall:** Folge-Arbeit; Musterliste ist in ADR-0011 kanonisiert.
+
+## Reviewer-Verdict — quick (glm-5.2) — 2026-07-09
+
+**Verdict:** `approved-with-notes`
+
+Das PRD löst ein klar belegtes, strukturelles Problem (Zuordnungs-Drift) und hat eine explizite Scope-Abgrenzung (W2: 'Nicht in Scope'). Alle Arbeitspakete verfügen über überprüfbare Done-Kriterien in Form von messbaren Success-Criteria (SC 1-8) und konkreten Step-Validation-Gates. Architekturentscheidungen sind begründet, Alternatien erkennbar verworfen, und offene Fragen sowie Risiken wurden durch ein tiefgreifendes Panel-Review bereits vollständig adressiert und aufgelöst.
+
+**Struktur:**
+- S5-references warn: nicht gefunden: coding-factory-reconciliation-prd.md, kanban-flow-manager-prd.md
+
+**Asks:**
+- [ ] Stelle bei der finalen Umsetzung sicher, dass die Success-Criteria physisch als Checkliste in den jeweiligen Step-Validation-Gates abgehakt werden, um die formale Konvention lückenlos zu erfüllen.
