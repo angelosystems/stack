@@ -435,9 +435,11 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		}
 	}
 
-	// 4. Generate and actively deliver Board-Review-Digest if we have diagnosed cards
-	if len(diagnosedCards) > 0 {
-		digest := generateDigestReport(diagnosedCards)
+	// 4. Generate and actively deliver Board-Review-Digest if we have diagnosed
+	// cards or Zuordnungs-Findings (Eingangs-Gate-PRD W5)
+	zuordnung := buildZuordnungSection(ctx, p)
+	if len(diagnosedCards) > 0 || zuordnung != "" {
+		digest := generateDigestReport(diagnosedCards) + zuordnung
 		fmt.Println("=== 📨 Delivering Board-Review-Digest ===")
 		if err := deliverDigest(digest, dryRun); err != nil {
 			fmt.Fprintf(os.Stderr, "  ❌ Failed to deliver digest: %v\n", err)
@@ -447,6 +449,61 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 	}
 
 	return nil
+}
+
+// buildZuordnungSection meldet Zuordnungs-Drift (ADR-0011): tier-lose Karten,
+// Karten mit triage:parent-check und echte Inbox-Reste. Leer = alles sauber.
+func buildZuordnungSection(ctx context.Context, p *pgxpool.Pool) string {
+	var sb strings.Builder
+
+	collect := func(header string, query string) int {
+		rows, err := p.Query(ctx, query)
+		if err != nil {
+			return 0
+		}
+		defer rows.Close()
+		var items []string
+		for rows.Next() {
+			var id, detail string
+			if rows.Scan(&id, &detail) == nil {
+				items = append(items, fmt.Sprintf("  - `%s` — %s", id, detail))
+			}
+		}
+		if len(items) == 0 {
+			return 0
+		}
+		sb.WriteString(fmt.Sprintf("%s (%d):\n", header, len(items)))
+		limit := len(items)
+		if limit > 10 {
+			limit = 10
+		}
+		for _, it := range items[:limit] {
+			sb.WriteString(it + "\n")
+		}
+		if len(items) > limit {
+			sb.WriteString(fmt.Sprintf("  - … %d weitere\n", len(items)-limit))
+		}
+		sb.WriteString("\n")
+		return len(items)
+	}
+
+	total := 0
+	total += collect("- **Karten ohne tier**",
+		`SELECT id, firma || ' / ' || stage FROM portfolio.initiative
+		  WHERE tier IS NULL AND archived_at IS NULL ORDER BY created_at DESC`)
+	total += collect("- **Karten ohne bewussten parent_plan** (`triage:parent-check`)",
+		`SELECT t.initiative_id, i.firma || ' / ' || i.stage
+		   FROM portfolio.initiative_tag t
+		   JOIN portfolio.initiative i ON i.id = t.initiative_id AND i.archived_at IS NULL
+		  WHERE t.kind='triage' AND t.value='parent-check' ORDER BY t.added_at DESC`)
+	total += collect("- **Inbox-Reste** (unlinked, nach Transienten-Filter)",
+		`SELECT id, COALESCE(firma,'?') || ' — ' || left(title, 80)
+		   FROM portfolio.unlinked_item ORDER BY discovered_at DESC`)
+
+	if total == 0 {
+		return ""
+	}
+	return "## 🧭 Zuordnung (ADR-0011)\n\n" + sb.String()
 }
 
 type DiagnosedCard struct {

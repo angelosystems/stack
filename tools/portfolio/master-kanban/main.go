@@ -593,11 +593,27 @@ func cmdMove() *cobra.Command {
 
 func cmdLink() *cobra.Command {
 	return &cobra.Command{
-		Use:   "link <id> <kind> <ref>",
-		Short: "Backend-ref linken (kind: bead|vk_workspace|github_pr|plan_file)",
+		Use:   "link <id-oder-slug> <kind> <ref>",
+		Short: "Backend-ref linken (kind: bead|vk_workspace|github_pr|plan_file); löst plan_item-Slugs auf",
 		Args:  cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
+			// Slug-Auflösung (ADR-0011 / Eingangs-Gate W4): Aufrufer dürfen
+			// den plan_item-Slug statt der Initiative-ID übergeben.
+			var exists bool
+			_ = p.QueryRow(context.Background(),
+				`SELECT true FROM portfolio.initiative WHERE id=$1`, args[0]).Scan(&exists)
+			if !exists {
+				var resolved string
+				_ = p.QueryRow(context.Background(),
+					`SELECT initiative_id FROM portfolio.plan_item WHERE slug=$1 OR id=$1 LIMIT 1`,
+					args[0]).Scan(&resolved)
+				if resolved == "" {
+					return fmt.Errorf("keine Initiative und kein plan_item-Slug %q — Karte zuerst anlegen (PRD nach docs/plans) oder ID via 'master-kanban list' prüfen", args[0])
+				}
+				fmt.Printf("· Slug %s → Initiative %s\n", args[0], resolved)
+				args[0] = resolved
+			}
 			_, err := p.Exec(context.Background(),
 				`INSERT INTO portfolio.initiative_link (initiative_id, kind, ref) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
 				args[0], args[1], args[2])
