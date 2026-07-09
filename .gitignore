@@ -43,6 +43,12 @@ tools/portfolio/adapters/coder/coder
 tools/portfolio/adapters/planfile/planfile
 tools/portfolio/adapters/solartown/solartown
 tools/portfolio/adapters/vibekanban/vibekanban
+!tools/deploy/
+!tools/deploy/**
+# deploy tool binary — built locally on werkstatt, never committed (same rule as
+# the portfolio binaries above: a committed binary dirties the tree on rebuild
+# and blocks the Merger push).
+tools/deploy/deploy
 !tools/master-kanban/
 !tools/master-kanban/**
 !tools/secrets-broker/

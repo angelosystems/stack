@@ -1,0 +1,22 @@
+# promote-manifest.yaml — app → Prod-Rezept fürs Promotion-Gate
+# (`deploy promote <app>`, sa-deploy-stufen W3). Live-Kopie: /etc/sa-deploy/
+# promote-manifest.yaml (root-only). Analog zum sa-staging-Manifest, aber
+# prod-spezifisch: eigene Box, eigene Unit, eigener localhost-only Port.
+#
+# repo  = git-Wurzel, in der die Merge-SHA liegt. DIESELBE Quelle wie Staging
+#         (der Merger-Bare-Mirror), damit exakt die auf Staging bewiesene SHA
+#         nach Prod geht — nicht HEAD, nicht ein Rebuild aus einem anderen Baum.
+repo: /opt/solartown/stayawesomeOS/rig-mirror.git
+
+services:
+  # staging-canary — die Beweis-Lane (KEIN Geschäftsdienst). Auf Prod läuft sie
+  # als klar benannte, localhost-only Unit sa-canary (Port 127.0.0.1:8092), kein
+  # Vhost, keine DNS/nginx/IdP-Berührung. Der Ledger-Service-Name bleibt
+  # 'staging-canary' — Staging- und Prod-Zeile teilen ihn, unterschieden durch
+  # environment (staging|prod).
+  staging-canary:
+    src: apps/staging-canary          # Go-Paket im Repo (deploy-gt.sh --src)
+    bin: /opt/sa-canary/sa-canary     # Ziel-Binary auf der Prod-Box
+    unit: sa-canary.service           # systemd-Unit auf Prod (muss existieren)
+    box: stayawesome-prod             # Box-NAME aus deploy.json (→ ssh-Host aufgelöst)
+    smoke: /opt/sa-deploy/sa-canary-prod-smoke.sh  # cli-Wrapper: gibt den /version-Vertrag der laufenden Prod-Unit aus

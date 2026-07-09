@@ -1,0 +1,8 @@
+{
+  "composeDir": "/opt/stack/deploys",
+  "boxes": {
+    "staging":          { "host": "root@167.233.82.201", "context": "staging" },
+    "stayawesome-prod": { "host": "root@178.105.36.33",  "context": "stayawesome-prod" },
+    "mario-prod":       { "host": "root@46.225.178.173", "context": "mario-prod" }
+  }
+}
