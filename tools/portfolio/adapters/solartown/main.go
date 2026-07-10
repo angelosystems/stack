@@ -706,7 +706,8 @@ func getFirmaForRig(prefix string) string {
 	case "sa", "so":
 		return "stayawesome"
 	case "st", "tr":
-		return "solartown"
+		// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+		return "code-factory"
 	case "qu":
 		return "quantbot"
 	case "mb":
@@ -714,9 +715,11 @@ func getFirmaForRig(prefix string) string {
 	case "ag", "cl":
 		return "angeloos"
 	case "sk":
-		return "stack"
+		// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+		return "code-factory"
 	default:
-		return "solartown"
+		// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+		return "code-factory"
 	}
 }
 

@@ -123,6 +123,16 @@ SELECT 'events auf alte ids'      AS check, count(*) FROM portfolio.initiative_e
  WHERE initiative_id IN ('sa-sa-deploy-stufen','sa-sa-deployment-platform','sa-sa-mews-finance-reporting','st-angelo-vk-bridge','mb-master-kanban-build');
 
 -- ── Panel-Minor (Newman): tier-Enum kanonisch in der DB verankern ────────
-ALTER TABLE portfolio.initiative
-  ADD CONSTRAINT initiative_tier_check
-  CHECK (tier IS NULL OR tier IN ('library','code-fabrik','product'));
+-- Idempotenz-Guard (PRD master-kanban-firma-code-factory): Zweitlauf = no-op.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'initiative_tier_check'
+       AND conrelid = 'portfolio.initiative'::regclass
+  ) THEN
+    ALTER TABLE portfolio.initiative
+      ADD CONSTRAINT initiative_tier_check
+      CHECK (tier IS NULL OR tier IN ('library','code-fabrik','product'));
+  END IF;
+END $$;

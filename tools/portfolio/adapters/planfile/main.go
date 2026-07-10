@@ -70,6 +70,8 @@ func emitTown(kind string, payload map[string]any) {
 var firmaPrefix = map[string]string{
 	"stayawesome": "sa", "quantbot": "qb", "solartown": "st",
 	"mariobrain": "mb", "angeloos": "ag", "stack": "sk",
+	// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+	"code-factory": "cf",
 }
 
 // Eingangs-Gate (master-kanban-eingangs-gate-prd): Repo-Default-tier,
@@ -77,6 +79,8 @@ var firmaPrefix = map[string]string{
 var firmaDefaultTier = map[string]string{
 	"stayawesome": "product", "quantbot": "product", "mariobrain": "product",
 	"angeloos": "product", "solartown": "code-fabrik", "stack": "code-fabrik",
+	// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+	"code-factory": "code-fabrik",
 }
 
 var validTiers = map[string]bool{"library": true, "code-fabrik": true, "product": true}
@@ -226,6 +230,13 @@ func parseRepos(spec string) ([]repo, error) {
 		}
 		if firmaPrefix[firma] == "" {
 			return nil, fmt.Errorf("ungültiger Eintrag %q (firma ∈ sa/qb/st/mb/ag/sk-Familie)", part)
+		}
+		// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+		// Auch mit alter Unit-Env (PLANFILE_REPOS=...=solartown) stempelt der
+		// Adapter schon code-factory; ID-Präfix wird dadurch cf-.
+		if firma == "solartown" || firma == "stack" {
+			fmt.Fprintf(os.Stderr, "  ↻ firma-Alias %q -> code-factory (%s)\n", firma, kv[0])
+			firma = "code-factory"
 		}
 		out = append(out, repo{root: kv[0], firma: firma, tier: tier})
 	}

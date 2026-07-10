@@ -431,6 +431,8 @@ func checkAuth(r *http.Request) bool {
 var firmaPrefix = map[string]string{
 	"stayawesome": "sa", "solartown": "st", "quantbot": "qb",
 	"mariobrain": "mb", "stack": "sk", "angeloos": "ag",
+	// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+	"code-factory": "cf",
 }
 
 func slugify(s string) string {
@@ -2034,19 +2036,24 @@ func cmdServe() *cobra.Command {
 							case "sa":
 								firma = "stayawesome"
 							case "st":
-								firma = "solartown"
+								// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+								firma = "code-factory"
 							case "qb":
 								firma = "quantbot"
 							case "mb":
 								firma = "mariobrain"
-							case "ag", "sk":
+							case "sk":
+								// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+								firma = "code-factory"
+							case "ag":
 								firma = "stack"
 							default:
 								switch item.Rig {
 								case "stayawesomeOS":
 									firma = "stayawesome"
 								case "testrig":
-									firma = "solartown"
+									// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+									firma = "code-factory"
 								case "quantumshift":
 									firma = "quantbot"
 								case "mariobrain":
@@ -2297,11 +2304,13 @@ func cmdServe() *cobra.Command {
 
 				firmaRig := map[string]string{
 					"stayawesome": "stayawesomeOS",
-					"solartown":   "testrig",
-					"quantbot":    "quantumshift",
-					"stack":       "stack",
-					"angeloos":    "clean",
-					"mariobrain":  "mariobrain",
+					// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+					"code-factory": "testrig",
+					"solartown":    "testrig",
+					"quantbot":     "quantumshift",
+					"stack":        "stack",
+					"angeloos":     "clean",
+					"mariobrain":   "mariobrain",
 				}
 
 				type capData struct {
@@ -2629,7 +2638,7 @@ func cmdServe() *cobra.Command {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 
 				limits := map[string]map[string]int{}
-				firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
+				firmas := []string{"stayawesome", "code-factory", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
 				for _, f := range firmas {
 					nowLim, soonLim := getWIPLimits(f)
 					limits[f] = map[string]int{
@@ -2646,7 +2655,7 @@ func cmdServe() *cobra.Command {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 
 				thresholds := map[string]map[string]string{}
-				firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
+				firmas := []string{"stayawesome", "code-factory", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
 				stages := []string{"now", "soon", "idea", "watching", "done"}
 				for _, f := range firmas {
 					thresholds[f] = map[string]string{}
@@ -3521,7 +3530,7 @@ func cmdServe() *cobra.Command {
 			})
 
 			// Bootup Catchup — both Pull-Regel and Proposal-Agent
-			firmas := []string{"stayawesome", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
+			firmas := []string{"stayawesome", "code-factory", "solartown", "quantbot", "mariobrain", "stack", "angeloos"}
 			for _, f := range firmas {
 				go checkAndPull(context.Background(), p, f)
 			}
@@ -3635,10 +3644,13 @@ func escape(s string) string { return strings.ReplaceAll(s, `"`, `\"`) }
 var rigTownMap = map[string]string{
 	"stayawesome": "/root/stayawesomeOS",
 	"quantbot":    "/opt/quantbot",
-	"solartown":   "/root/solartown",
-	"mariobrain":  "/root/mario-brain",
-	"angeloos":    "/opt/stack",
-	"stack":       "/opt/stack",
+	// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang).
+	// Repo-Root bleibt verhaltensgleich /root/solartown; per-software-Dispatch-Feinschnitt = Folge-Schritt.
+	"code-factory": "/root/solartown",
+	"solartown":    "/root/solartown",
+	"mariobrain":   "/root/mario-brain",
+	"angeloos":     "/opt/stack",
+	"stack":        "/opt/stack",
 }
 
 // getReposMap returns:
@@ -4039,6 +4051,12 @@ TBD
 
 func normalizeFirma(f string) string {
 	f = strings.ToLower(strings.TrimSpace(f))
+	// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+	// Alter firma-Wert UND altes Präfix werden auf code-factory normalisiert.
+	switch f {
+	case "solartown", "stack", "st", "sk":
+		return "code-factory"
+	}
 	if _, ok := firmaPrefix[f]; ok {
 		return f
 	}
@@ -4059,6 +4077,10 @@ func guessFirmaFromCWD() string {
 	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") || strings.Contains(cwd, "/opt/stack") {
 		return "stack"
 	}
+	// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+	if strings.Contains(cwd, "master-kanban") || strings.Contains(cwd, "code-factory") {
+		return "code-factory"
+	}
 	if strings.Contains(cwd, "stayawesome") {
 		return "stayawesome"
 	}
@@ -4066,7 +4088,8 @@ func guessFirmaFromCWD() string {
 		return "quantbot"
 	}
 	if strings.Contains(cwd, "solartown") {
-		return "solartown"
+		// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+		return "code-factory"
 	}
 	if strings.Contains(cwd, "mariobrain") {
 		return "mariobrain"
@@ -4127,7 +4150,8 @@ func captureEvent(ctx context.Context, p *pgxpool.Pool, text string, firma strin
 			targetFirma = normalizeFirma(guessFirmaFromCWD())
 		}
 		if targetFirma == "" {
-			targetFirma = "solartown" // default fallback
+			// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+			targetFirma = "code-factory" // default fallback
 		}
 
 		// Standard catch-all ID for the given firma prefix

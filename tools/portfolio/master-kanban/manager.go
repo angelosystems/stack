@@ -855,10 +855,12 @@ func GetPromoteTargetStage(ctx context.Context, p *pgxpool.Pool, sp *pgxpool.Poo
 		firmaRig := map[string]string{
 			"stayawesome": "stayawesomeOS",
 			"solartown":   "testrig",
-			"quantbot":    "quantumshift",
-			"stack":       "stack",
-			"angeloos":    "clean",
-			"mariobrain":  "mariobrain",
+			// firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+			"code-factory": "testrig",
+			"quantbot":     "quantumshift",
+			"stack":        "stack",
+			"angeloos":     "clean",
+			"mariobrain":   "mariobrain",
 		}
 		rig := firmaRig[firma]
 		if rig != "" {

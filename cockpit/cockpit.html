@@ -9,7 +9,8 @@
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
   .lane-stripe-stayawesome { border-left: 4px solid #06b6d4; }
-  .lane-stripe-solartown   { border-left: 4px solid #f59e0b; }
+  /* firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang) */
+  .lane-stripe-code-factory { border-left: 4px solid #f59e0b; }
   .lane-stripe-quantbot    { border-left: 4px solid #10b981; }
   .lane-stripe-mariobrain  { border-left: 4px solid #8b5cf6; }
   .lane-stripe-angeloos    { border-left: 4px solid #64748b; }
@@ -642,13 +643,14 @@ function liveKanban() {
     ],
     firmas: [
       { id: 'stayawesome', label: 'Stay Awesome', icon: '🏨', wip: 4 },
-      { id: 'solartown',   label: 'Solartown',    icon: '⚡', wip: 6 },
+      { id: 'code-factory', label: 'Code Factory', icon: '⚡', wip: 6 },
       { id: 'quantbot',    label: 'QuantBot',     icon: '💰', wip: 4 },
       { id: 'mariobrain',  label: 'mario-brain',  icon: '🧠', wip: 4 },
       { id: 'stack',       label: 'Stack (Plattform)', icon: '🧱', wip: 4 },
       { id: 'angeloos',    label: 'AngeloOS',     icon: '⚙',  wip: 4 },
     ],
-    prefixFirma: { sa: 'stayawesome', st: 'solartown', qb: 'quantbot', mb: 'mariobrain', ag: 'stack', sk: 'stack' },
+    // firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+    prefixFirma: { sa: 'stayawesome', st: 'code-factory', qb: 'quantbot', mb: 'mariobrain', ag: 'stack', sk: 'code-factory' },
     ghRepos: {
       '/root/solartown': 'angelosystems/solartown',
       '/opt/quantbot': 'angelosystems/quantbot',
@@ -665,7 +667,8 @@ function liveKanban() {
       { id: 'in-progress', label: 'In Progress' },
       { id: 'done',        label: 'Done' },
     ],
-    filter: { stayawesome: true, solartown: true, quantbot: true, mariobrain: true, angeloos: true, stack: true },
+    // firma-Alias solartown/stack -> code-factory (PRD master-kanban-firma-code-factory, Uebergang)
+    filter: { stayawesome: true, 'code-factory': true, quantbot: true, mariobrain: true, angeloos: true, stack: true },
     softwareFilter: '',
     tierFilter: '',
     tiers: [
