@@ -76,6 +76,37 @@ func TestDecideRollback(t *testing.T) {
 	}
 }
 
+// TestEnvEligible — der Stufen-Scope-Filter (sa-deploy-stufen W2). Der prod-
+// Reaktor läuft mit environment='prod-mvp' und darf NUR Fabrik-Prod-Zeilen
+// (master-kanban/…-adapter) ziehen; der sa-staging-drain mit 'staging' nur die
+// SA-Staging-Zeilen. Leerer Scope = alle Stufen (rückwärtskompatibel, altes
+// Verhalten). Ohne diesen Filter griff der ungescopte prod-Reaktor die staging-
+// Outbox-Zeilen und errorte sie ("kein Rezept") — der wiederkehrende
+// Kollisions-Befund (3× notiert). Dieser Test friert die Scope-Semantik ein.
+func TestEnvEligible(t *testing.T) {
+	cases := []struct {
+		name               string
+		reactorEnv, rowEnv string
+		want               bool
+	}{
+		{"leerer Scope zieht prod-mvp (rückwärtskompatibel)", "", "prod-mvp", true},
+		{"leerer Scope zieht staging (rückwärtskompatibel)", "", "staging", true},
+		{"prod-mvp zieht prod-mvp", "prod-mvp", "prod-mvp", true},
+		{"prod-mvp lässt staging liegen (Kollisions-Fix)", "prod-mvp", "staging", false},
+		{"prod-mvp lässt prod/promote liegen", "prod-mvp", "prod", false},
+		{"staging zieht staging", "staging", "staging", true},
+		{"staging lässt prod-mvp liegen", "staging", "prod-mvp", false},
+		{"staging lässt prod/promote liegen", "staging", "prod", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := envEligible(tc.reactorEnv, tc.rowEnv); got != tc.want {
+				t.Fatalf("envEligible(%q, %q) = %v, will %v", tc.reactorEnv, tc.rowEnv, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBreakerOpens(t *testing.T) {
 	if breakerOpens(2, 3) {
 		t.Fatal("2 < 3 darf den Breaker nicht öffnen")
