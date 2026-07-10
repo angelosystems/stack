@@ -132,3 +132,51 @@ services:
 		t.Fatal("Manifest ohne repo MUSS ein Fehler sein")
 	}
 }
+
+// TestPromoteInvocation — die go|node-Weiche des Promote-Gates (sa-deploy-stufen
+// W4): go→deploy-gt.sh --bin, node→deploy-node.sh --dest (+ --build-cmd).
+func TestPromoteInvocation(t *testing.T) {
+	const gt, nd, repo, ssh = "/x/deploy-gt.sh", "/x/deploy-node.sh", "/opt/mirror.git", "root@prod"
+
+	goRec := promoteRecipe{Src: "apps/staging-canary", Bin: "/opt/sa-canary/sa-canary", Unit: "sa-canary.service", Box: "stayawesome-prod"}
+	s, a := promoteInvocation(goRec, gt, nd, repo, ssh, "staging-canary", "abc123")
+	if s != gt {
+		t.Fatalf("go script=%q, want %q", s, gt)
+	}
+	if !pcHasPair(a, "--bin", "/opt/sa-canary/sa-canary") || pcHasFlag(a, "--dest") {
+		t.Fatalf("go args falsch: %v", a)
+	}
+
+	ndRec := promoteRecipe{Type: "node", Src: "apps/fin", Bin: "/opt/sa-fin", Unit: "sa-fin.service", Box: "stayawesome-prod",
+		BuildCmd: "pnpm install --frozen-lockfile && pnpm run build"}
+	s, a = promoteInvocation(ndRec, gt, nd, repo, ssh, "sa-fin", "deadbeef")
+	if s != nd {
+		t.Fatalf("node script=%q, want %q", s, nd)
+	}
+	if pcHasFlag(a, "--bin") || !pcHasPair(a, "--dest", "/opt/sa-fin") {
+		t.Fatalf("node args falsch: %v", a)
+	}
+	if !pcHasPair(a, "--build-cmd", "pnpm install --frozen-lockfile && pnpm run build") {
+		t.Fatalf("node --build-cmd fehlt: %v", a)
+	}
+	if !pcHasPair(a, "--unit", "sa-fin.service") || !pcHasPair(a, "--box", ssh) || !pcHasPair(a, "--ref", "deadbeef") {
+		t.Fatalf("node args unvollständig: %v", a)
+	}
+}
+
+func pcHasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+func pcHasPair(args []string, flag, val string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == val {
+			return true
+		}
+	}
+	return false
+}

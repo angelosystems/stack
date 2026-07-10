@@ -37,13 +37,31 @@ import (
 // ServiceRecipe sagt dem Reaktor, WIE ein Service gebaut und gesmoked wird.
 // Die Outbox-Zeile trägt nur service/env/sha — das Rezept liefert den Rest.
 type ServiceRecipe struct {
-	Src       string `yaml:"src"`        // Go-Paket-Relpfad im Repo (deploy-gt.sh --src)
-	Bin       string `yaml:"bin"`        // Ziel-Binary, absoluter Pfad (--bin); bei box: Pfad auf der Ziel-Box
+	Type      string `yaml:"type"`       // 'go' (Default) | 'node' — wählt deploy-gt.sh vs. deploy-node.sh (sa-deploy-stufen W4)
+	Src       string `yaml:"src"`        // App-Relpfad im Repo (--src): go=Go-Paket, node=App-Dir
+	Bin       string `yaml:"bin"`        // Ziel-PFAD auf der Box: go=Binary (--bin), node=Deploy-Wurzel (--dest)
 	Unit      string `yaml:"unit"`       // systemd-Unit; leer = cli-Service ohne Restart
-	Box       string `yaml:"box"`        // ssh-Ziel (deploy-gt.sh --box); leer = lokaler Deploy (sa-deploy-stufen W2)
+	Box       string `yaml:"box"`        // ssh-Ziel (--box); leer = lokaler Deploy (sa-deploy-stufen W2)
+	BuildCmd  string `yaml:"build_cmd"`  // node: Build-Kommando (deploy-node.sh --build-cmd); leer = dessen Default
 	ProbeKind string `yaml:"probe_kind"` // 'http' | 'cli' (D18)
 	HealthURL string `yaml:"health_url"` // http: /version-URL · cli: absoluter Binary-/Wrapper-Pfad
 	SmokeURL  string `yaml:"smoke_url"`  // http: eine echte Business-Route (2xx erwartet, D18)
+}
+
+// recipeType normalisiert das Rezept-Feld ("" → "go", rückwärtskompatibel).
+func recipeType(rec ServiceRecipe) string {
+	if strings.ToLower(strings.TrimSpace(rec.Type)) == "node" {
+		return "node"
+	}
+	return "go"
+}
+
+// deployMethod ist der Ledger-Stempel (deploy_method) je Rezept-Typ.
+func deployMethod(rec ServiceRecipe) string {
+	if recipeType(rec) == "node" {
+		return "deploy-node"
+	}
+	return "deploy-gt"
 }
 
 type reactorManifest struct {
@@ -144,7 +162,8 @@ func breakerOpens(consecutiveReds, k int) bool { return consecutiveReds >= k }
 type reactor struct {
 	pool        *pgxpool.Pool
 	man         *reactorManifest
-	scriptPath  string
+	scriptPath  string // deploy-gt.sh (Go-Binary-Swap)
+	nodeScript  string // deploy-node.sh (Bundle-Deploy, sa-deploy-stufen W4)
 	owner       string
 	environment string // "" = alle Stufen draina; sonst nur diese (sa-deploy-stufen W2)
 	lease       time.Duration
@@ -281,10 +300,10 @@ func (r *reactor) processOne(ctx context.Context, o outboxRow) bool {
 	until := time.Now().Add(r.lease)
 	ct, err := r.pool.Exec(ctx, `UPDATE portfolio.deployments
 	     SET status='deploying', owned_by=$2, owned_until=$3, version=$4,
-	         probe_kind=$5, health_url=$6, deploy_method='deploy-gt',
+	         probe_kind=$5, health_url=$6, deploy_method=$8,
 	         deployed_by=$2, prev_version=NULLIF($7,'')
 	     WHERE id=$1 AND status='pending'`,
-		o.ID, r.owner, until, o.GitSha, rec.ProbeKind, rec.HealthURL, prevVer)
+		o.ID, r.owner, until, o.GitSha, rec.ProbeKind, rec.HealthURL, prevVer, deployMethod(rec))
 	if err != nil || ct.RowsAffected() != 1 {
 		r.logf("· %s@%s: Claim übersprungen (schon übernommen?) %v", o.Service, tag, err)
 		return false
@@ -331,21 +350,46 @@ func (r *reactor) rollback(ctx context.Context, o outboxRow, rec ServiceRecipe, 
 	return true
 }
 
-// deploy ruft ../deploy-gt.sh SHA-gepinnt. --unit leer = cli-Service.
-func (r *reactor) deploy(ctx context.Context, rec ServiceRecipe, service, ref string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, r.smokeDue+2*time.Minute)
-	defer cancel()
-	args := []string{"--ref", ref, "--service", service, "--src", rec.Src,
-		"--bin", rec.Bin, "--repo", r.man.Repo, "--json"}
+// deployInvocation baut (script, args) für einen Deploy — pure Funktion, damit
+// die Rezept-Typ-Weiche (go|node) testbar ist, ohne ein Skript auszuführen.
+// go: deploy-gt.sh --bin <binary>. node: deploy-node.sh --dest <deploy-wurzel>
+// (+ optional --build-cmd). --unit/--box werden für beide gleich angehängt.
+func deployInvocation(rec ServiceRecipe, gtScript, nodeScript, repo, service, ref string) (string, []string) {
+	var script string
+	var args []string
+	if recipeType(rec) == "node" {
+		script = nodeScript
+		args = []string{"--ref", ref, "--service", service, "--src", rec.Src,
+			"--dest", rec.Bin, "--repo", repo, "--json"}
+		if rec.BuildCmd != "" {
+			args = append(args, "--build-cmd", rec.BuildCmd)
+		}
+	} else {
+		script = gtScript
+		args = []string{"--ref", ref, "--service", service, "--src", rec.Src,
+			"--bin", rec.Bin, "--repo", repo, "--json"}
+	}
 	if rec.Unit != "" {
 		args = append(args, "--unit", rec.Unit)
 	}
-	// Remote-Deploy (sa-deploy-stufen W2): deploy-gt.sh baut lokal SHA-gepinnt
-	// und shippt/swappt/restartet per ssh auf die Ziel-Box. Leer = lokal.
+	// Remote-Deploy (sa-deploy-stufen W2): baut lokal SHA-gepinnt und
+	// shippt/swappt/restartet per ssh auf die Ziel-Box. Leer = lokal.
 	if rec.Box != "" {
 		args = append(args, "--box", rec.Box)
 	}
-	out, err := exec.CommandContext(ctx, r.scriptPath, args...).CombinedOutput()
+	return script, args
+}
+
+// deploy ruft SHA-gepinnt die passenden „Hände": deploy-gt.sh (Go-Binary-Swap)
+// oder deploy-node.sh (Bundle-Deploy, sa-deploy-stufen W4). --unit leer =
+// cli-Service. Der Rollback-Pfad (rec + prevSha) landet ebenfalls hier — für
+// node baut deploy-node.sh dann NICHT neu, sondern flippt das schon vorhandene
+// prev-Release (Marker .deploy-ok), also derselbe SHA-gepinnte Rückweg.
+func (r *reactor) deploy(ctx context.Context, rec ServiceRecipe, service, ref string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.smokeDue+2*time.Minute)
+	defer cancel()
+	script, args := deployInvocation(rec, r.scriptPath, r.nodeScript, r.man.Repo, service, ref)
+	out, err := exec.CommandContext(ctx, script, args...).CombinedOutput()
 	return string(out), err
 }
 
@@ -447,12 +491,27 @@ func defaultScriptPath() string {
 	return "/opt/stack/tools/portfolio/deploy-gt.sh"
 }
 
+// defaultNodeScriptPath sucht deploy-node.sh neben dem Binary bzw. im Repo
+// (sa-deploy-stufen W4, analog zu defaultScriptPath).
+func defaultNodeScriptPath() string {
+	if p := envOr("DEPLOY_NODE_SH", ""); p != "" {
+		return p
+	}
+	if exe, err := os.Executable(); err == nil {
+		cand := filepath.Join(filepath.Dir(exe), "deploy-node.sh")
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+	return "/opt/stack/tools/portfolio/deploy-node.sh"
+}
+
 // cmdDeployReactorOutbox — der Outbox-konsumierende Deploy-Reaktor (WP5).
 // --once ist der beaufsichtigte Einzel-Drain (D8, MVP-Beweispfad). --loop ist
 // das kontinuierliche Re-Arm (WP7) — die zugehörige Unit bleibt disabled, bis
 // HAUPT sie hinter dem Test-Gate scharfschaltet.
 func cmdDeployReactorOutbox() *cobra.Command {
-	var manifestPath, scriptPath, stateDir, eventsDir, environment string
+	var manifestPath, scriptPath, nodeScript, stateDir, eventsDir, environment string
 	var once, loop bool
 	var interval, lease, smokeDue, probeTO, smokeSleep time.Duration
 	var maxSmoke, breakerK int
@@ -478,7 +537,7 @@ func cmdDeployReactorOutbox() *cobra.Command {
 			}
 			r := &reactor{
 				pool: connect(), man: man,
-				scriptPath: scriptPath, owner: owner, environment: environment,
+				scriptPath: scriptPath, nodeScript: nodeScript, owner: owner, environment: environment,
 				lease: lease, maxSmoke: maxSmoke, smokeSleep: smokeSleep,
 				smokeDue: smokeDue, probeTO: probeTO, breakerK: breakerK,
 				stateDir: stateDir, eventsDir: eventsDir,
@@ -507,7 +566,8 @@ func cmdDeployReactorOutbox() *cobra.Command {
 	}
 	c.Flags().StringVar(&manifestPath, "manifest", envOr("DEPLOY_REACTOR_MANIFEST", "/opt/stack/deploy-reactor-manifest.yaml"), "Service-Rezepte (YAML)")
 	c.Flags().StringVar(&environment, "environment", envOr("DEPLOY_REACTOR_ENV", ""), "nur diese Ledger-Stufe draina (leer=alle; sa-deploy-stufen W2: 'staging' bzw. 'prod-mvp')")
-	c.Flags().StringVar(&scriptPath, "script", defaultScriptPath(), "Pfad zu deploy-gt.sh")
+	c.Flags().StringVar(&scriptPath, "script", defaultScriptPath(), "Pfad zu deploy-gt.sh (Go-Binary-Swap)")
+	c.Flags().StringVar(&nodeScript, "node-script", defaultNodeScriptPath(), "Pfad zu deploy-node.sh (Bundle-Deploy, sa-deploy-stufen W4)")
 	c.Flags().StringVar(&stateDir, "state-dir", envOr("DEPLOY_STATE_DIR", "/opt/stack/var/deploy-reactor"), "Circuit-Breaker-Marker")
 	c.Flags().StringVar(&eventsDir, "events-dir", envOr("DEPLOY_EVENTS_DIR", "/opt/solartown/events/refinery"), "durable Eskalations-Artefakte (D20c)")
 	c.Flags().BoolVar(&once, "once", false, "ein beaufsichtigter Drain, dann Ende (D8)")
