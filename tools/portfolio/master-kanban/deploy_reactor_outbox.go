@@ -157,6 +157,20 @@ func decideRollback(prevSha string) rollbackAction {
 // der WP7-Burn-Ratio. Danach kein Auto-Deploy bis manueller Reset.
 func breakerOpens(consecutiveReds, k int) bool { return consecutiveReds >= k }
 
+// envEligible: darf ein Reaktor mit Stufen-Scope reactorEnv diese Outbox-Zeile
+// (Stufe rowEnv) überhaupt anfassen? Leerer Scope = alle Stufen (rückwärts-
+// kompatibel); sonst NUR die eigene (sa-deploy-stufen W2: prod-Reaktor zieht
+// 'prod-mvp', sa-staging-drain 'staging'). Poka-yoke-Zwilling zum SQL-Filter
+// ($1='' OR environment=$1) in runOnce/reclaimStranded: die SELECT-Query
+// schließt Fremd-Stufen schon in der DB aus — dieser Guard in der Drain-Schleife
+// ist der Gürtel dazu. Selbst wenn je eine Fremd-Zeile durchrutschte (manueller
+// Insert, Query-Drift), fasst der prod-Reaktor keine staging-Zeile an und
+// umgekehrt — genau der wiederkehrende Kollisions-Befund (W1/W2/W4), bei dem der
+// ungescopte prod-Reaktor staging-Zeilen als "kein Rezept" errorte.
+func envEligible(reactorEnv, rowEnv string) bool {
+	return reactorEnv == "" || rowEnv == reactorEnv
+}
+
 // ── Reaktor (Orchestrierung; injizierbare Kanten für Tests) ──────────────────
 
 type reactor struct {
@@ -244,6 +258,13 @@ func (r *reactor) runOnce(ctx context.Context) error {
 
 	consecReds := 0
 	for _, o := range pend {
+		// Stufen-Scope-Gürtel (sa-deploy-stufen W2): der SQL-WHERE oben schließt
+		// Fremd-Stufen bereits aus; dieser Guard ist die Poka-yoke-Redundanz, damit
+		// ein gescopter Reaktor NIE eine Zeile einer fremden Stufe anfasst (s.
+		// envEligible — behebt den Kollisions-Befund strukturell, nicht nur per Query).
+		if !envEligible(r.environment, o.Environment) {
+			continue
+		}
 		switch decideClaim(o.Status, r.breakerIsOpen()) {
 		case actSkipBreaker:
 			r.logf("· %s@%s [%s] Breaker offen — übersprungen", o.Service, o.Environment, o.GitSha[:min(7, len(o.GitSha))])
