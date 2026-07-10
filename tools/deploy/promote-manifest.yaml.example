@@ -1,22 +1,72 @@
 # promote-manifest.yaml — app → Prod-Rezept fürs Promotion-Gate
-# (`deploy promote <app>`, sa-deploy-stufen W3). Live-Kopie: /etc/sa-deploy/
+# (`deploy promote <app>`, sa-deploy-stufen W3/W4). Live-Kopie: /etc/sa-deploy/
 # promote-manifest.yaml (root-only). Analog zum sa-staging-Manifest, aber
 # prod-spezifisch: eigene Box, eigene Unit, eigener localhost-only Port.
 #
 # repo  = git-Wurzel, in der die Merge-SHA liegt. DIESELBE Quelle wie Staging
 #         (der Merger-Bare-Mirror), damit exakt die auf Staging bewiesene SHA
 #         nach Prod geht — nicht HEAD, nicht ein Rebuild aus einem anderen Baum.
+#
+# type  = 'go' (Default) | 'node'  (sa-deploy-stufen W4):
+#         go   → deploy-gt.sh   (Ein-Binary-Swap; bin = Ziel-Binary)
+#         node → deploy-node.sh (Bundle-Deploy; bin = Deploy-Wurzel <dest>,
+#                enthält releases/current/prev; build_cmd optional)
 repo: /opt/solartown/stayawesomeOS/rig-mirror.git
 
 services:
-  # staging-canary — die Beweis-Lane (KEIN Geschäftsdienst). Auf Prod läuft sie
-  # als klar benannte, localhost-only Unit sa-canary (Port 127.0.0.1:8092), kein
+  # staging-canary — die Go-Beweis-Lane (KEIN Geschäftsdienst). Auf Prod läuft
+  # sie als klar benannte, localhost-only Unit sa-canary (127.0.0.1:8092), kein
   # Vhost, keine DNS/nginx/IdP-Berührung. Der Ledger-Service-Name bleibt
   # 'staging-canary' — Staging- und Prod-Zeile teilen ihn, unterschieden durch
   # environment (staging|prod).
   staging-canary:
+    type: go
     src: apps/staging-canary          # Go-Paket im Repo (deploy-gt.sh --src)
     bin: /opt/sa-canary/sa-canary     # Ziel-Binary auf der Prod-Box
     unit: sa-canary.service           # systemd-Unit auf Prod (muss existieren)
-    box: stayawesome-prod             # Box-NAME aus deploy.json (→ ssh-Host aufgelöst)
-    smoke: /opt/sa-deploy/sa-canary-prod-smoke.sh  # cli-Wrapper: gibt den /version-Vertrag der laufenden Prod-Unit aus
+    box: stayawesome-prod             # Box-NAME aus deploy.json (→ ssh-Host)
+    smoke: /opt/sa-deploy/sa-canary-prod-smoke.sh
+
+  # ── REALE APPS (sa-deploy-stufen W4 VORBEREITET, NICHT scharf) ──────────────
+  # Diese Rezepte sind das Prod-Deploy-Muster für die echten Kunden-Apps. Sie
+  # sind hier DOKUMENTIERT und in der Live-Kopie BEWUSST auskommentiert: eine
+  # reale Prod-Promotion ist Marios expliziter Approval-Klick pro App/SHA (genau
+  # dafür ist das Gate da). Scharf wird eine Zeile erst, wenn (a) die App über die
+  # Auto-Kette auf Staging deployt ist (Ledger env=staging live) UND (b) Mario je
+  # App/SHA freigibt.
+  #
+  # sa-fin — Next.js-Bundle (node). Prod-Unit sa-fin.service :1111 (bestehend).
+  # Vorbedingung: sa-fin muss zuerst über die Auto-Kette auf Staging laufen
+  # (Build-Env-Plumbing, s. W4-Delivery), damit eine echte staging-SHA im Ledger
+  # steht, die promotet werden kann.
+  # sa-fin:
+  #   type: node
+  #   src: apps/fin
+  #   bin: /opt/sa-fin                 # Deploy-Wurzel (releases/current/prev)
+  #   unit: sa-fin.service
+  #   box: stayawesome-prod
+  #   build_cmd: "pnpm install --frozen-lockfile && pnpm run build"
+  #   smoke: /opt/sa-deploy/sa-fin-prod-smoke.sh
+  #
+  # documenso — nativ (Remix, node build/server/main.js), Unit documenso.service
+  # :3500. Muss zuerst auf Staging aufgebaut werden (W4-Rest). Build-Cmd folgt
+  # dem documenso-Build (npm je nach Fork).
+  # documenso:
+  #   type: node
+  #   src: <repo-relpfad-der-documenso-source>
+  #   bin: /opt/documenso-native
+  #   unit: documenso.service
+  #   box: stayawesome-prod
+  #   build_cmd: "npm ci && npm run build"
+  #   smoke: /opt/sa-deploy/documenso-prod-smoke.sh
+  #
+  # inbox-zero — nativ (Next.js standalone), Units inbox-zero-web/-worker. Muss
+  # zuerst auf Staging aufgebaut werden (W4-Rest).
+  # inbox-zero:
+  #   type: node
+  #   src: <repo-relpfad-der-inbox-zero-source>
+  #   bin: /opt/inbox-zero
+  #   unit: inbox-zero-web.service
+  #   box: stayawesome-prod
+  #   build_cmd: "pnpm install --frozen-lockfile && pnpm run build"
+  #   smoke: /opt/sa-deploy/inbox-zero-prod-smoke.sh

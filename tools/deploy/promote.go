@@ -59,11 +59,42 @@ const (
 // Prod geht. Bewusst analog zur ServiceRecipe des Reaktors, aber prod-spezifisch
 // (eigene Box, eigene Unit, eigener localhost-only Port).
 type promoteRecipe struct {
-	Src   string `yaml:"src"`   // Go-Paket-Relpfad im Repo (deploy-gt.sh --src)
-	Bin   string `yaml:"bin"`   // Ziel-Binary auf der Prod-Box (absoluter Pfad)
-	Unit  string `yaml:"unit"`  // systemd-Unit auf Prod; leer = kein Restart
-	Box   string `yaml:"box"`   // Box-NAME aus deploy.json (wird zu ssh-Host aufgelöst)
-	Smoke string `yaml:"smoke"` // Prod-Smoke: absoluter Pfad eines cli-Wrappers, der den /version-Vertrag der laufenden Prod-Unit ausgibt
+	Type     string `yaml:"type"`      // 'go' (Default) | 'node' — deploy-gt.sh vs. deploy-node.sh (sa-deploy-stufen W4)
+	Src      string `yaml:"src"`       // App-Relpfad im Repo (--src): go=Go-Paket, node=App-Dir
+	Bin      string `yaml:"bin"`       // Ziel-PFAD auf der Prod-Box: go=Binary (--bin), node=Deploy-Wurzel (--dest)
+	Unit     string `yaml:"unit"`      // systemd-Unit auf Prod; leer = kein Restart
+	Box      string `yaml:"box"`       // Box-NAME aus deploy.json (wird zu ssh-Host aufgelöst)
+	BuildCmd string `yaml:"build_cmd"` // node: Build-Kommando (deploy-node.sh --build-cmd); leer = dessen Default
+	Smoke    string `yaml:"smoke"`     // Prod-Smoke: absoluter Pfad eines cli-Wrappers, der den /version-Vertrag der laufenden Prod-Unit ausgibt
+}
+
+// recipeIsNode normalisiert das Rezept-Feld ("" → go, rückwärtskompatibel).
+func recipeIsNode(rec promoteRecipe) bool {
+	return strings.ToLower(strings.TrimSpace(rec.Type)) == "node"
+}
+
+// promoteInvocation baut (script, args) für den Prod-Deploy — pure Funktion,
+// damit die go|node-Weiche testbar ist. go: deploy-gt.sh --bin <binary>.
+// node: deploy-node.sh --dest <deploy-wurzel> (+ optional --build-cmd).
+func promoteInvocation(rec promoteRecipe, deployGt, deployNode, repo, sshHost, app, sha string) (string, []string) {
+	var script string
+	var args []string
+	if recipeIsNode(rec) {
+		script = deployNode
+		args = []string{"--ref", sha, "--service", app, "--src", rec.Src,
+			"--dest", rec.Bin, "--repo", repo, "--box", sshHost}
+		if rec.BuildCmd != "" {
+			args = append(args, "--build-cmd", rec.BuildCmd)
+		}
+	} else {
+		script = deployGt
+		args = []string{"--ref", sha, "--service", app, "--src", rec.Src,
+			"--bin", rec.Bin, "--repo", repo, "--box", sshHost}
+	}
+	if rec.Unit != "" {
+		args = append(args, "--unit", rec.Unit)
+	}
+	return script, args
 }
 
 type promoteManifest struct {
@@ -238,7 +269,7 @@ func fail(code int, format string, a ...any) {
 }
 
 func promoteCmd() *cobra.Command {
-	var manifestPath, approvalDir, dsn, deployGt, actor string
+	var manifestPath, approvalDir, dsn, deployGt, deployNode, actor string
 	var dryRun bool
 
 	c := &cobra.Command{
@@ -321,29 +352,25 @@ func promoteCmd() *cobra.Command {
 				return nil
 			}
 
-			// ── Prod-Deploy: derselbe bewiesene Pfad wie der Reaktor ────────
+			// ── Prod-Deploy: derselbe bewiesene Pfad wie der Reaktor (go=deploy-gt.sh,
+			//    node=deploy-node.sh; sa-deploy-stufen W4) ────────────────────
 			prev := prevProdVersion(ctx, dsn, app)
-			gtArgs := []string{
-				"--ref", sha, "--service", app, "--src", rec.Src,
-				"--bin", rec.Bin, "--repo", m.Repo, "--box", sshHost,
-			}
-			if rec.Unit != "" {
-				gtArgs = append(gtArgs, "--unit", rec.Unit)
-			}
-			fmt.Printf("→ Prod-Deploy via %s %s\n", deployGt, strings.Join(gtArgs, " "))
-			dep := exec.CommandContext(ctx, deployGt, gtArgs...)
+			script, depArgs := promoteInvocation(rec, deployGt, deployNode, m.Repo, sshHost, app, sha)
+			fmt.Printf("→ Prod-Deploy via %s %s\n", script, strings.Join(depArgs, " "))
+			dep := exec.CommandContext(ctx, script, depArgs...)
 			dep.Stdout = os.Stdout
 			dep.Stderr = os.Stderr
 			if err := dep.Run(); err != nil {
-				fail(exDeployFailed, "deploy-gt.sh fehlgeschlagen (%v) — Prod ggf. unverändert; siehe Log oben.", err)
+				fail(exDeployFailed, "%s fehlgeschlagen (%v) — Prod ggf. unverändert; siehe Log oben.", filepath.Base(script), err)
 			}
 
 			// ── Prod-Smoke ──────────────────────────────────────────────────
 			sc, err := runProdSmoke(ctx, rec.Smoke, sha)
 			if err != nil {
-				// Best-effort Rollback: die .prev-Binary zurückswappen + restarten.
-				rollbackProd(ctx, sshHost, rec.Bin, rec.Unit)
-				fail(exSmokeFailed, "Prod-Smoke rot (%v) — Rollback auf .prev versucht, KEINE Ledger-live-Zeile geschrieben.", err)
+				// Best-effort Rollback: go=.prev-Binary zurückswappen; node=
+				// current-Symlink auf prev flippen (deploy-node.sh --rollback).
+				rollbackProd(ctx, deployNode, rec, sshHost)
+				fail(exSmokeFailed, "Prod-Smoke rot (%v) — Rollback versucht, KEINE Ledger-live-Zeile geschrieben.", err)
 			}
 			fmt.Printf("→ Prod-Smoke grün: %s meldet sha=%s env=%s\n", sc.Service, short(sc.Sha), sc.Env)
 
@@ -360,16 +387,33 @@ func promoteCmd() *cobra.Command {
 	c.Flags().StringVar(&manifestPath, "manifest", envOr("DEPLOY_PROMOTE_MANIFEST", "/etc/sa-deploy/promote-manifest.yaml"), "Promote-Manifest (app→Prod-Rezept)")
 	c.Flags().StringVar(&approvalDir, "approval-dir", envOr("DEPLOY_APPROVAL_DIR", "/etc/sa-deploy/approvals"), "Approval-Store (root-only)")
 	c.Flags().StringVar(&dsn, "ledger-dsn", envOr("PORTFOLIO_DSN", envOr("MERGER_LEDGER_PG_URI", "postgres://mario@127.0.0.1:5434/mario_brain?sslmode=disable")), "Release-Ledger DSN (:5434)")
-	c.Flags().StringVar(&deployGt, "deploy-gt", envOr("DEPLOY_GT_SH", "/opt/stack/tools/portfolio/deploy-gt.sh"), "Pfad zu deploy-gt.sh (die Deploy-Hände)")
+	c.Flags().StringVar(&deployGt, "deploy-gt", envOr("DEPLOY_GT_SH", "/opt/stack/tools/portfolio/deploy-gt.sh"), "Pfad zu deploy-gt.sh (Go-Binary-Swap)")
+	c.Flags().StringVar(&deployNode, "deploy-node", envOr("DEPLOY_NODE_SH", "/opt/stack/tools/portfolio/deploy-node.sh"), "Pfad zu deploy-node.sh (Bundle-Deploy, sa-deploy-stufen W4)")
 	hn, _ := os.Hostname()
 	c.Flags().StringVar(&actor, "actor", envOr("DEPLOY_ACTOR", "promote@"+hn), "deployed_by im Ledger")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "prüft beide Gates, deployt/smoked/schreibt aber nicht")
 	return c
 }
 
-// rollbackProd swappt die .prev-Binary zurück und restartet die Unit (best
-// effort — jeder Fehler wird nur gewarnt; der Aufrufer bricht ohnehin ab).
-func rollbackProd(ctx context.Context, sshHost, bin, unit string) {
+// rollbackProd stellt den vorigen Stand best-effort wieder her (jeder Fehler
+// wird nur gewarnt; der Aufrufer bricht ohnehin ab). go: die .prev-Binary
+// zurückswappen + Unit-Restart. node: deploy-node.sh --rollback (flippt den
+// current-Symlink auf prev + Restart) — die Bundle-Welt hat kein Ein-Binary.
+func rollbackProd(ctx context.Context, deployNode string, rec promoteRecipe, sshHost string) {
+	if recipeIsNode(rec) {
+		args := []string{"--rollback", "--service", "rollback", "--dest", rec.Bin, "--box", sshHost}
+		if rec.Unit != "" {
+			args = append(args, "--unit", rec.Unit)
+		}
+		rb := exec.CommandContext(ctx, deployNode, args...)
+		rb.Stdout = os.Stderr
+		rb.Stderr = os.Stderr
+		if err := rb.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "! node-Rollback (%s --rollback) ging nicht (%v) — Prod manuell prüfen!\n", filepath.Base(deployNode), err)
+		}
+		return
+	}
+	bin, unit := rec.Bin, rec.Unit
 	cmd := fmt.Sprintf("test -x '%s.prev' && mv -f '%s.prev' '%s'", bin, bin, bin)
 	if unit != "" {
 		cmd += fmt.Sprintf(" && systemctl restart '%s'", unit)
