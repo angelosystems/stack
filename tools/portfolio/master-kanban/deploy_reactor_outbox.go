@@ -54,6 +54,13 @@ type ServiceRecipe struct {
 	// erst NACH dem Kalibrierfenster (≥20 Deploys, 0 Falsch-Rot), nicht mit diesem
 	// Flag.
 	JourneyShadow bool `yaml:"journey_shadow"`
+	// JourneyRefMode steuert das D13-Ref-Pinning des Shadow-Laufs. Leer =
+	// Artefakt-SHA (o.GitSha). "sot-head" = kein --ref: der Runner pinnt auf
+	// den aktuellen main-HEAD des Journey-SoT und protokolliert den
+	// aufgelösten Ref im Result-JSON. Nötig, solange das Artefakt aus dem
+	// /opt/stack-Deploy-Mirror gebaut wird, dessen SHAs im SoT nicht
+	// existieren (Mapping-Regel D13 — Vorbedingung fürs Rollback-Arming).
+	JourneyRefMode string `yaml:"journey_ref_mode"`
 }
 
 // recipeType normalisiert das Rezept-Feld ("" → "go", rückwärtskompatibel).
@@ -257,13 +264,13 @@ func (r *reactor) escalate(kind string, detail map[string]any) {
 // Journey-Fehler (auch exit 3 / Timeout / panic) wird NUR geloggt + als JSONL-
 // Zeile persistiert. „Shadow heißt Shadow" (harte Regel des Auftrags).
 //
-// Ref-Pinning (D13): derselbe Ref wie das deployte Artefakt (o.GitSha). Beim
-// MK-Deploy-Mirror ist das ein /opt/stack-SHA, der im Journey-SoT /opt/master-
-// kanban NICHT existiert → journey-run meldet Harness (exit 3), die Zeile
-// trägt verdict=harness. Das blockt nie und ist im Shadow-Fenster ehrlich.
-// ponytail: echtes grün/rot-Signal im Fenster braucht die Outbox→SoT-SHA-
-// Mapping-Regel (D13) — Upgrade-Pfad vor dem Rollback-Arming, nicht heute.
-func (r *reactor) journeyShadow(o outboxRow, httpVerdict string) {
+// Ref-Pinning (D13): Default = derselbe Ref wie das deployte Artefakt
+// (o.GitSha). refMode "sot-head" = die Mapping-Regel für Mirror-gebaute
+// Services: der Outbox-SHA existiert im Journey-SoT nicht, also läuft der
+// Runner ohne --ref und pinnt selbst deterministisch auf den SoT-main-HEAD
+// (der aufgelöste Ref steht im Result-JSON des Runners, der Artefakt-SHA in
+// der Shadow-Zeile — beide zusammen sind die Kalibrier-Wahrheit).
+func (r *reactor) journeyShadow(o outboxRow, refMode, httpVerdict string) {
 	defer func() {
 		if p := recover(); p != nil {
 			r.logf("~ %s: journey-shadow panic geschluckt (Deploy unberührt): %v", o.Service, p)
@@ -287,8 +294,11 @@ func (r *reactor) journeyShadow(o outboxRow, httpVerdict string) {
 	defer cancel()
 	// CombinedOutput verworfen: der Wrapper schreibt sein eigenes Result-JSON +
 	// Trace-Artefakt (D3/D8); für die Shadow-Zeile zählt nur der Exit-Code.
-	_, err := exec.CommandContext(jctx, runner, o.Service, o.Environment,
-		"--context", "smoke", "--ref", o.GitSha).CombinedOutput()
+	args := []string{o.Service, o.Environment, "--context", "smoke"}
+	if refMode != "sot-head" {
+		args = append(args, "--ref", o.GitSha)
+	}
+	_, err := exec.CommandContext(jctx, runner, args...).CombinedOutput()
 	exit := 0
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -298,7 +308,7 @@ func (r *reactor) journeyShadow(o outboxRow, httpVerdict string) {
 		}
 	}
 	verdict := journeyVerdict(exit)
-	r.appendShadowLine(o.Service, o.GitSha, httpVerdict, exit, verdict)
+	r.appendShadowLine(o.Service, o.GitSha, refMode, httpVerdict, exit, verdict)
 	r.logf("~ %s@%s: journey-shadow exit=%d verdict=%s (report-only; HTTP entschied %s)",
 		o.Service, tag, exit, verdict, httpVerdict)
 	if verdict == "red" && httpVerdict == "green" {
@@ -311,9 +321,9 @@ func (r *reactor) journeyShadow(o outboxRow, httpVerdict string) {
 
 // appendShadowLine hängt eine maschinenlesbare Shadow-Zeile an
 // <journeyShadowDir>/<service>.jsonl — die Rohdaten des Kalibrierfensters
-// (D14): {ts, sha, http_verdict, journey_exit, journey_verdict}. Best-effort;
-// ein Schreibfehler wird geloggt, darf den Drain aber nicht stören.
-func (r *reactor) appendShadowLine(service, sha, httpVerdict string, exit int, verdict string) {
+// (D14): {ts, sha, ref_mode, http_verdict, journey_exit, journey_verdict}.
+// Best-effort; ein Schreibfehler wird geloggt, darf den Drain aber nicht stören.
+func (r *reactor) appendShadowLine(service, sha, refMode, httpVerdict string, exit int, verdict string) {
 	dir := r.journeyShadowDir
 	if dir == "" {
 		dir = "/var/lib/journey-runner/shadow"
@@ -325,6 +335,7 @@ func (r *reactor) appendShadowLine(service, sha, httpVerdict string, exit int, v
 	line, _ := json.Marshal(map[string]any{
 		"ts":              time.Now().Format(time.RFC3339),
 		"sha":             sha,
+		"ref_mode":        refMode,
 		"http_verdict":    httpVerdict,
 		"journey_exit":    exit,
 		"journey_verdict": verdict,
@@ -477,7 +488,7 @@ func (r *reactor) processOne(ctx context.Context, o outboxRow) bool {
 		if !green {
 			httpVerdict = "rollback"
 		}
-		r.journeyShadow(o, httpVerdict)
+		r.journeyShadow(o, rec.JourneyRefMode, httpVerdict)
 	}
 	return red
 }

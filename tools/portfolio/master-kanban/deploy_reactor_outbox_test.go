@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,7 +173,7 @@ func TestJourneyShadow_WritesLine_NeverBlocks(t *testing.T) {
 			}
 			o := outboxRow{Service: tc.svc, Environment: "prod-mvp", GitSha: "abc1234def"}
 			// Kein Rückgabewert → strukturell kann der Shadow den Deploy nicht drehen.
-			r.journeyShadow(o, tc.httpVerdict)
+			r.journeyShadow(o, "", tc.httpVerdict)
 
 			last := lastJSONL(t, filepath.Join(shadowDir, o.Service+".jsonl"))
 			if last["journey_verdict"] != tc.wantVerdict {
@@ -196,8 +197,8 @@ func TestJourneyShadow_WritesLine_NeverBlocks(t *testing.T) {
 	t.Setenv("JOURNEY_STUB_EXIT", "0")
 	r := &reactor{journeyRun: stub, journeyShadowDir: shadowDir, journeyShadowTO: 30 * time.Second, logf: func(string, ...any) {}}
 	o := outboxRow{Service: "svc-append", Environment: "prod-mvp", GitSha: "abc1234def"}
-	r.journeyShadow(o, "green")
-	r.journeyShadow(o, "green")
+	r.journeyShadow(o, "", "green")
+	r.journeyShadow(o, "", "green")
 	if n := countLines(t, filepath.Join(shadowDir, "svc-append.jsonl")); n != 2 {
 		t.Fatalf("erwartete 2 angehängte Zeilen für svc-append, war %d", n)
 	}
@@ -214,7 +215,7 @@ func TestJourneyShadow_MissingRunner_Neutral(t *testing.T) {
 		logf:             func(string, ...any) {},
 	}
 	o := outboxRow{Service: "gone", Environment: "prod-mvp", GitSha: "deadbeef"}
-	r.journeyShadow(o, "green") // darf nicht paniken
+	r.journeyShadow(o, "", "green") // darf nicht paniken
 	last := lastJSONL(t, filepath.Join(dir, "shadow", "gone.jsonl"))
 	if last["journey_verdict"] != "harness" {
 		t.Fatalf("fehlender Runner muss Harness geben, war %v", last["journey_verdict"])
@@ -525,5 +526,35 @@ services:
 	}
 	if m.Services["deploy-selftest"].JourneyShadow {
 		t.Fatal("deploy-selftest ohne Feld muss false bleiben (additiv, kein Shadow)")
+	}
+}
+
+// TestJourneyShadow_SotHeadOmitsRef — die D13-Mapping-Regel: refMode "sot-head"
+// ruft den Runner OHNE --ref auf (der pinnt dann selbst auf den SoT-main-HEAD);
+// jeder andere Modus pinnt weiter hart auf den Artefakt-SHA. Der Stub schreibt
+// seine argv mit, die Assertion liest sie zurück — kein Browser, DB-frei.
+func TestJourneyShadow_SotHeadOmitsRef(t *testing.T) {
+	dir := t.TempDir()
+	argsOut := filepath.Join(dir, "argv.txt")
+	stub := filepath.Join(dir, "journey-run-stub.sh")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"$@\" > "+argsOut+"\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	r := &reactor{journeyRun: stub, journeyShadowDir: filepath.Join(dir, "shadow"), journeyShadowTO: 30 * time.Second, logf: func(string, ...any) {}}
+	o := outboxRow{Service: "master-kanban", Environment: "prod-mvp", GitSha: "feedcafe1234"}
+
+	r.journeyShadow(o, "sot-head", "green")
+	argv, err := os.ReadFile(argsOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(argv), "--ref") {
+		t.Fatalf("sot-head darf kein --ref übergeben, argv: %s", argv)
+	}
+
+	r.journeyShadow(o, "", "green")
+	argv, _ = os.ReadFile(argsOut)
+	if !strings.Contains(string(argv), "--ref feedcafe1234") {
+		t.Fatalf("Default-Modus muss auf den Artefakt-SHA pinnen, argv: %s", argv)
 	}
 }
