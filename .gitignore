@@ -83,3 +83,6 @@ state.json
 CLAUDE.md
 CLAUDE.local.md
 bin/
+
+# Lint-Baseline gehört ins Repo (PRD test-substanz-haertung D4)
+!.golangci.yml

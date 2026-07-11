@@ -1,0 +1,11 @@
+# Kuratierte Lint-Baseline (PRD test-substanz-haertung D4) — bewusst eng:
+# nur High-Signal-Checks. Im Gate läuft golangci-lint mit --new-from-rev,
+# d.h. nur NEUE Findings blocken (Ratchet D5); Bestand bleibt unangetastet.
+version: "2"
+linters:
+  default: none
+  enable:
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
