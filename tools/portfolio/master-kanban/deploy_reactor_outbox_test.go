@@ -7,6 +7,8 @@ package main
 // Game-Day (game-day-deploy.sh) gegen eine Scratch-DB.
 
 import (
+	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -105,6 +107,156 @@ func TestEnvEligible(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestJourneyVerdict friert den SHADOW-Kontrakt (D14) ein: der journey-run-Exit
+// wird zu green|red|harness, und ALLES außer 0/1 (Timeout-Kill, -1, unerwartet)
+// zählt als Harness — NIE als „rot". So kann ein Runner-Defekt später nie
+// fälschlich einen guten Deploy zurückrollen.
+func TestJourneyVerdict(t *testing.T) {
+	cases := []struct {
+		exit int
+		want string
+	}{
+		{0, "green"},
+		{1, "red"},
+		{3, "harness"},
+		{124, "harness"}, // Timeout-Kill (SIGTERM/coreutils) → nie rot
+		{-1, "harness"},  // konnte nicht starten → nie rot
+		{2, "harness"},   // unerwarteter Code → nie rot
+	}
+	for _, c := range cases {
+		if got := journeyVerdict(c.exit); got != c.want {
+			t.Errorf("journeyVerdict(%d)=%q, want %q", c.exit, got, c.want)
+		}
+	}
+}
+
+// TestJourneyShadow_WritesLine_NeverBlocks — journeyShadow fährt den echten
+// exec-Pfad gegen einen STUB-Runner (kein Browser, DB-frei), klassifiziert den
+// Exit und hängt GENAU EINE {ts,sha,http_verdict,journey_exit,journey_verdict}-
+// Zeile an <dir>/<service>.jsonl. Beweist zugleich das „Shadow heißt Shadow":
+// selbst ein rot/Harness-Runner liefert keinen Rückgabewert und kann den
+// Deploy-Fluss nicht berühren (die Funktion gibt nichts zurück).
+func TestJourneyShadow_WritesLine_NeverBlocks(t *testing.T) {
+	dir := t.TempDir()
+	shadowDir := filepath.Join(dir, "shadow")
+
+	// Stub-Runner: exitet mit dem Code aus JOURNEY_STUB_EXIT (poka-yoke pro Fall).
+	stub := filepath.Join(dir, "journey-run-stub.sh")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"stub journey-run $*\"\nexit ${JOURNEY_STUB_EXIT:-0}\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name        string
+		svc         string
+		exit        string
+		httpVerdict string
+		wantVerdict string
+	}{
+		{"green journey neben grünem Deploy", "svc-a", "0", "green", "green"},
+		{"rote journey ändert grünen Deploy NICHT", "svc-b", "1", "green", "red"},
+		{"harness (exit 3) ist neutral", "svc-c", "3", "green", "harness"},
+		{"journey neben rolled_back-Deploy", "svc-d", "0", "rollback", "green"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("JOURNEY_STUB_EXIT", tc.exit)
+			r := &reactor{
+				owner:            "deploy-reactor@test",
+				journeyRun:       stub,
+				journeyShadowDir: shadowDir,
+				journeyShadowTO:  30 * time.Second,
+				logf:             func(string, ...any) {},
+			}
+			o := outboxRow{Service: tc.svc, Environment: "prod-mvp", GitSha: "abc1234def"}
+			// Kein Rückgabewert → strukturell kann der Shadow den Deploy nicht drehen.
+			r.journeyShadow(o, tc.httpVerdict)
+
+			last := lastJSONL(t, filepath.Join(shadowDir, o.Service+".jsonl"))
+			if last["journey_verdict"] != tc.wantVerdict {
+				t.Fatalf("journey_verdict=%v, want %q (zeile=%v)", last["journey_verdict"], tc.wantVerdict, last)
+			}
+			if last["http_verdict"] != tc.httpVerdict {
+				t.Fatalf("http_verdict=%v, want %q", last["http_verdict"], tc.httpVerdict)
+			}
+			if last["sha"] != o.GitSha {
+				t.Fatalf("sha=%v, want %q", last["sha"], o.GitSha)
+			}
+			for _, k := range []string{"ts", "journey_exit"} {
+				if _, ok := last[k]; !ok {
+					t.Fatalf("Pflichtfeld %q fehlt in Shadow-Zeile: %v", k, last)
+				}
+			}
+		})
+	}
+
+	// Append-Semantik: zwei Läufe desselben Service hängen an, überschreiben nicht.
+	t.Setenv("JOURNEY_STUB_EXIT", "0")
+	r := &reactor{journeyRun: stub, journeyShadowDir: shadowDir, journeyShadowTO: 30 * time.Second, logf: func(string, ...any) {}}
+	o := outboxRow{Service: "svc-append", Environment: "prod-mvp", GitSha: "abc1234def"}
+	r.journeyShadow(o, "green")
+	r.journeyShadow(o, "green")
+	if n := countLines(t, filepath.Join(shadowDir, "svc-append.jsonl")); n != 2 {
+		t.Fatalf("erwartete 2 angehängte Zeilen für svc-append, war %d", n)
+	}
+}
+
+// TestJourneyShadow_MissingRunner_Neutral — ein nicht auffindbarer Runner darf
+// den Drain NICHT stürzen und wird als Harness verbucht (exec-Startfehler → -1).
+func TestJourneyShadow_MissingRunner_Neutral(t *testing.T) {
+	dir := t.TempDir()
+	r := &reactor{
+		journeyRun:       filepath.Join(dir, "does-not-exist"),
+		journeyShadowDir: filepath.Join(dir, "shadow"),
+		journeyShadowTO:  5 * time.Second,
+		logf:             func(string, ...any) {},
+	}
+	o := outboxRow{Service: "gone", Environment: "prod-mvp", GitSha: "deadbeef"}
+	r.journeyShadow(o, "green") // darf nicht paniken
+	last := lastJSONL(t, filepath.Join(dir, "shadow", "gone.jsonl"))
+	if last["journey_verdict"] != "harness" {
+		t.Fatalf("fehlender Runner muss Harness geben, war %v", last["journey_verdict"])
+	}
+}
+
+func lastJSONL(t *testing.T, path string) map[string]any {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Shadow-JSONL %s nicht lesbar: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	var lastLine string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if l := sc.Text(); l != "" {
+			lastLine = l
+		}
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(lastLine), &m); err != nil {
+		t.Fatalf("Shadow-Zeile kein JSON (%q): %v", lastLine, err)
+	}
+	return m
+}
+
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	n := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if sc.Text() != "" {
+			n++
+		}
+	}
+	return n
 }
 
 func TestBreakerOpens(t *testing.T) {
@@ -211,6 +363,11 @@ services:
 	if !ok || rec.ProbeKind != "http" || rec.Unit != "master-kanban-serve.service" {
 		t.Fatalf("Manifest missgeparst: %+v", m)
 	}
+	// Journey-Shadow ist ADDITIV: fehlt das Feld → false (Bestands-Service
+	// unverändert, kein Shadow).
+	if rec.JourneyShadow {
+		t.Fatalf("journey_shadow ohne Feld muss false sein, war true: %+v", rec)
+	}
 	// Default-Repo bei leerem Feld.
 	empty := filepath.Join(dir, "e.yaml")
 	_ = os.WriteFile(empty, []byte("services: {}\n"), 0644)
@@ -224,9 +381,9 @@ services:
 // (rückwärtskompatibel), case-insensitive 'node', und der Ledger-Stempel.
 func TestRecipeTypeAndMethod(t *testing.T) {
 	cases := []struct {
-		typ    string
-		wantT  string
-		wantM  string
+		typ   string
+		wantT string
+		wantM string
 	}{
 		{"", "go", "deploy-gt"},
 		{"go", "go", "deploy-gt"},
@@ -332,5 +489,41 @@ services:
 	rec := m.Services["staging-node-canary"]
 	if recipeType(rec) != "node" || rec.BuildCmd != "pnpm run build" || rec.Bin != "/opt/sa-staging-node-canary" {
 		t.Fatalf("node-Rezept missgeparst: %+v", rec)
+	}
+}
+
+// TestLoadReactorManifest_JourneyShadow — journey_shadow: true wird geparst
+// (WP3/D14), und ein Service ohne das Feld bleibt false (additiv).
+func TestLoadReactorManifest_JourneyShadow(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "m.yaml")
+	yaml := `repo: /opt/stack
+services:
+  master-kanban:
+    src: tools/portfolio/master-kanban
+    bin: /opt/stack/bin/master-kanban
+    unit: master-kanban-serve.service
+    probe_kind: http
+    health_url: http://127.0.0.1:7780/api/version
+    smoke_url: http://127.0.0.1:7780/api/initiatives
+    journey_shadow: true
+  deploy-selftest:
+    src: tools/portfolio/master-kanban
+    bin: /opt/stack/var/deploy-reactor/selftest-bin/master-kanban
+    probe_kind: cli
+    health_url: /opt/stack/var/deploy-reactor/selftest-bin/master-kanban
+`
+	if err := os.WriteFile(p, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := loadReactorManifest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Services["master-kanban"].JourneyShadow {
+		t.Fatal("master-kanban: journey_shadow: true muss true geparst werden")
+	}
+	if m.Services["deploy-selftest"].JourneyShadow {
+		t.Fatal("deploy-selftest ohne Feld muss false bleiben (additiv, kein Shadow)")
 	}
 }

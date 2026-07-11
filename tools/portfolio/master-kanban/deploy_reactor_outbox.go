@@ -46,6 +46,14 @@ type ServiceRecipe struct {
 	ProbeKind string `yaml:"probe_kind"` // 'http' | 'cli' (D18)
 	HealthURL string `yaml:"health_url"` // http: /version-URL · cli: absoluter Binary-/Wrapper-Pfad
 	SmokeURL  string `yaml:"smoke_url"`  // http: eine echte Business-Route (2xx erwartet, D18)
+
+	// JourneyShadow schaltet den Journey-Smoke im SHADOW-MODE zu (PRD ui-journey-
+	// testing WP3/D14): report-only NEBEN der weiterhin ALLEIN entscheidenden
+	// HTTP/CLI-Probe. Additiv — fehlt/false ⇒ unverändertes Verhalten (kein
+	// Bestands-Service wird durch die Einführung berührt). Rollback-Arming kommt
+	// erst NACH dem Kalibrierfenster (≥20 Deploys, 0 Falsch-Rot), nicht mit diesem
+	// Flag.
+	JourneyShadow bool `yaml:"journey_shadow"`
 }
 
 // recipeType normalisiert das Rezept-Feld ("" → "go", rückwärtskompatibel).
@@ -99,9 +107,9 @@ type outboxRow struct {
 type claimAction int
 
 const (
-	actClaim         claimAction = iota // pending, Breaker zu → Deploy starten
-	actSkipBreaker                      // Breaker offen → nichts anfassen (D15)
-	actSkipNotPending                   // Zeile nicht mehr pending (Doppel-Zustellung, D11)
+	actClaim          claimAction = iota // pending, Breaker zu → Deploy starten
+	actSkipBreaker                       // Breaker offen → nichts anfassen (D15)
+	actSkipNotPending                    // Zeile nicht mehr pending (Doppel-Zustellung, D11)
 )
 
 // decideClaim: darf der Reaktor diese Outbox-Zeile übernehmen? Idempotenz (D11)
@@ -157,11 +165,27 @@ func decideRollback(prevSha string) rollbackAction {
 // der WP7-Burn-Ratio. Danach kein Auto-Deploy bis manueller Reset.
 func breakerOpens(consecutiveReds, k int) bool { return consecutiveReds >= k }
 
+// journeyVerdict übersetzt den journey-run-Exit in ein Verdict-Wort (Wrapper-
+// Kontrakt: 0 grün · 1 Journey rot · 3 Harness). Alles andere (Timeout-Kill,
+// Startfehler, -1) zählt als Harness — im SHADOW-MODE (D14) NIE als „rot": ein
+// Runner-Defekt darf später nie fälschlich einen guten Deploy zurückrollen.
+// Pur/DB-frei, damit die Klassifikation als Zustandsmaschine testbar bleibt.
+func journeyVerdict(exit int) string {
+	switch exit {
+	case 0:
+		return "green"
+	case 1:
+		return "red"
+	default: // 3 Harness und jeder unerwartete Code (kill/-1) → Harness, nie rot
+		return "harness"
+	}
+}
+
 // envEligible: darf ein Reaktor mit Stufen-Scope reactorEnv diese Outbox-Zeile
 // (Stufe rowEnv) überhaupt anfassen? Leerer Scope = alle Stufen (rückwärts-
 // kompatibel); sonst NUR die eigene (sa-deploy-stufen W2: prod-Reaktor zieht
 // 'prod-mvp', sa-staging-drain 'staging'). Poka-yoke-Zwilling zum SQL-Filter
-// ($1='' OR environment=$1) in runOnce/reclaimStranded: die SELECT-Query
+// ($1=” OR environment=$1) in runOnce/reclaimStranded: die SELECT-Query
 // schließt Fremd-Stufen schon in der DB aus — dieser Guard in der Drain-Schleife
 // ist der Gürtel dazu. Selbst wenn je eine Fremd-Zeile durchrutschte (manueller
 // Insert, Query-Drift), fasst der prod-Reaktor keine staging-Zeile an und
@@ -181,14 +205,20 @@ type reactor struct {
 	owner       string
 	environment string // "" = alle Stufen draina; sonst nur diese (sa-deploy-stufen W2)
 	lease       time.Duration
-	maxSmoke   int
-	smokeSleep time.Duration
-	smokeDue   time.Duration
-	probeTO    time.Duration
-	breakerK   int
-	stateDir   string // Breaker-Marker
-	eventsDir  string // durable Eskalations-Artefakte (D20c)
-	logf       func(string, ...any)
+	maxSmoke    int
+	smokeSleep  time.Duration
+	smokeDue    time.Duration
+	probeTO     time.Duration
+	breakerK    int
+	stateDir    string // Breaker-Marker
+	eventsDir   string // durable Eskalations-Artefakte (D20c)
+
+	// Journey-Shadow (WP3/D14) — report-only, entscheidet NIE.
+	journeyRun       string        // Pfad zum journey-run-Wrapper
+	journeyShadowDir string        // <dir>/<service>.jsonl (Kalibrier-Rohdaten)
+	journeyShadowTO  time.Duration // harter, deploy-unabhängiger Timeout je Lauf
+
+	logf func(string, ...any)
 }
 
 func (r *reactor) breakerFile() string { return filepath.Join(r.stateDir, "DEPLOY_BREAKER_OPEN") }
@@ -218,6 +248,95 @@ func (r *reactor) escalate(kind string, detail map[string]any) {
 	b, _ := json.MarshalIndent(detail, "", "  ")
 	name := fmt.Sprintf("%s-%d.json", kind, time.Now().UnixNano())
 	_ = os.WriteFile(filepath.Join(r.eventsDir, name), b, 0644)
+}
+
+// journeyShadow fährt den Journey-Smoke im SHADOW-MODE (PRD ui-journey-testing
+// WP3/D14): report-only NEBEN der bereits gefällten HTTP/CLI-Entscheidung. Er
+// gibt NICHTS zurück und wird NACH dem Terminal-Übergang aufgerufen — der
+// Journey-Ausgang kann den Deploy-Fluss strukturell nicht mehr berühren. Jeder
+// Journey-Fehler (auch exit 3 / Timeout / panic) wird NUR geloggt + als JSONL-
+// Zeile persistiert. „Shadow heißt Shadow" (harte Regel des Auftrags).
+//
+// Ref-Pinning (D13): derselbe Ref wie das deployte Artefakt (o.GitSha). Beim
+// MK-Deploy-Mirror ist das ein /opt/stack-SHA, der im Journey-SoT /opt/master-
+// kanban NICHT existiert → journey-run meldet Harness (exit 3), die Zeile
+// trägt verdict=harness. Das blockt nie und ist im Shadow-Fenster ehrlich.
+// ponytail: echtes grün/rot-Signal im Fenster braucht die Outbox→SoT-SHA-
+// Mapping-Regel (D13) — Upgrade-Pfad vor dem Rollback-Arming, nicht heute.
+func (r *reactor) journeyShadow(o outboxRow, httpVerdict string) {
+	defer func() {
+		if p := recover(); p != nil {
+			r.logf("~ %s: journey-shadow panic geschluckt (Deploy unberührt): %v", o.Service, p)
+		}
+	}()
+	runner := r.journeyRun
+	if runner == "" {
+		runner = "/opt/solartown/bin/journey-run"
+	}
+	to := r.journeyShadowTO
+	if to <= 0 {
+		to = 180 * time.Second
+	}
+	tag := o.GitSha
+	if len(tag) > 7 {
+		tag = tag[:7]
+	}
+	// Eigener Timeout-Kontext (NICHT der Deploy-Kontext): der Shadow verlängert
+	// den Deploy nicht und der Deploy kappt den Shadow nicht mitten im Lauf.
+	jctx, cancel := context.WithTimeout(context.Background(), to)
+	defer cancel()
+	// CombinedOutput verworfen: der Wrapper schreibt sein eigenes Result-JSON +
+	// Trace-Artefakt (D3/D8); für die Shadow-Zeile zählt nur der Exit-Code.
+	_, err := exec.CommandContext(jctx, runner, o.Service, o.Environment,
+		"--context", "smoke", "--ref", o.GitSha).CombinedOutput()
+	exit := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			exit = ee.ExitCode()
+		} else {
+			exit = -1 // konnte nicht starten / Timeout-Kill → Harness, nie „rot"
+		}
+	}
+	verdict := journeyVerdict(exit)
+	r.appendShadowLine(o.Service, o.GitSha, httpVerdict, exit, verdict)
+	r.logf("~ %s@%s: journey-shadow exit=%d verdict=%s (report-only; HTTP entschied %s)",
+		o.Service, tag, exit, verdict, httpVerdict)
+	if verdict == "red" && httpVerdict == "green" {
+		// Genau die teuerste Falsch-Rot-Divergenz, deren Rate das Kalibrier-
+		// fenster (D14) auf 0 messen muss, BEVOR scharfgeschaltet wird. Nur
+		// hervorgehoben geloggt — kein Rollback, kein Reset (Shadow-Mode).
+		r.logf("~ %s@%s: SHADOW-DIVERGENZ journey=red / http=green (Kalibrier-Signal, kein Rollback)", o.Service, tag)
+	}
+}
+
+// appendShadowLine hängt eine maschinenlesbare Shadow-Zeile an
+// <journeyShadowDir>/<service>.jsonl — die Rohdaten des Kalibrierfensters
+// (D14): {ts, sha, http_verdict, journey_exit, journey_verdict}. Best-effort;
+// ein Schreibfehler wird geloggt, darf den Drain aber nicht stören.
+func (r *reactor) appendShadowLine(service, sha, httpVerdict string, exit int, verdict string) {
+	dir := r.journeyShadowDir
+	if dir == "" {
+		dir = "/var/lib/journey-runner/shadow"
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		r.logf("~ %s: shadow-dir %s nicht anlegbar: %v", service, dir, err)
+		return
+	}
+	line, _ := json.Marshal(map[string]any{
+		"ts":              time.Now().Format(time.RFC3339),
+		"sha":             sha,
+		"http_verdict":    httpVerdict,
+		"journey_exit":    exit,
+		"journey_verdict": verdict,
+	})
+	f, err := os.OpenFile(filepath.Join(dir, service+".jsonl"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		r.logf("~ %s: shadow-jsonl nicht schreibbar: %v", service, err)
+		return
+	}
+	defer func() { _ = f.Close() }()
+	_, _ = f.Write(append(line, '\n'))
 }
 
 // runOnce: ein beaufsichtigter Drain (D8 single-shot). Gestrandete deploying-
@@ -337,15 +456,30 @@ func (r *reactor) processOne(ctx context.Context, o outboxRow) bool {
 		return r.rollback(ctx, o, rec, prevSha, "deploy-gt.sh-Miss")
 	}
 
-	// Smoke (D18) mit Readiness-Backoff.
-	if r.smokeGreen(ctx, rec, o.GitSha) {
+	// Smoke (D18) mit Readiness-Backoff. Die HTTP/CLI-Probe entscheidet ALLEIN
+	// über live|rollback — der Journey-Shadow unten ändert daran NICHTS (D14).
+	green := r.smokeGreen(ctx, rec, o.GitSha)
+	var red bool
+	if green {
 		if r.commit(ctx, o.ID, "live") {
 			r.logf("ok %s@%s: Smoke grün → live", o.Service, tag)
 		}
-		return false
+		red = false
+	} else {
+		r.logf("! %s@%s: Smoke rot → Rollback", o.Service, tag)
+		red = r.rollback(ctx, o, rec, prevSha, "Smoke rot")
 	}
-	r.logf("! %s@%s: Smoke rot → Rollback", o.Service, tag)
-	return r.rollback(ctx, o, rec, prevSha, "Smoke rot")
+
+	// Journey-Shadow (WP3/D14): report-only, NACH dem Terminal-Übergang. Strukturell
+	// nicht mehr in der Lage, die schon gefällte HTTP-Entscheidung zu beeinflussen.
+	if rec.JourneyShadow {
+		httpVerdict := "green"
+		if !green {
+			httpVerdict = "rollback"
+		}
+		r.journeyShadow(o, httpVerdict)
+	}
+	return red
 }
 
 // rollback: SHA-gepinnt auf prev bauen, Zeile → rolled_back (quarantänisiert
@@ -533,8 +667,9 @@ func defaultNodeScriptPath() string {
 // HAUPT sie hinter dem Test-Gate scharfschaltet.
 func cmdDeployReactorOutbox() *cobra.Command {
 	var manifestPath, scriptPath, nodeScript, stateDir, eventsDir, environment string
+	var journeyRun, journeyShadowDir string
 	var once, loop bool
-	var interval, lease, smokeDue, probeTO, smokeSleep time.Duration
+	var interval, lease, smokeDue, probeTO, smokeSleep, journeyShadowTO time.Duration
 	var maxSmoke, breakerK int
 
 	c := &cobra.Command{
@@ -562,6 +697,7 @@ func cmdDeployReactorOutbox() *cobra.Command {
 				lease: lease, maxSmoke: maxSmoke, smokeSleep: smokeSleep,
 				smokeDue: smokeDue, probeTO: probeTO, breakerK: breakerK,
 				stateDir: stateDir, eventsDir: eventsDir,
+				journeyRun: journeyRun, journeyShadowDir: journeyShadowDir, journeyShadowTO: journeyShadowTO,
 				logf: func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
 			}
 			if loop {
@@ -600,5 +736,12 @@ func cmdDeployReactorOutbox() *cobra.Command {
 	c.Flags().DurationVar(&smokeSleep, "smoke-sleep", time.Second, "Pause zwischen Smoke-Versuchen (Readiness-Backoff)")
 	c.Flags().IntVar(&maxSmoke, "max-smoke", 15, "Smoke-Versuche vor Rollback")
 	c.Flags().IntVar(&breakerK, "breaker-k", 3, "rote Deploys in Folge bis Circuit-Breaker öffnet (D15)")
+	// Journey-Shadow (WP3/D14): report-only, entscheidet NIE über live|rollback.
+	// Default-Pfade so gewählt, dass die bestehende .service-ExecStart (kein Unit-
+	// Umbau) den Shadow ohne zusätzliche Flags mitnimmt, sobald ein Service im
+	// Manifest journey_shadow: true trägt.
+	c.Flags().StringVar(&journeyRun, "journey-run", envOr("JOURNEY_RUN", "/opt/solartown/bin/journey-run"), "Pfad zum journey-run-Wrapper (Journey-Shadow, D14)")
+	c.Flags().StringVar(&journeyShadowDir, "journey-shadow-dir", envOr("JOURNEY_SHADOW_DIR", "/var/lib/journey-runner/shadow"), "Ablage der Shadow-JSONL je Service (D14)")
+	c.Flags().DurationVar(&journeyShadowTO, "journey-shadow-timeout", 180*time.Second, "harter, deploy-unabhängiger Timeout je Journey-Shadow-Lauf (D14; report-only)")
 	return c
 }
