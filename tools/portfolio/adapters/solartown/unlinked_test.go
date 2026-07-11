@@ -85,14 +85,14 @@ func TestDenominatorHonesty_UnreachableAndSkippedRigs(t *testing.T) {
 		if (prefix == "cl" || prefix == "ag") && firma != "angeloos" {
 			t.Errorf("expected rig %q to map to firma 'angeloos', got %q", prefix, firma)
 		}
-		if prefix == "sk" && firma != "stack" {
-			t.Errorf("expected rig 'sk' to map to firma 'stack', got %q", firma)
+		if prefix == "sk" && firma != "code-factory" {
+			t.Errorf("expected rig 'sk' to map to firma 'code-factory', got %q", firma)
 		}
 		if prefix == "qu" && firma != "quantbot" {
 			t.Errorf("expected rig 'qu' to map to firma 'quantbot', got %q", firma)
 		}
-		if (prefix == "st" || prefix == "tr") && firma != "solartown" {
-			t.Errorf("expected rig %q to map to firma 'solartown', got %q", prefix, firma)
+		if (prefix == "st" || prefix == "tr") && firma != "code-factory" {
+			t.Errorf("expected rig %q to map to firma 'code-factory', got %q", prefix, firma)
 		}
 		if (prefix == "sa" || prefix == "so") && firma != "stayawesome" {
 			t.Errorf("expected rig %q to map to firma 'stayawesome', got %q", prefix, firma)

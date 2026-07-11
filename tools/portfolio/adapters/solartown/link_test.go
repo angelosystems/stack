@@ -86,10 +86,10 @@ func TestGetFirmaForRig(t *testing.T) {
 		expected string
 	}{
 		{"sa", "stayawesome"},
-		{"st", "solartown"},
+		{"st", "code-factory"},
 		{"qu", "quantbot"},
-		{"sk", "stack"},
-		{"invalid", "solartown"},
+		{"sk", "code-factory"},
+		{"invalid", "code-factory"},
 	}
 	for _, tc := range tests {
 		actual := getFirmaForRig(tc.input)
@@ -106,11 +106,11 @@ func TestParseWorkspaceMetadata(t *testing.T) {
 		expectedRP string
 		expectedF  string
 	}{
-		{"sol-st-yozd", "vk/0502-sol-st-yozd", "st", "solartown"},
-		{"sol-tr-vksmoke", "vk/aa10-sol-tr", "tr", "solartown"},
-		{"[tr-8et5z] some task", "bd/tr-8et5z", "tr", "solartown"},
+		{"sol-st-yozd", "vk/0502-sol-st-yozd", "st", "code-factory"},
+		{"sol-tr-vksmoke", "vk/aa10-sol-tr", "tr", "code-factory"},
+		{"[tr-8et5z] some task", "bd/tr-8et5z", "tr", "code-factory"},
 		{"sol-so-pgus", "vk/74e1-sol-so-pgus", "so", "stayawesome"},
-		{"unknown", "unknown", "st", "solartown"},
+		{"unknown", "unknown", "st", "code-factory"},
 	}
 	for _, tc := range tests {
 		rp, f := parseWorkspaceMetadata(tc.name, tc.branch)
