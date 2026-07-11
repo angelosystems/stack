@@ -2,7 +2,7 @@
 title: Ressourcen-Panel „Abos“ — Abo-Limits live + Service-Registry im Master-Kanban
 slug: ressourcen-abo-panel
 layer: prd
-status: approved
+status: in-progress
 parent_plan: resource-fleet-manager-prd.md
 software: master-kanban
 scope: Die /ressourcen-Seite bekommt zwei neue Sektionen — Abo-Karten mit echten Server-Limits (5h/7d/Modell-Fenster) für alle Claude-Abos + Gemini-€-Budget, und eine Service→Abo-Registry-Sicht (Paperclip, Fabrik, VK, Solartown, AP, opencode). Datenquellen: claude-abo-watch (existiert), oneapi-spend-guard (JSON-Output neu), resources.yaml (neu, git).

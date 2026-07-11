@@ -2364,6 +2364,9 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(res)
 			})
 
+			// Ressourcen-Panel — Abo-Limits + Service-Registry (PRD ressourcen-abo-panel)
+			http.HandleFunc("/api/abos", handleAbos)
+
 			// P2.1 — Host-Kapazitätsdaten für das Cockpit
 			http.HandleFunc("/api/capacity-host", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")

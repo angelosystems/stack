@@ -1,0 +1,54 @@
+# Ressourcen-Registry — welches Abo/Kontingent ist in welchem Service hinterlegt.
+# PRD: docs/plans/ressourcen-abo-panel-prd.md · Panel: master.stayawesome.app/ressourcen
+# Pflege-Konvention: dieselbe Hand, die einen Token verdrahtet, trägt die Zeile nach
+# (analog Vault-Regel „neue Credentials in den Bucket“).
+#
+# kind: claude-abo (Feed = claude-abo-watch) | api-budget (Feed = oneapi-spend-guard)
+#       | plan-ohne-feed (nur Registry-Sicht)
+# feed: Account-Name im jeweiligen Collector; none = bewusst ohne Feed
+# verified: false = Binding aus Indizien, noch nicht bewiesen (Panel markiert das)
+resources:
+  - id: claude1
+    kind: claude-abo
+    plan: max
+    feed: claude1
+    bindings:
+      - {service: werkstatt CLI-Sessions, box: werkstatt}
+  - id: claude2
+    kind: claude-abo
+    plan: max
+    feed: claude2
+    bindings:
+      - {service: Coding-Fabrik (7 claude_local), box: vault}
+      - {service: Paperclip-CEO, box: mario-prod}
+      # AP-Flows selbst haben KEIN LLM-Abo (verifiziert 2026-07-11: einziges
+      # HTTP-Ziel aller flow_versions = Paperclip werkstatt :3105); dessen
+      # Agent-Tokens sind DB-gebunden — Konto-Zuordnung noch zu beweisen.
+      - {service: ActivePieces-Flows → Paperclip :3105, box: werkstatt, verified: false}
+  - id: info
+    kind: claude-abo
+    plan: max
+    feed: info
+    bindings:
+      - {service: Paperclip Stay Awesome, box: sa-prod}
+      - {service: Paperclip QuantumShift (paperclip-server.env), box: mario-prod, verified: false}
+  - id: mario
+    kind: claude-abo
+    plan: max
+    feed: none   # Token fehlt — setup-token-Tanz nötig (accounts.conf hat die Anleitung)
+    bindings:
+      - {service: Mario Desktop, box: mac}
+  - id: gemini-ultra
+    kind: api-budget
+    feed: oneapi-spend-guard
+    bindings:
+      - {service: Solartown-Polecats via one-api, box: werkstatt}
+  - id: glm-zai
+    kind: plan-ohne-feed
+    bindings:
+      - {service: Vibe Kanban (Standard-Executor), box: werkstatt}
+      - {service: Solartown plan-reviewer + sage-advisor, box: werkstatt}
+  - id: deepseek
+    kind: plan-ohne-feed
+    bindings:
+      - {service: opencode QuantumShift-CTO, box: mario-prod}

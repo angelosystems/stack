@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>master-kanban — Ressourcen</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-900 min-h-screen">
+
+  <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
+    <h1 class="text-lg font-semibold tracking-tight">master-kanban
+      <span id="livedot" class="text-xs text-emerald-600 ml-1">● live</span>
+    </h1>
+
+    <!-- gleiche Pill-Nav wie im Cockpit -->
+    <nav class="flex gap-1 bg-slate-100 rounded-lg p-1">
+      <a href="/cockpit" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">master-center</a>
+      <a href="/ressourcen" class="px-3 py-1 rounded-md text-sm font-medium bg-white shadow text-slate-900">Ressourcen</a>
+      <a href="/health" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Health</a>
+    </nav>
+
+    <div class="flex-1"></div>
+
+    <div class="text-xs text-slate-500 flex gap-3 items-center">
+      <span id="ts">lade…</span>
+      <button onclick="load()" class="px-2 py-1 border border-slate-300 rounded hover:bg-slate-100">↻</button>
+    </div>
+  </header>
+
+  <main class="p-6">
+    <div class="grid gap-6 max-w-[1100px]" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+      <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-4">Kapazität — RAM · CPU · Disk</h2>
+        <div id="cap" class="space-y-3"></div>
+      </section>
+      <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-4">Agenten (Prozesse)</h2>
+        <div id="agents" class="space-y-3"></div>
+      </section>
+      <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-5 md:col-span-full" style="grid-column:1/-1">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-4">Flotte pro Rig (Polecats · VK-Slots)</h2>
+        <div id="fleet"></div>
+      </section>
+      <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-5" style="grid-column:1/-1">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Abos &amp; Token-Budgets</h2>
+        <div id="abos-age" class="text-xs text-slate-400 mb-3"></div>
+        <div id="abos" class="grid gap-4" style="grid-template-columns:repeat(auto-fit,minmax(250px,1fr))"></div>
+      </section>
+      <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-5" style="grid-column:1/-1">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-4">Service → Abo</h2>
+        <div id="svc"></div>
+      </section>
+    </div>
+  </main>
+
+<script>
+const barColor = p => p>=90 ? 'bg-red-500' : p>=80 ? 'bg-amber-500' : 'bg-emerald-500';
+const txtColor = p => p>=90 ? 'text-red-600' : p>=80 ? 'text-amber-600' : 'text-emerald-600';
+
+function bar(lab, valText, pct){
+  pct = Math.max(0, Math.min(100, pct));
+  return `<div class="flex items-center gap-3">
+    <span class="text-sm text-slate-500 w-16 shrink-0">${lab}</span>
+    <div class="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
+      <div class="h-full ${barColor(pct)} rounded-full transition-all" style="width:${pct}%"></div>
+    </div>
+    <span class="text-sm tabular-nums w-28 text-right">${valText} <b class="${txtColor(pct)}">${pct}%</b></span>
+  </div>`;
+}
+
+function agentRow(name, n, hint){
+  return `<div class="flex items-center justify-between">
+    <span class="text-sm text-slate-500 w-16">${name}</span>
+    <span class="text-2xl font-semibold tabular-nums">${n}</span>
+    <span class="text-xs text-slate-400 flex-1 text-right">${hint}</span>
+  </div>`;
+}
+
+// ── Abos & Token-Budgets (PRD ressourcen-abo-panel) ─────────────────────────
+const ampelCls = a => a==='crit' ? 'text-red-600' : a==='warn' ? 'text-amber-600' : a==='ok' ? 'text-emerald-600' : 'text-slate-400';
+const ampelLbl = a => a==='crit' ? 'Limit' : a==='warn' ? 'warnung' : a==='ok' ? 'ok' : '—';
+const fmtReset = e => new Date(e*1000).toLocaleString('de',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+
+function limitRow(l){
+  const pct = Math.max(0, Math.min(100, l.percent));
+  return `<div class="flex items-center gap-2" title="Reset ${fmtReset(l.resets_at)}">
+    <span class="text-xs text-slate-500 w-16 shrink-0 truncate">${l.window}</span>
+    <div class="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
+      <div class="h-full ${barColor(pct)} rounded-full transition-all" style="width:${pct}%"></div>
+    </div>
+    <span class="text-xs tabular-nums w-10 text-right ${txtColor(pct)}">${l.percent}%</span>
+  </div>`;
+}
+
+function spendRows(s){
+  const mPct = s.month_limit_eur > 0 ? Math.round(100*s.month_eur/s.month_limit_eur) : 0;
+  const dPct = s.day_tripwire_eur > 0 ? Math.round(100*s.day_eur/s.day_tripwire_eur) : 0;
+  return `<div class="flex items-center gap-2">
+      <span class="text-xs text-slate-500 w-16 shrink-0">Monat</span>
+      <div class="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden"><div class="h-full ${barColor(mPct)} rounded-full" style="width:${Math.min(100,mPct)}%"></div></div>
+      <span class="text-xs tabular-nums w-24 text-right ${txtColor(mPct)}">${s.month_eur.toFixed(0)}/${s.month_limit_eur.toFixed(0)}€</span>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs text-slate-500 w-16 shrink-0">Tag</span>
+      <div class="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden"><div class="h-full ${barColor(dPct)} rounded-full" style="width:${Math.min(100,dPct)}%"></div></div>
+      <span class="text-xs tabular-nums w-24 text-right ${txtColor(dPct)}">${s.day_eur.toFixed(0)}/${s.day_tripwire_eur.toFixed(0)}€</span>
+    </div>
+    <div class="text-[11px] text-slate-400 mt-1">Guard: ${s.guard}</div>`;
+}
+
+function abosCard(r){
+  const head = `<div class="flex items-center justify-between mb-2">
+    <span class="font-medium text-sm">${r.id}${r.plan ? ` <span class="text-[10px] text-slate-400 uppercase">${r.plan}</span>` : ''}</span>
+    <span class="text-xs ${ampelCls(r.ampel)}">● ${ampelLbl(r.ampel)}</span>
+  </div>`;
+  let body = '';
+  if (r.limits && r.limits.length){
+    body = r.limits.map(limitRow).join('')
+      + `<div class="text-[11px] text-slate-400 mt-1">${r.limits.map(l=>l.window+' → '+fmtReset(l.resets_at)).join(' · ')}</div>`;
+  } else if (r.spend){
+    body = spendRows(r.spend);
+  } else {
+    body = `<div class="text-xs text-amber-600">${r.hint || 'kein Feed'}</div>`;
+  }
+  if (r.feed_status === 'error') body = `<div class="text-xs text-red-600 mb-1">⚠ ${r.hint || 'Feed-Fehler'}</div>`;
+  if (r.feed_status === 'stale') body += `<div class="text-xs text-red-600 mt-1">⚠ Daten alt (${Math.round(r.feed_age_s/60)} min) — claude-abo-watch.timer prüfen</div>`;
+  const chips = (r.bindings||[]).map(b =>
+    `<span class="inline-block text-[11px] bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5 mr-1 mt-1">${b.service} <span class="text-slate-400">· ${b.box}</span>${b.verified===false ? ' <span class="text-amber-600" title="Zuordnung unverifiziert">?</span>' : ''}</span>`).join('');
+  return `<div class="border border-slate-200 rounded-lg p-3">${head}${body}<div class="mt-2">${chips}</div></div>`;
+}
+
+function svcTable(resources){
+  let rows = `<table class="w-full text-sm">
+    <thead><tr class="text-xs text-slate-500 border-b border-slate-200">
+      <th class="text-left font-semibold py-2">Service</th>
+      <th class="text-left font-semibold py-2">Ressource</th>
+      <th class="text-left font-semibold py-2">Box</th>
+      <th class="text-left font-semibold py-2">Status</th>
+    </tr></thead><tbody>`;
+  for (const r of resources){
+    for (const b of (r.bindings||[])){
+      const status = r.feed_status==='ok' || r.feed_status==='stale'
+        ? `<span class="${ampelCls(r.ampel)}">● ${ampelLbl(r.ampel)}</span>`
+        : `<span class="text-slate-400">○ ${r.feed_status}</span>`;
+      rows += `<tr class="border-b border-slate-100">
+        <td class="py-2">${b.service}${b.verified===false ? ' <span class="text-amber-600 text-xs" title="Zuordnung unverifiziert">unverifiziert</span>' : ''}</td>
+        <td class="py-2 font-medium">${r.id}${r.plan ? ` <span class="text-[10px] text-slate-400 uppercase">${r.plan}</span>` : ''}</td>
+        <td class="py-2 text-slate-500">${b.box}</td>
+        <td class="py-2">${status}</td>
+      </tr>`;
+    }
+  }
+  return rows + '</tbody></table>';
+}
+
+async function load(){
+  let h={}, c={}, ab=null;
+  try { h = await (await fetch('host.json?'+Date.now())).json(); } catch(e){}
+  try { c = await (await fetch('/api/capacity?'+Date.now())).json(); } catch(e){}
+  try { ab = await (await fetch('/api/abos?'+Date.now())).json(); } catch(e){}
+
+  if (ab && ab.resources && ab.resources.length){
+    document.getElementById('abos').innerHTML = ab.resources.map(abosCard).join('');
+    document.getElementById('svc').innerHTML = svcTable(ab.resources);
+    const claude = ab.resources.find(r => r.feed_age_s > 0);
+    document.getElementById('abos-age').textContent = claude
+      ? `Abo-Stand: vor ${Math.max(0, Math.round(claude.feed_age_s/60))} min (claude-abo-watch, Timer 20 min)` : '';
+  } else {
+    document.getElementById('abos').innerHTML = '<span class="text-sm text-amber-600">/api/abos nicht erreichbar</span>';
+    document.getElementById('svc').innerHTML = '<span class="text-sm text-amber-600">/api/abos nicht erreichbar</span>';
+  }
+
+  const dot = document.getElementById('livedot');
+  if(h.ts){
+    dot.textContent = '● live'; dot.className = 'text-xs text-emerald-600 ml-1';
+    document.getElementById('ts').textContent =
+      'Stand ' + new Date(h.ts).toLocaleTimeString('de') + ' · auto 20s';
+
+    const ramPct  = Math.round(100*h.ram.used/h.ram.total);
+    const loadPct = Math.round(100*h.load[0]/h.nproc);
+    const swapPct = Math.round(100*h.swap_used/8);
+    document.getElementById('cap').innerHTML =
+        bar('RAM',  h.ram.used+'/'+h.ram.total+'G', ramPct)
+      + bar('CPU',  'load '+h.load[0]+'/'+h.nproc, loadPct)
+      + bar('Swap', h.swap_used+'G', swapPct)
+      + bar('PSI',  String(h.psi), h.psi)
+      + '<div class="text-xs text-slate-400 pt-2">DISK</div>'
+      + bar('root', h.disk.root.size, h.disk.root.pct)
+      + bar('sdb',  h.disk.sdb.size,  h.disk.sdb.pct)
+      + bar('/tmp', '',               h.disk.tmp.pct);
+
+    document.getElementById('agents').innerHTML =
+        agentRow('gemini', h.agents.gemini, 'Polecats · Plan-Lane')
+      + agentRow('claude', h.agents.claude, 'vk + Sessions')
+      + agentRow('node',   h.agents.node,   'CLIs / Apps');
+  } else {
+    dot.textContent = '○ offline'; dot.className = 'text-xs text-slate-400 ml-1';
+  }
+
+  const rigs = Object.entries(c);
+  if(rigs.length){
+    let rows = `<table class="w-full text-sm">
+      <thead><tr class="text-xs text-slate-500 border-b border-slate-200">
+        <th class="text-left font-semibold py-2">Rig</th>
+        <th class="text-left font-semibold py-2">Polecats</th>
+        <th class="text-left font-semibold py-2">VK-Slots frei</th>
+        <th class="text-left font-semibold py-2">Status</th>
+      </tr></thead><tbody>`;
+    for(const [rig,v] of rigs){
+      const busy = v.polecats > 15;
+      rows += `<tr class="border-b border-slate-100">
+        <td class="py-2 font-medium">${rig}</td>
+        <td class="py-2 tabular-nums">${v.polecats}</td>
+        <td class="py-2 tabular-nums">${v.vkslots}</td>
+        <td class="py-2 ${busy?'text-amber-600':'text-emerald-600'}">● ${busy?'voll':'ok'}</td>
+      </tr>`;
+    }
+    rows += '</tbody></table>';
+    document.getElementById('fleet').innerHTML = rows;
+  } else {
+    document.getElementById('fleet').innerHTML =
+      '<span class="text-sm text-amber-600">/api/capacity nicht erreichbar</span>';
+  }
+}
+load();
+setInterval(load, 20000);
+</script>
+</body>
+</html>
