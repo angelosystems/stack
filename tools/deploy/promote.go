@@ -50,6 +50,7 @@ const (
 	exUsage        = 64 // Aufruf-/Wall-/Config-Fehler (wie deploy-gt.sh die64)
 	exNoStaging    = 65 // Gate (a): kein grüner Staging-Smoke für die SHA
 	exNoApproval   = 66 // Gate (b): kein frisches Approval → kein Deploy
+	exNoJourney    = 67 // Gate (a2): kein grünes Journey-gate-Result für die SHA (nur wenn JOURNEY_PROMOTE_GATE=1)
 	exUnavailable  = 69 // Ledger/DB nicht erreichbar (EX_UNAVAILABLE)
 	exDeployFailed = 70 // deploy-gt.sh Build/Ship/Swap-Miss
 	exSmokeFailed  = 75 // Prod-Smoke rot (Rollback versucht)
@@ -180,6 +181,47 @@ func prevProdVersion(ctx context.Context, dsn, app string) string {
 	return v
 }
 
+// journeyResult ist die relevante Teilmenge des journey-run Result-JSON
+// (/var/lib/journey-runner/results/<app>-<ctx>-<ts>.json, PRD ui-journey-testing
+// D3/Panel-A1). Der Reaktor/das Promote-Gate konsumieren das JSON, nie Logs.
+type journeyResult struct {
+	App     string `json:"app"`
+	Context string `json:"context"`
+	Ref     string `json:"ref"`
+	Verdict string `json:"verdict"`
+}
+
+// journeyGateSatisfied prüft, ob im Results-Verzeichnis ein GRÜNES gate-Result
+// für (app, sha) liegt: verdict='green', context='gate', app passt und ref
+// präfix-matcht die SHA (kurz/lang tolerant wie der Prod-Smoke). Ein Treffer
+// reicht. Gibt (ok, Beweis-Dateipfad) zurück. Pure genug für Unit-Tests (nimmt
+// das Verzeichnis als Argument — keine festverdrahteten Pfade). WP4 (PRD
+// ui-journey-testing): "Journey-Grün des SHA" als zusätzliche Promote-Stufe.
+func journeyGateSatisfied(resultsDir, app, sha string) (bool, string) {
+	entries, err := os.ReadDir(resultsDir)
+	if err != nil {
+		return false, ""
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		p := filepath.Join(resultsDir, e.Name())
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var r journeyResult
+		if err := json.Unmarshal(b, &r); err != nil {
+			continue
+		}
+		if r.App == app && r.Context == "gate" && r.Verdict == "green" && shaPrefixMatch(r.Ref, sha) {
+			return true, p
+		}
+	}
+	return false, ""
+}
+
 // recordProdLive schreibt (Upsert) die Prod-Zeile env='prod' source='promote'
 // status='live'. Upsert auf (service,environment,git_sha) = Idempotenz (D11);
 // eine quarantänisierte Zeile (rolled_back) wird NIE überschrieben.
@@ -269,7 +311,7 @@ func fail(code int, format string, a ...any) {
 }
 
 func promoteCmd() *cobra.Command {
-	var manifestPath, approvalDir, dsn, deployGt, deployNode, actor string
+	var manifestPath, approvalDir, dsn, deployGt, deployNode, actor, journeyResultsDir string
 	var dryRun bool
 
 	c := &cobra.Command{
@@ -337,6 +379,23 @@ func promoteCmd() *cobra.Command {
 			}
 			fmt.Printf("→ Staging grün: %s @ %s (version %s) [Ledger env=staging live]\n", app, short(sha), short(version))
 
+			// ── Gate (a2): Journey-Grün des SHA (hinter Env-Flag, Default AUS) ──
+			// Reversibilität (PRD): die Promote-Stufe ist nur scharf, wenn
+			// JOURNEY_PROMOTE_GATE=1. Ohne Flag: unverändertes Verhalten. Mit Flag
+			// verlangt das Gate ein grünes gate-Result für EXAKT diese SHA, sonst
+			// exit 67 (eigener Code, damit der Verweigerungs-Beweis „warum" ohne
+			// Log-Parsing unterscheidet). Läuft VOR dem Approval (66), damit die
+			// Reihenfolge Staging(65) → Journey(67) → Approval(66) beweisbar ist.
+			if os.Getenv("JOURNEY_PROMOTE_GATE") == "1" {
+				ok, proof := journeyGateSatisfied(journeyResultsDir, app, sha)
+				if !ok {
+					fail(exNoJourney, "kein grünes Journey-gate-Result für %s@%s (JOURNEY_PROMOTE_GATE=1) — nicht promotefähig.\n"+
+						"  Erst grün fahren:  journey-run %s staging --context gate --ref %s\n"+
+						"  (Results-Verzeichnis: %s)", app, short(sha), app, short(sha), journeyResultsDir)
+				}
+				fmt.Printf("→ Journey grün: %s@%s [%s]\n", app, short(sha), proof)
+			}
+
 			// ── Gate (b): frisches Approval für (app, sha) ──────────────────
 			appr, err := checkApproval(approvalDir, app, sha, time.Now())
 			if err != nil {
@@ -391,6 +450,7 @@ func promoteCmd() *cobra.Command {
 	c.Flags().StringVar(&deployNode, "deploy-node", envOr("DEPLOY_NODE_SH", "/opt/stack/tools/portfolio/deploy-node.sh"), "Pfad zu deploy-node.sh (Bundle-Deploy, sa-deploy-stufen W4)")
 	hn, _ := os.Hostname()
 	c.Flags().StringVar(&actor, "actor", envOr("DEPLOY_ACTOR", "promote@"+hn), "deployed_by im Ledger")
+	c.Flags().StringVar(&journeyResultsDir, "journey-results-dir", envOr("JOURNEY_RESULTS_DIR", "/var/lib/journey-runner/results"), "Journey-Result-JSONs (nur relevant bei JOURNEY_PROMOTE_GATE=1)")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "prüft beide Gates, deployt/smoked/schreibt aber nicht")
 	return c
 }

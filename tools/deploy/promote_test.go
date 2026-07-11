@@ -164,6 +164,49 @@ func TestPromoteInvocation(t *testing.T) {
 	}
 }
 
+// TestJourneyGateSatisfied — die zusätzliche Promote-Stufe „Journey-Grün des SHA"
+// (WP4). Nur ein grünes gate-Result der EXAKTEN app+sha zählt; red/harness,
+// falscher Kontext, falsche app, falsche SHA werden verworfen (SHA-Präfix-tolerant).
+func TestJourneyGateSatisfied(t *testing.T) {
+	dir := t.TempDir()
+	longSha := "77f6037c852ece813dd39f0d634d3d0b5de51167"
+	write := func(name string, r journeyResult) {
+		b, _ := json.Marshal(r)
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Leeres Verzeichnis → nicht erfüllt (Verweigerungs-Beweis-Kern → exit 67).
+	if ok, _ := journeyGateSatisfied(dir, "fin", longSha); ok {
+		t.Fatal("leeres Results-Verzeichnis MUSS unerfüllt sein (sonst kein Gate)")
+	}
+
+	// Ablenker: rot, falscher Kontext, falsche app, falsche SHA.
+	write("fin-gate-1.json", journeyResult{App: "fin", Context: "gate", Ref: longSha, Verdict: "red"})
+	write("fin-smoke-1.json", journeyResult{App: "fin", Context: "smoke", Ref: longSha, Verdict: "green"})
+	write("other-gate-1.json", journeyResult{App: "master-kanban", Context: "gate", Ref: longSha, Verdict: "green"})
+	write("fin-gate-wrongsha.json", journeyResult{App: "fin", Context: "gate", Ref: "deadbeefdeadbeef", Verdict: "green"})
+	if ok, _ := journeyGateSatisfied(dir, "fin", longSha); ok {
+		t.Fatal("nur Ablenker (rot/smoke/andere-app/andere-sha) dürfen NICHT durchwinken")
+	}
+
+	// Grünes gate-Result mit KURZER SHA im Ref, Anfrage mit langer SHA → Präfix-Match.
+	write("fin-gate-2.json", journeyResult{App: "fin", Context: "gate", Ref: "77f6037", Verdict: "green"})
+	ok, proof := journeyGateSatisfied(dir, "fin", longSha)
+	if !ok {
+		t.Fatal("grünes gate-Result (kurze SHA) MUSS die lange SHA durchwinken (Präfix)")
+	}
+	if proof == "" {
+		t.Fatal("Beweis-Dateipfad fehlt")
+	}
+
+	// Andere app fragt dieselbe SHA an → nicht erfüllt (app ist Teil des Gates).
+	if ok, _ := journeyGateSatisfied(dir, "sa-canary", longSha); ok {
+		t.Fatal("gate-Result einer anderen app darf keine Fremd-app durchwinken")
+	}
+}
+
 func pcHasFlag(args []string, flag string) bool {
 	for _, a := range args {
 		if a == flag {
