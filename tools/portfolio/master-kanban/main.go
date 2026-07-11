@@ -26,10 +26,10 @@ import (
 )
 
 var (
-	dsn     string
-	pool    *pgxpool.Pool
-	stPool  *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
-	qbPool  *pgxpool.Pool // Quantbot-Ledger (read KPI events)
+	dsn    string
+	pool   *pgxpool.Pool
+	stPool *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
+	qbPool *pgxpool.Pool // Quantbot-Ledger (read KPI events)
 	// Build-Stamp — via `-ldflags "-X main.Version=… -X main.Sha=… -X main.BuiltAt=…"`
 	// gesetzt (siehe deploy.sh). Defaults markieren einen ungestampten Build.
 	Version string = "dev"
@@ -329,7 +329,7 @@ func main() {
 		Use:   "master-kanban",
 		Short: "Master-Kanban CLI — Portfolio-Layer auf mario-brain Postgres",
 	}
-	root.PersistentFlags().StringVar(&dsn, "dsn", envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"), "Postgres DSN")
+	root.PersistentFlags().StringVar(&dsn, "dsn", os.Getenv("PORTFOLIO_DSN"), "Postgres DSN")
 
 	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments())
 
@@ -484,6 +484,10 @@ func parseTime(val any) time.Time {
 func connect() *pgxpool.Pool {
 	if pool != nil {
 		return pool
+	}
+	if dsn == "" {
+		fmt.Fprintln(os.Stderr, "PORTFOLIO_DSN fehlt — auf werkstatt: /etc/master-kanban/db.env (oder --dsn setzen)")
+		os.Exit(1)
 	}
 	p, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
@@ -2364,9 +2368,6 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(res)
 			})
 
-			// Ressourcen-Panel — Abo-Limits + Service-Registry (PRD ressourcen-abo-panel)
-			http.HandleFunc("/api/abos", handleAbos)
-
 			// P2.1 — Host-Kapazitätsdaten für das Cockpit
 			http.HandleFunc("/api/capacity-host", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -4076,6 +4077,12 @@ func guessFirmaFromCWD() string {
 	if err != nil {
 		return ""
 	}
+	return firmaFromPath(cwd)
+}
+
+// firmaFromPath leitet die Firma aus einem Pfad ab (Testbarkeit: reine Funktion
+// ohne cwd-Zugriff).
+func firmaFromPath(cwd string) string {
 	cwd = strings.ToLower(cwd)
 	if strings.Contains(cwd, "solartown/stack") || strings.Contains(cwd, "polecats/flint/stack") || strings.Contains(cwd, "polecats/") || strings.Contains(cwd, "/opt/stack") {
 		return "stack"

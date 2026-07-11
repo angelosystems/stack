@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -12,10 +14,7 @@ import (
 )
 
 func TestSageSweep_FilteringAndChannel(t *testing.T) {
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)
@@ -186,10 +185,7 @@ func TestSageSweep_FilteringAndChannel(t *testing.T) {
 }
 
 func TestSageSweep_StagnationDetectorExclusion(t *testing.T) {
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)

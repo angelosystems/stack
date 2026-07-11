@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -13,10 +15,7 @@ import (
 )
 
 func TestLinkageConfidenceAndPromoteReady(t *testing.T) {
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)
@@ -176,10 +175,7 @@ func TestLinkageConfidenceAndPromoteReady(t *testing.T) {
 }
 
 func TestConfidenceAPIEndpoints(t *testing.T) {
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)
@@ -201,8 +197,8 @@ func TestConfidenceAPIEndpoints(t *testing.T) {
 		threshold := 90.0
 
 		item := map[string]any{
-			"id":                           "sa-test-confidence-init",
-			"promote_ready":                true,
+			"id":                            "sa-test-confidence-init",
+			"promote_ready":                 true,
 			"linkage_confidence_percentage": completenessPct,
 		}
 		if completenessPct < threshold {

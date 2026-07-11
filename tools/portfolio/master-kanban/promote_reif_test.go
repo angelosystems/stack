@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -12,10 +14,7 @@ func TestPromoteReif_CompletenessCheckAndDamping(t *testing.T) {
 	os.Setenv("PORTFOLIO_CONFIDENCE_THRESHOLD", "0.0")
 	defer os.Unsetenv("PORTFOLIO_CONFIDENCE_THRESHOLD")
 
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)

@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -12,7 +14,7 @@ import (
 )
 
 func TestLiveGeldSchutz_StagnationAndPromoteReady(t *testing.T) {
-	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	portfolioDsn := mkIntegrationDSN(t)
 	ctx := context.Background()
 
 	pPool, err := pgxpool.New(ctx, portfolioDsn)
@@ -166,7 +168,7 @@ func TestLiveGeldSchutz_StagnationAndPromoteReady(t *testing.T) {
 }
 
 func TestFlowManager_LiveGeldSchutz_Overriding(t *testing.T) {
-	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	portfolioDsn := mkIntegrationDSN(t)
 	ctx := context.Background()
 
 	pPool, err := pgxpool.New(ctx, portfolioDsn)

@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -15,10 +17,7 @@ import (
 )
 
 func TestSageLeaseSequential(t *testing.T) {
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)
@@ -74,10 +73,7 @@ func TestSageLeaseSequential(t *testing.T) {
 }
 
 func TestSageLeaseConcurrency(t *testing.T) {
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)
@@ -146,10 +142,7 @@ func TestSageLeaseConcurrency(t *testing.T) {
 }
 
 func TestExecuteSageActionConcurrency(t *testing.T) {
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)
@@ -236,10 +229,7 @@ func TestStewardReport(t *testing.T) {
 		return
 	}
 
-	testDsn := os.Getenv("PORTFOLIO_DSN")
-	if testDsn == "" {
-		testDsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	testDsn := mkIntegrationDSN(t)
 
 	p, err := pgxpool.New(context.Background(), testDsn)
 	if err != nil {

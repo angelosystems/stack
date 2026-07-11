@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 // deploy_gt_test.go — Integrationstest für ../deploy-gt.sh (Release-Pipeline

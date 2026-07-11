@@ -61,10 +61,10 @@ func TestDecideReconcile_Uebergangstabelle(t *testing.T) {
 
 func TestShaMatch(t *testing.T) {
 	cases := []struct {
-		name    string
-		rowSha  string
-		probe   probeResult
-		want    bool
+		name   string
+		rowSha string
+		probe  probeResult
+		want   bool
 	}{
 		{"Kurz-SHA-Zeile vs Lang-SHA-Probe", "abc1234", probeResult{Sha: "abc1234def5678900000000000000000000000000"}, true},
 		{"Lang-SHA-Zeile vs Kurz-SHA-Probe", "abc1234def5678900000000000000000000000000", probeResult{Sha: "abc1234"}, true},

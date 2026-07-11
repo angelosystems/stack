@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -12,7 +14,7 @@ import (
 )
 
 func TestManagerSweepAndEscalate(t *testing.T) {
-	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	portfolioDsn := mkIntegrationDSN(t)
 	ctx := context.Background()
 
 	pPool, err := pgxpool.New(ctx, portfolioDsn)
@@ -146,7 +148,7 @@ func TestManagerSweepAndEscalate(t *testing.T) {
 }
 
 func TestManagerSweep_GlmDiagnosisIntegration(t *testing.T) {
-	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	portfolioDsn := mkIntegrationDSN(t)
 	ctx := context.Background()
 
 	pPool, err := pgxpool.New(ctx, portfolioDsn)
@@ -295,7 +297,7 @@ func TestManagerSweep_GlmDiagnosisIntegration(t *testing.T) {
 }
 
 func TestManagerLiveGeldSchutz(t *testing.T) {
-	portfolioDsn := envOr("PORTFOLIO_DSN", "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable")
+	portfolioDsn := mkIntegrationDSN(t)
 	ctx := context.Background()
 
 	pPool, err := pgxpool.New(ctx, portfolioDsn)

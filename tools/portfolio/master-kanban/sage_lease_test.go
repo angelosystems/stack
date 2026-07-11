@@ -1,8 +1,9 @@
+//go:build integration
+
 package main
 
 import (
 	"context"
-	"os"
 	"sync"
 	"testing"
 
@@ -14,10 +15,7 @@ import (
 // try to act on the same dead workspace concurrently, only one succeeds
 // in acquiring the lease and incrementing the heal counter, while the other is skipped.
 func TestExecuteSageAction_Concurrency(t *testing.T) {
-	dsn := os.Getenv("PORTFOLIO_DSN")
-	if dsn == "" {
-		dsn = "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
-	}
+	dsn := mkIntegrationDSN(t)
 
 	ctx := context.Background()
 	p, err := pgxpool.New(ctx, dsn)

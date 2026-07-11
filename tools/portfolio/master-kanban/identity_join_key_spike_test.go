@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -189,7 +191,7 @@ func TestIdentityJoinKeySpike(t *testing.T) {
 
 	// 6. Step 4: Query Beads Postgres DB for status (Space 3 -> Space 4)
 	t.Logf("\n--- STEP 4 (Space 4: Bead ID -> Beads Postgres DB -> Status) ---")
-	beadsDSN := "postgres://remote:remote@127.0.0.1:5433/solartown_clean?sslmode=disable"
+	beadsDSN := mkSecondaryDSN(t, "MK_BEADS_DSN")
 	beadsCtx := context.Background()
 	beadsConn, err := pgx.Connect(beadsCtx, beadsDSN)
 	if err != nil {
@@ -212,7 +214,7 @@ func TestIdentityJoinKeySpike(t *testing.T) {
 
 	// 7. Step 5: Query Portfolio/Board Postgres DB for Initiative Link (Space 4 -> Space 5)
 	t.Logf("\n--- STEP 5 (Space 5: Bead ID -> Board Postgres DB -> Initiative Card) ---")
-	portfolioDSN := "postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain?sslmode=disable"
+	portfolioDSN := mkIntegrationDSN(t)
 	portfolioCtx := context.Background()
 	portfolioConn, err := pgx.Connect(portfolioCtx, portfolioDSN)
 	if err != nil {

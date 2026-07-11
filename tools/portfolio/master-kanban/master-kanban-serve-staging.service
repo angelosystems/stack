@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/opt/stack/bin/master-kanban serve --port 7770
-Environment=PORTFOLIO_DSN=postgres://mario:c8f2b7025f25a3fa9149c4fb4e20cc18@127.0.0.1:5434/mario_brain_staging?sslmode=disable
+EnvironmentFile=/etc/master-kanban/db.staging.env
 Environment=PORTFOLIO_API_KEY=dev-secret
 Restart=always
 RestartSec=5
