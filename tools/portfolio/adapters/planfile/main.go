@@ -127,6 +127,8 @@ type frontmatter struct {
 	ParentPlan string `yaml:"parent_plan"`
 	Tier       string `yaml:"tier"`
 	Software   string `yaml:"software"`
+	// Freie Karten-Tags (z.B. cto-backlog, quantumshift-cto-betrieb Paket D).
+	Tags       []string `yaml:"tags"`
 	// true wenn der Key parent_plan im YAML steht (auch mit Wert null) —
 	// unterscheidet bewusstes „kein Dach" von vergessenem Feld.
 	HasParentKey bool `yaml:"-"`
@@ -425,6 +427,15 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 				  WHERE initiative_id=$1 AND kind='triage' AND value='parent-check'`, initiativeID)
 		} else {
 			upsertTag(p, ctx, initiativeID, "triage", "parent-check")
+		}
+	}
+
+	// Frontmatter-tags → Karten-Tags (kind='tag', additiv/idempotent;
+	// quantumshift-cto-betrieb Paket D). Bei Kind-PRDs landet der Tag auf
+	// der Dach-Initiative — so bleibt z.B. cto-backlog board-filterbar.
+	for _, t := range fm.Tags {
+		if s := strings.TrimSpace(t); s != "" {
+			upsertTag(p, ctx, initiativeID, "tag", s)
 		}
 	}
 
