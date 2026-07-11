@@ -43,8 +43,9 @@ UPDATE portfolio.initiative SET firma='angeloos'
    AND firma IN ('solartown','stack');
 
 -- 2b) Konsolidierung: Rest der beiden Fabrik-Zeilen -> code-factory
+-- (sage_escalation ist eine VIEW ueber initiative_link+initiative — erbt firma
+--  aus dem initiative-UPDATE, Befund F1-Lauf 2026-07-11)
 UPDATE portfolio.initiative      SET firma='code-factory' WHERE firma IN ('solartown','stack');
-UPDATE portfolio.sage_escalation SET firma='code-factory' WHERE firma IN ('solartown','stack');
 UPDATE portfolio.unlinked_item   SET firma='code-factory' WHERE firma IN ('solartown','stack');
 
 -- 2c) software:-Tags je Komponente (WP0-Liste, Delivery Gate 0)
