@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -331,7 +332,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", os.Getenv("PORTFOLIO_DSN"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -1633,6 +1634,68 @@ func cmdServe() *cobra.Command {
 
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
+			// POST /api/merge — Dublette in Ziel-Karte zusammenführen (WP2a).
+			// checkAuth Pflicht (Schreibroute); handlungsleitende Fehler.
+			http.HandleFunc("/api/merge", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Auth-Request-Email, X-Api-Key")
+				if r.Method == "OPTIONS" {
+					return
+				}
+				if r.Method != "POST" {
+					http.Error(w, "POST only", 405)
+					return
+				}
+				if !checkAuth(r) {
+					http.Error(w, "unauthorized — X-Api-Key oder SSO-Header (X-Auth-Request-Email) setzen", 401)
+					return
+				}
+				var body struct {
+					DupID           string `json:"dup_id"`
+					ZielID          string `json:"ziel_id"`
+					ForceProposeAck bool   `json:"force_propose_ack"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "ungültiger JSON-Body: "+err.Error(), 400)
+					return
+				}
+				if body.DupID == "" || body.ZielID == "" {
+					http.Error(w, `dup_id und ziel_id sind erforderlich (z.B. {"dup_id":"st-alt","ziel_id":"st-ziel"})`, 400)
+					return
+				}
+				rep, err := mergeInitiatives(r.Context(), p, body.DupID, body.ZielID, actorFrom(r), false, body.ForceProposeAck)
+				if err != nil {
+					// Validierungs-Verweigerungen (Regel 3/4, Poka-yoke, nicht
+					// gefunden) sind Client-Fehler → 409; Rest → 500.
+					code := 500
+					if strings.HasPrefix(err.Error(), "merge verweigert") || strings.Contains(err.Error(), "existiert nicht") {
+						code = 409
+					}
+					http.Error(w, err.Error(), code)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(rep)
+			})
+			// GET /api/steward/findings?format=concise|detailed&klasse=… (WP3).
+			// Read-only View — konsistent mit den anderen GET-Routen ohne
+			// checkAuth. 503, wenn die Migration portfolio-020 noch fehlt.
+			http.HandleFunc("/api/steward/findings", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				findings, err := queryStewardFindings(r.Context(), p,
+					r.URL.Query().Get("klasse"), findingsFormat(r.URL.Query().Get("format")))
+				if err != nil {
+					if errors.Is(err, errFindingsViewMissing) {
+						http.Error(w, err.Error(), 503)
+						return
+					}
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				json.NewEncoder(w).Encode(findings)
+			})
 			http.HandleFunc("/api/capture", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
@@ -2368,6 +2431,9 @@ func cmdServe() *cobra.Command {
 				json.NewEncoder(w).Encode(res)
 			})
 
+			// Ressourcen-Panel — Abo-Limits + Service-Registry (PRD ressourcen-abo-panel)
+			http.HandleFunc("/api/abos", handleAbos)
+
 			// P2.1 — Host-Kapazitätsdaten für das Cockpit
 			http.HandleFunc("/api/capacity-host", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -2429,14 +2495,22 @@ func cmdServe() *cobra.Command {
 
 				if ev.Kind == "stage_proposed" {
 					var pLoad struct {
-						Stage string `json:"stage"`
+						Stage       string `json:"stage"`
+						ProposeOnly bool   `json:"propose_only"`
 					}
 					if err := json.Unmarshal(ev.Payload, &pLoad); err == nil && pLoad.Stage != "" {
 						var currentStage string
 						var locked bool
 						if err := p.QueryRow(r.Context(), `SELECT stage, COALESCE(stage_locked_by_human, false) FROM portfolio.initiative WHERE id=$1`, ev.InitiativeId).Scan(&currentStage, &locked); err == nil {
-							stageRank := map[string]int{"idea": 0, "soon": 1, "now": 2, "watching": 3, "done": 4}
-							if !locked && stageRank[pLoad.Stage] > stageRank[currentStage] {
+							// Geteilte Entscheidung mit dem on-box-Sweep
+							// (listenerShouldMove/stageProposalDecision, flow_vollzug.go).
+							// propose_only-Events (Regel 3, quantbot) werden NIE
+							// vollzogen — sonst bewegte der Listener den bewusst nicht
+							// vollzogenen Vorschlag doch. halt=false: der externe
+							// stage_proposed-Weg bleibt wie bisher (Not-Aus greift nur
+							// im Sweep-Vollzug), das Event ist oben bereits generisch
+							// persistiert — kein Doppel-Event.
+							if listenerShouldMove(pLoad.ProposeOnly, locked, currentStage, pLoad.Stage) {
 								_, _ = p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage=$2 WHERE id=$1`, ev.InitiativeId, pLoad.Stage)
 							}
 						}
@@ -3553,6 +3627,8 @@ func cmdServe() *cobra.Command {
 			fmt.Println("  GET  /api/initiative   — Karten-Detail (?id=…)")
 			fmt.Println("  GET  /api/unlinked     — List unlinked items and detector status")
 			fmt.Println("  POST /api/move         — {id, stage}")
+			fmt.Println("  POST /api/merge        — {dup_id, ziel_id, force_propose_ack} (checkAuth)")
+			fmt.Println("  GET  /api/steward/findings — Findings-Surface (?format, ?klasse)")
 			fmt.Println("  POST /api/events       — Adapter-Endpoint (X-Api-Key)")
 			fmt.Println("  POST /api/github-webhook — GitHub pull_request (HMAC)")
 			fmt.Println("  GET  /api/wip-limits   — Configurable WIP limits")
@@ -4260,8 +4336,24 @@ type StageChangeNotification struct {
 	To    string `json:"to"`
 }
 
+// wipNowDefaults hält die per-Firma-NOW-Limits (Default 3, wenn nicht gelistet).
+// Übernimmt die historischen flow_manager-Werte und ergänzt code-factory=4, das
+// nach dem Rename in der alten flow_manager-Map fehlte (Limit 0 ⇒ Check feuerte
+// nie). EINE Quelle für /api/wip-limits UND den Sweep (mk-verwalter-vollzug WP1).
+var wipNowDefaults = map[string]int{
+	"stayawesome":  3,
+	"solartown":    3,
+	"code-factory": 4,
+	"quantbot":     2,
+	"mariobrain":   2,
+	"angeloos":     2,
+}
+
 func getWIPLimits(firma string) (int, int) {
 	nowLimit := 3
+	if v, ok := wipNowDefaults[firma]; ok {
+		nowLimit = v
+	}
 	soonLimit := 5
 	envNow := os.Getenv("PORTFOLIO_WIP_NOW_" + strings.ToUpper(firma))
 	if envNow != "" {

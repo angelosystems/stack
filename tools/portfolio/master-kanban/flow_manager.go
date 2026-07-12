@@ -99,12 +99,27 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		}
 	}
 
-	wipLimits := map[string]int{
-		"stayawesome": 3,
-		"solartown":   3,
-		"quantbot":    2,
-		"mariobrain":  2,
-		"angeloos":    2,
+	// 2b. Echtes Stagnationsmaß: last_activity aus den relevanten Events, EINE
+	// Query (GROUP BY) statt N+1. init.updated_at ist unbrauchbar, weil
+	// trg_initiative_stage_change es bei JEDEM Update setzt — auch beim
+	// flow_action-Rauschen. flow_action/activity zählen bewusst NICHT als
+	// Aktivität; fehlt ein Event, ist created_at der Fallback.
+	lastActivity := make(map[string]time.Time)
+	laRows, err := p.Query(ctx, `
+		SELECT initiative_id, MAX(at)
+		  FROM portfolio.initiative_event
+		 WHERE kind IN ('moved','commented','completed','linked','created','edited','dispatched')
+		 GROUP BY initiative_id
+	`)
+	if err == nil {
+		for laRows.Next() {
+			var id string
+			var at time.Time
+			if laRows.Scan(&id, &at) == nil {
+				lastActivity[id] = at
+			}
+		}
+		laRows.Close()
 	}
 
 	var diagnosedCards []DiagnosedCard
@@ -179,6 +194,40 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			continue
 		}
 
+		// watching→done: evidenzbasierter Vollzug (WP1). Delivery-Beleg +
+		// (je nach Ledger-Lage) Live-Deploy. Läuft für jede nicht-engagierte
+		// watching-Karte, unabhängig vom Flag-Schritt. quantbot: propose-only
+		// (Regel 3, Live-Geld-Nähe) — Vorschlag als Event, kein Auto-Move
+		// (WP1-Nachtrag).
+		if init.Stage == "watching" {
+			ev, derr := gatherDoneEvidence(ctx, p, init.ID)
+			if derr != nil {
+				fmt.Fprintf(os.Stderr, "  ❌ done-Evidenz für %s: %v\n", init.ID, derr)
+			} else if move, why := watchingDoneDecision(ev); move {
+				proposeOnly := init.Firma == "quantbot"
+				evidence := map[string]any{
+					"reason":             why,
+					"has_delivery":       ev.HasDelivery,
+					"deploy_status":      ev.DeployStatus,
+					"software_in_ledger": ev.SoftwareInLedger,
+				}
+				if dryRun {
+					verb := "vollziehen"
+					if proposeOnly {
+						verb = "vorschlagen (propose-only quantbot)"
+					}
+					fmt.Printf("[dry-run] würde %s (%s) watching→done %s (%s)\n", init.ID, init.Title, verb, why)
+				} else if moved, reason, aerr := applyStageProposal(ctx, p, init.ID, "done", evidence, "flow-manager", proposeOnly); aerr != nil {
+					fmt.Fprintf(os.Stderr, "  ❌ watching→done-Vollzug für %s: %v\n", init.ID, aerr)
+				} else if moved {
+					fmt.Printf("  ✓ %s (%s) watching→done vollzogen (%s)\n", init.ID, init.Title, why)
+					continue
+				} else if reason == "propose-only" {
+					fmt.Printf("  ⋯ %s (%s) watching→done VORGESCHLAGEN (propose-only quantbot, %s)\n", init.ID, init.Title, why)
+				}
+			}
+		}
+
 		// C. Get recent events
 		eventRows, err := p.Query(ctx, `
 			SELECT kind, source_backend, COALESCE(from_stage, ''), COALESCE(to_stage, ''), COALESCE(payload::text, '{}'), COALESCE(actor, ''), at 
@@ -201,9 +250,10 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		// D. Evaluate flagging rules (L2)
 		var flaggedReasons []string
 
-		// WIP Limit Check
+		// WIP Limit Check — Limit aus der vereinheitlichten Quelle (getWIPLimits,
+		// inkl. code-factory=4 nach dem Rename; früher: Firma unbekannt ⇒ 0).
 		if init.Stage == "now" {
-			limit := wipLimits[init.Firma]
+			limit, _ := getWIPLimits(init.Firma)
 			if limit > 0 && wipCounts[init.Firma] > limit {
 				flaggedReasons = append(flaggedReasons, fmt.Sprintf("WIP-Überlauf: %d karten in NOW (limit %d)", wipCounts[init.Firma], limit))
 			}
@@ -238,7 +288,13 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			}
 		}
 
-		timeInactivity := time.Since(init.UpdatedAt)
+		// Inaktivität aus echter last_activity (Fallback created_at), NICHT aus
+		// updated_at (siehe 2b).
+		activityAt, ok := lastActivity[init.ID]
+		if !ok {
+			activityAt = init.CreatedAt
+		}
+		timeInactivity := time.Since(activityAt)
 		stagnationThreshold := GetStageThreshold(init.Firma, init.Stage)
 		if (init.Stage == "now" || init.Stage == "soon") && stagnationThreshold > 0 && timeInactivity > stagnationThreshold && !hasActiveWorkspace && !hasActiveBeads {
 			flaggedReasons = append(flaggedReasons, fmt.Sprintf("Stagnation: %v tage stille, keine aktive arbeit (workspace/beads)", int(timeInactivity.Hours()/24)))
@@ -296,6 +352,39 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				continue
 			}
 
+			// now→watching: Promote-reif + stage=now + Beads>0 ⇒ evidenzbasierter
+			// Vollzug (WP1). Nur stage now (soon/idea bleiben Urteilsfall).
+			// quantbot: propose-only (Regel 3) — Vorschlag als Event, kein
+			// Auto-Move (WP1-Nachtrag). GLM/Digest laufen danach unverändert
+			// weiter.
+			if init.Stage == "now" && hasBeads && allBeadsClosed {
+				proposeOnly := init.Firma == "quantbot"
+				closedCount := 0
+				for _, b := range beads {
+					if b.Status == "closed" {
+						closedCount++
+					}
+				}
+				evidence := map[string]any{
+					"reason":       "promote-reif",
+					"beads_total":  len(beads),
+					"beads_closed": closedCount,
+				}
+				if dryRun {
+					verb := "vollziehen"
+					if proposeOnly {
+						verb = "vorschlagen (propose-only quantbot)"
+					}
+					fmt.Printf("[dry-run] würde %s (%s) now→watching %s (%d/%d beads closed)\n", init.ID, init.Title, verb, closedCount, len(beads))
+				} else if moved, reason, aerr := applyStageProposal(ctx, p, init.ID, "watching", evidence, "flow-manager", proposeOnly); aerr != nil {
+					fmt.Fprintf(os.Stderr, "  ❌ now→watching-Vollzug für %s: %v\n", init.ID, aerr)
+				} else if moved {
+					fmt.Printf("  ✓ %s (%s) now→watching vollzogen (%d/%d beads closed)\n", init.ID, init.Title, closedCount, len(beads))
+				} else if reason == "propose-only" {
+					fmt.Printf("  ⋯ %s (%s) now→watching VORGESCHLAGEN (propose-only quantbot, %d/%d beads closed)\n", init.ID, init.Title, closedCount, len(beads))
+				}
+			}
+
 			fmt.Printf("Diagnosing flagged card %s (%s, Stage: %s, Firma: %s)\n", init.ID, init.Title, init.Stage, init.Firma)
 			fmt.Printf("  -> Flagged reasons: %s\n", strings.Join(flaggedReasons, " | "))
 
@@ -320,24 +409,34 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			}
 
 			if !dryRun {
-				// Write event to Postgres
-				payloadMap := map[string]any{
-					"flagged_reasons": flaggedReasons,
-					"category":        diagnosis.Category,
-					"confidence":      diagnosis.Confidence,
-					"reasoning":       diagnosis.Reasoning,
-					"proposed_action": diagnosis.ProposedAction,
-				}
-				payloadBytes, _ := json.Marshal(payloadMap)
+				// Event-Delta-Gate (WP1): flow_action nur schreiben, wenn sich der
+				// Flag-Satz seit dem jüngsten flow_action-Event geändert hat. Das
+				// killt den 30-s-Churn (413k Bestands-Events) an der Quelle;
+				// verworfene Alternative war ein reines Cron-Delete ohne Gate — das
+				// behebt die Quelle nicht und verwässert last_activity weiter.
+				newHash := flagsHash(flaggedReasons)
+				if flowActionChanged(lastFlowActionHash(ctx, p, init.ID), flaggedReasons) {
+					payloadMap := map[string]any{
+						"flagged_reasons": flaggedReasons,
+						"flags_hash":      newHash,
+						"category":        diagnosis.Category,
+						"confidence":      diagnosis.Confidence,
+						"reasoning":       diagnosis.Reasoning,
+						"proposed_action": diagnosis.ProposedAction,
+					}
+					payloadBytes, _ := json.Marshal(payloadMap)
 
-				_, err = p.Exec(ctx, `
-					INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
-					VALUES ($1, 'flow_action', 'flow_manager', $2, 'flow-manager', now())
-				`, init.ID, string(payloadBytes))
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "  ❌ Failed to write event for %s: %v\n", init.ID, err)
+					_, err = p.Exec(ctx, `
+						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+						VALUES ($1, 'flow_action', 'flow_manager', $2, 'flow-manager', now())
+					`, init.ID, string(payloadBytes))
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "  ❌ Failed to write event for %s: %v\n", init.ID, err)
+					} else {
+						fmt.Printf("  ✓ Event 'flow_action' logged on %s\n", init.ID)
+					}
 				} else {
-					fmt.Printf("  ✓ Event 'flow_action' logged on %s\n", init.ID)
+					fmt.Printf("  · flow_action für %s unverändert — Delta-Gate hält\n", init.ID)
 				}
 
 				// If category is "Workspace-gescheitert" (Workspace-bedingte Stagnation),
@@ -412,9 +511,12 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 					reasons, _ := lastPayload["flagged_reasons"].([]any)
 					if len(reasons) > 0 {
 						// Previous state was flagged, now cleared! Log a clearing event.
+						// (Eigenes Gate: schreibt nur beim Übergang flagged→leer, weil
+						// der nächste Sweep flagged_reasons=[] sieht.)
 						if !dryRun {
 							payloadMap := map[string]any{
 								"flagged_reasons": []string{},
+								"flags_hash":      flagsHash(nil),
 								"category":        "",
 								"confidence":      "",
 								"reasoning":       "",
