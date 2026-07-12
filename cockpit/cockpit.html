@@ -394,11 +394,11 @@
               <select @change="moveFromDetail($event.target.value)"
                 class="px-2 py-0.5 rounded-full font-medium border-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-300"
                 :class="stageChipCls(detail.initiative.stage)" title="Stage ändern">
-                <option value="idea" :selected="detail.initiative.stage === 'idea'">Idea</option>
-                <option value="now" :selected="detail.initiative.stage === 'now'">Now</option>
-                <option value="soon" :selected="detail.initiative.stage === 'soon'">Soon</option>
-                <option value="watching" :selected="detail.initiative.stage === 'watching'">Watching</option>
-                <option value="done" :selected="detail.initiative.stage === 'done'">Done</option>
+                <option value="idea" :selected="detail.initiative.stage === 'idea'">Idee</option>
+                <option value="soon" :selected="detail.initiative.stage === 'soon'">Bereit</option>
+                <option value="now" :selected="detail.initiative.stage === 'now'">In Arbeit</option>
+                <option value="watching" :selected="detail.initiative.stage === 'watching'">Nachweis</option>
+                <option value="done" :selected="detail.initiative.stage === 'done'">Fertig</option>
               </select>
               <span class="text-slate-400" x-text="(firmas.find(f => f.id === detail.initiative.firma) || {label: detail.initiative.firma}).label"></span>
             </div>
@@ -658,8 +658,10 @@ function liveKanban() {
       '/root/stayawesomeOS': 'angelosystems/stayawesomeOS',
       '/root/mario-brain': 'angelosystems/mario-brain',
     },
-    stages: ['idea', 'now', 'soon', 'watching', 'done'],
-    stageLabel: { idea: 'Idea', now: 'Now', soon: 'Soon', watching: 'Watching', done: 'Done' },
+    // Fluss-Reihenfolge links→rechts (ADR-0011): Idee → Bereit → In Arbeit → Nachweis → Fertig.
+    // DB-Stage-Werte bleiben englisch (idea/soon/now/watching/done) — nur Anzeige-Labels deutsch.
+    stages: ['idea', 'soon', 'now', 'watching', 'done'],
+    stageLabel: { idea: 'Idee', soon: 'Bereit', now: 'In Arbeit', watching: 'Nachweis', done: 'Fertig' },
     planCols: [
       { id: 'draft',       label: 'Draft' },
       { id: 'review',      label: 'In Review' },
