@@ -1234,6 +1234,10 @@ func cmdServe() *cobra.Command {
 					'initiative', (SELECT row_to_json(s) FROM portfolio.initiative_summary s WHERE s.id=$1),
 					'links', COALESCE((SELECT json_agg(row_to_json(l) ORDER BY l.kind, l.added_at)
 					                   FROM portfolio.initiative_link l WHERE l.initiative_id=$1), '[]'::json),
+					'deployments', COALESCE((SELECT json_agg(row_to_json(d)) FROM (
+					                     SELECT service, environment, version, git_sha, status, deployed_at, deploy_method
+					                     FROM portfolio.deployments WHERE initiative_id=$1
+					                     ORDER BY deployed_at DESC LIMIT 3) d), '[]'::json),
 					'events', COALESCE((SELECT json_agg(row_to_json(e)) FROM (
 					                     SELECT kind, source_backend, from_stage, to_stage, payload, actor, at
 					                     FROM portfolio.initiative_event WHERE initiative_id=$1

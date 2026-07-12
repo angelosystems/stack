@@ -157,6 +157,21 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			}
 		}
 
+		// mk-pipeline-ampel WP2: Bead-Zaehler an der Karte spiegeln (Cache fuer
+		// die Summary-View — cross-DB geht dort nicht). Nur bei Delta schreiben.
+		if len(beads) > 0 {
+			closed := 0
+			for _, b := range beads {
+				if b.Status == "closed" {
+					closed++
+				}
+			}
+			_, _ = p.Exec(ctx, `UPDATE portfolio.initiative
+			     SET beads_closed=$1, beads_total=$2
+			     WHERE id=$3 AND (beads_closed IS DISTINCT FROM $1 OR beads_total IS DISTINCT FROM $2)`,
+				closed, len(beads), init.ID)
+		}
+
 		// B. Get active workspaces
 		var workspaces []LinkedWorkspace
 		vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")

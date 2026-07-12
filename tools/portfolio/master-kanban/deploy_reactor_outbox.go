@@ -107,6 +107,11 @@ type outboxRow struct {
 	GitSha      string
 	Version     string
 	Status      string
+	// mk-pipeline-ampel WP1: die Karten-ID an die Ledger-Zeile heften, damit die
+	// Board-Ampel dem Deploy folgt. InitiativeID = schon gesetzt (Producer/
+	// ledger-record.sh) ⇒ nie überschreiben. BeadIDs = primäre Auflösungsquelle.
+	InitiativeID string
+	BeadIDs      []string
 }
 
 // ── Pure Zustandsmaschine (D13-Reaktor-Übergangstabelle, WP6-testbar) ────────
@@ -366,7 +371,8 @@ func (r *reactor) runOnce(ctx context.Context) error {
 	// (environment='staging') EINE portfolio.deployments-Tabelle, ohne sich
 	// gegenseitig fremde Zeilen wegzuschnappen (sonst errored jeder die Rezepte
 	// des anderen — genau die Kollision aus dem W1-Befund).
-	rows, err := r.pool.Query(ctx, `SELECT id, service, environment, git_sha, COALESCE(version,''), status
+	rows, err := r.pool.Query(ctx, `SELECT id, service, environment, git_sha, COALESCE(version,''), status,
+	            COALESCE(initiative_id,''), COALESCE(bead_ids,'{}')
 	     FROM portfolio.deployments
 	     WHERE status='pending' AND ($1='' OR environment=$1) ORDER BY deployed_at`, r.environment)
 	if err != nil {
@@ -375,7 +381,7 @@ func (r *reactor) runOnce(ctx context.Context) error {
 	var pend []outboxRow
 	for rows.Next() {
 		var o outboxRow
-		if err := rows.Scan(&o.ID, &o.Service, &o.Environment, &o.GitSha, &o.Version, &o.Status); err != nil {
+		if err := rows.Scan(&o.ID, &o.Service, &o.Environment, &o.GitSha, &o.Version, &o.Status, &o.InitiativeID, &o.BeadIDs); err != nil {
 			rows.Close()
 			return err
 		}
@@ -402,6 +408,9 @@ func (r *reactor) runOnce(ctx context.Context) error {
 		case actSkipNotPending:
 			continue
 		}
+		// mk-pipeline-ampel WP1: Karten-ID an die Ledger-Zeile heften (best-effort;
+		// nie überschreiben, nie raten — mehrdeutig bleibt leer).
+		r.attachInitiative(ctx, &o)
 		red := r.processOne(ctx, o)
 		if red {
 			consecReds++

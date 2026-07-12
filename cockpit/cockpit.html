@@ -28,6 +28,12 @@
 
 <div x-data="liveKanban()" x-init="loadFirmaOrder(); init()" @keydown.escape.window="closeDetail(); closeDispatch(); dispatchDrawerOpen = false" class="min-h-screen">
 
+  <!-- SSO-Session abgelaufen: sichtbar sagen statt stumm scheitern -->
+  <div x-show="authExpired" x-cloak class="fixed top-0 inset-x-0 z-50 bg-amber-500 text-white text-sm font-semibold px-4 py-2.5 flex items-center justify-center gap-4 shadow-md">
+    <span>SSO-Session abgelaufen — Board-Daten und Detailkarten können nicht geladen werden.</span>
+    <button @click="reauth()" class="px-3 py-1 rounded bg-white text-amber-700 hover:bg-amber-50 font-semibold">Neu anmelden</button>
+  </div>
+
   <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
     <h1 class="text-lg font-semibold tracking-tight">master-kanban <span class="text-xs text-emerald-600 ml-1" x-text="apiOk ? '● live' : '○ offline'"></span></h1>
 
@@ -141,13 +147,23 @@
                       <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
                         <span class="text-[10px] text-slate-400" x-text="c.id"></span>
                         <span x-show="c.tier" class="text-[10px] px-1 rounded font-medium" :class="tierChip(c.tier)" x-text="tierLabel(c.tier)"></span>
-                        <span x-show="c.deploy_state" class="text-[10px] px-1 rounded font-semibold" :class="deployChip(c.deploy_state)"
-                          :title="'Release-Ledger: ' + c.deploy_state + (c.live_sha ? ' @ ' + c.live_sha : '')"
-                          x-text="'⏚ ' + c.deploy_state + (c.live_version ? ' ' + c.live_version : '')"></span>
+                        <!-- Pipeline-Ampel (mk-pipeline-ampel): ⚒ Beads · S Staging · P Prod -->
+                        <span x-show="c.beads_total > 0" class="text-[10px] px-1 rounded font-semibold"
+                          :class="c.beads_closed === c.beads_total ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'"
+                          :title="c.beads_closed + ' von ' + c.beads_total + ' Beads geschlossen (alle zu ≈ gemergt)'"
+                          x-text="'⚒ ' + c.beads_closed + '/' + c.beads_total"></span>
+                        <span x-show="c.staging_state" class="text-[10px] px-1 rounded font-semibold"
+                          :class="deployChip((c.staging_state || '').split('@')[0])"
+                          :title="'Staging: ' + c.staging_state + (c.staging_at ? ' · ' + fmtRel(c.staging_at) : '')"
+                          x-text="'S ' + ((c.staging_state || '').split('@')[1] || '')"></span>
+                        <span x-show="c.prod_state" class="text-[10px] px-1 rounded font-semibold"
+                          :class="deployChip((c.prod_state || '').split('@')[0])"
+                          :title="'Prod: ' + c.prod_state + (c.prod_at ? ' · ' + fmtRel(c.prod_at) : '')"
+                          x-text="'P ' + ((c.prod_state || '').split('@')[1] || '')"></span>
                         <template x-for="sw in (c.softwares || [])" :key="sw">
                           <span class="text-[10px] px-1 rounded bg-indigo-50 text-indigo-700" x-text="sw"></span>
                         </template>
-                        <span x-show="c.bead_count > 0" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
+                        <span x-show="c.bead_count > 0 && !c.beads_total" :title="c.bead_count + ' beads'">🐝<span class="text-[10px] ml-0.5" x-text="c.bead_count"></span></span>
                         <span x-show="c.vk_count > 0" :title="c.vk_count + ' vk-workspaces'">🔧<span class="text-[10px] ml-0.5" x-text="c.vk_count"></span></span>
                         <span x-show="c.pr_count > 0" :title="c.pr_count + ' PRs'">📦<span class="text-[10px] ml-0.5" x-text="c.pr_count"></span></span>
                         <button x-show="c.plan_count > 0" @click.stop="toggleTree(c.id)"
@@ -452,6 +468,19 @@
             </dd>
           </dl>
 
+          <!-- Deploys (Release-Ledger, letzte 3 — mk-pipeline-ampel) -->
+          <section x-show="(detail.deployments || []).length > 0" class="mt-3">
+            <h3 class="text-xs font-semibold text-slate-500 uppercase mb-1">Deploys</h3>
+            <template x-for="d in (detail.deployments || [])" :key="d.git_sha + d.environment + d.deployed_at">
+              <div class="flex items-center gap-2 text-xs py-0.5">
+                <span class="px-1 rounded font-semibold" :class="deployChip(d.status)" x-text="d.status"></span>
+                <span class="text-slate-600" x-text="d.environment"></span>
+                <span class="font-mono" x-text="(d.version || d.git_sha.slice(0,7))"></span>
+                <span class="text-slate-400" x-text="fmtRel(d.deployed_at)"></span>
+              </div>
+            </template>
+          </section>
+
           <!-- Pläne (aus plan_item, verlinkt in die Review-Workbench) -->
           <section x-show="detail.initiative.plan_count > 0">
             <h3 class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 border-b border-slate-100 pb-1">Pläne</h3>
@@ -634,6 +663,7 @@ function liveKanban() {
   return {
     apiBase: location.origin.includes('7780') ? location.origin : location.origin,
     apiOk: false,
+    authExpired: false,
     view: 'board',
     views: [
       { id: 'board',    label: 'Board' },
@@ -736,6 +766,19 @@ function liveKanban() {
       });
     },
 
+    // SSO-Ablauf erkennen: nginx/oauth2-proxy beantwortet API-Calls dann mit
+    // 302 → /oauth2/sign_in; fetch folgt dem Redirect und liefert Login-HTML.
+    authGuard(r) {
+      if (r.redirected && r.url.includes('/oauth2/')) {
+        this.authExpired = true;
+        throw new Error('SSO-Session abgelaufen');
+      }
+      return r;
+    },
+    reauth() {
+      location.href = '/oauth2/start?rd=' + encodeURIComponent(location.href);
+    },
+
     // ── Karten-Detail: Side-Peek (P5) ──
     async openDetail(id) {
       if (this.dragging) return; // Klick direkt nach Drag-Drop nicht als Öffnen werten
@@ -748,6 +791,7 @@ function liveKanban() {
       history.replaceState(null, '', location.pathname + '#' + id);
       try {
         const r = await fetch(this.apiBase + '/api/initiative?id=' + encodeURIComponent(id));
+        this.authGuard(r);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.detail = await r.json();
         this.descDraft = this.detail.initiative.description || '';
@@ -1025,9 +1069,11 @@ function liveKanban() {
     async refresh(silent) {
       try {
         const r = await fetch(this.apiBase + '/api/initiatives');
+        this.authGuard(r);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.cards = await r.json();
         this.apiOk = true;
+        this.authExpired = false;
         this.loadDrift();
         if (this.view === 'pipeline') await this.loadAllPlans();
         if (this.view === 'backlog') await this.loadBacklog();
