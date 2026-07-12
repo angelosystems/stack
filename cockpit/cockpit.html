@@ -142,10 +142,13 @@
                   </div>
                   <template x-for="c in cardsIn(f.id, stage)" :key="c.id">
                     <article :data-id="c.id" @click="openDetail(c.id)"
-                      class="card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm">
-                      <div class="font-medium leading-snug" x-text="c.title"></div>
+                      class="card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm"
+                      :class="c._child ? 'ml-4 border-l-2 border-l-indigo-300' : ''">
+                      <div class="font-medium leading-snug"><span x-show="c._child" class="text-indigo-400 mr-0.5">↳</span><span x-text="c.title"></span></div>
                       <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
                         <span class="text-[10px] text-slate-400" x-text="c.id"></span>
+                        <span x-show="c.kinder_count > 0" class="text-[10px] px-1 rounded bg-indigo-100 text-indigo-700 font-semibold" :title="c.kinder_count + ' Kind-Karten'" x-text="'▾ ' + c.kinder_count"></span>
+                        <span x-show="c.lane" class="text-[10px] px-1 rounded font-medium" :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700'}[c.lane] || 'bg-slate-100 text-slate-600'" :title="'Lane: ' + c.lane" x-text="{'solartown':'⛏ Solartown','vibe-kanban':'⚡ VK','human':'✋ Mensch'}[c.lane] || c.lane"></span>
                         <span x-show="c.tier" class="text-[10px] px-1 rounded font-medium" :class="tierChip(c.tier)" x-text="tierLabel(c.tier)"></span>
                         <!-- Pipeline-Ampel (mk-pipeline-ampel): ⚒ Beads · S Staging · P Prod -->
                         <span x-show="c.beads_total > 0" class="text-[10px] px-1 rounded font-semibold"
@@ -1235,9 +1238,21 @@ function liveKanban() {
     // ── Board (unverändert) ──
     toggleFirma(id) { this.filter[id] = !this.filter[id]; },
     cardsIn(firma, stage) {
-      return this.cards.filter(c => c.firma === firma && c.stage === stage
+      const list = this.cards.filter(c => c.firma === firma && c.stage === stage
         && (!this.softwareFilter || (c.softwares || []).includes(this.softwareFilter))
         && (!this.tierFilter || c.tier === this.tierFilter));
+      // Karten-Hierarchie: Kinder direkt unter ihr Dach reihen (nur wenn das
+      // Dach in derselben Zelle liegt); _child markiert die Einrueckung.
+      // ponytail: kein Auf/Zu-Toggle — Kinder sind immer sichtbar (Ceiling:
+      // Toggle je Dach, Upgrade = expanded-Map wie beim Plan-Baum).
+      const inCell = new Set(list.map(c => c.id));
+      const roots = list.filter(c => !c.parent_id || !inCell.has(c.parent_id));
+      const out = [];
+      for (const r of roots) {
+        out.push({ ...r, _child: false });
+        for (const k of list.filter(c => c.parent_id === r.id)) out.push({ ...k, _child: true });
+      }
+      return out;
     },
     get allSoftware() { const s = new Set(); this.cards.forEach(c => (c.softwares || []).forEach(x => s.add(x))); return [...s].sort(); },
     tierChip(t) { return { 'code-fabrik': 'bg-amber-100 text-amber-800', library: 'bg-emerald-100 text-emerald-800', product: 'bg-sky-100 text-sky-800' }[t] || 'bg-slate-100 text-slate-600'; },

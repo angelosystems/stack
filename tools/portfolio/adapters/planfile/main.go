@@ -127,8 +127,6 @@ type frontmatter struct {
 	ParentPlan string `yaml:"parent_plan"`
 	Tier       string `yaml:"tier"`
 	Software   string `yaml:"software"`
-	// Freie Karten-Tags (z.B. cto-backlog, quantumshift-cto-betrieb Paket D).
-	Tags       []string `yaml:"tags"`
 	// true wenn der Key parent_plan im YAML steht (auch mit Wert null) —
 	// unterscheidet bewusstes „kein Dach" von vergessenem Feld.
 	HasParentKey bool `yaml:"-"`
@@ -428,14 +426,26 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 		} else {
 			upsertTag(p, ctx, initiativeID, "triage", "parent-check")
 		}
-	}
 
-	// Frontmatter-tags → Karten-Tags (kind='tag', additiv/idempotent;
-	// quantumshift-cto-betrieb Paket D). Bei Kind-PRDs landet der Tag auf
-	// der Dach-Initiative — so bleibt z.B. cto-backlog board-filterbar.
-	for _, t := range fm.Tags {
-		if s := strings.TrimSpace(t); s != "" {
-			upsertTag(p, ctx, initiativeID, "tag", s)
+		// mk-karten-hierarchie WP2: Karten-parent aus dem aufgeloesten
+		// Plan-Dach spiegeln (plan_item-Dach -> dessen Karte). mario- und
+		// verwalter-gesetzte Daecher gewinnen immer; Zyklen entstehen aus
+		// parent_plan-Ketten nicht (Files referenzieren aufwaerts), den
+		// Selbstbezug faengt der DB-CHECK.
+		if parentID != "" {
+			var dachInitiative string
+			_ = p.QueryRow(ctx, `SELECT initiative_id FROM portfolio.plan_item WHERE id=$1`, parentID).Scan(&dachInitiative)
+			if dachInitiative != "" && dachInitiative != initiativeID {
+				var fremdGesetzt bool
+				_ = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative_tag
+				     WHERE initiative_id=$1 AND kind='parent-source' AND value <> 'adapter')`, initiativeID).Scan(&fremdGesetzt)
+				if !fremdGesetzt {
+					if _, err := p.Exec(ctx, `UPDATE portfolio.initiative SET parent_id=$2
+					     WHERE id=$1 AND parent_id IS DISTINCT FROM $2`, initiativeID, dachInitiative); err == nil {
+						upsertTag(p, ctx, initiativeID, "parent-source", "adapter")
+					}
+				}
+			}
 		}
 	}
 

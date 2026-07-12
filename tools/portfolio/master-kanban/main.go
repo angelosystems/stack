@@ -332,7 +332,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", os.Getenv("PORTFOLIO_DSN"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings(), cmdParent())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -2713,6 +2713,7 @@ func cmdServe() *cobra.Command {
 			})
 			// P2 — Dispatch aus der Karte (st-bopm)
 			http.HandleFunc("/api/dispatch", handleDispatch(p))
+			http.HandleFunc("/api/parent", handleParent(p))
 
 			// Expose WIP limits to cockpit UI (P2.3)
 			http.HandleFunc("/api/wip-limits", func(w http.ResponseWriter, r *http.Request) {
