@@ -78,6 +78,20 @@ report user_slice    "$(verdict uss $USER_PCT 80 95 gt)" "user.slice=${USER_PCT}
 report vk_tasks      "$(verdict vkt $VK_TASK_PCT 75 90 gt)" "vk.slice Tasks=${VK_TASK_PCT}% von TasksMax"
 report user_tasks    "$(verdict ust $USER_TASK_PCT 75 90 gt)" "user.slice Tasks=${USER_TASK_PCT}% von TasksMax"
 
+# Fabrik-Halt-Sichtbarkeit (mk-pipeline-ampel Folge-Paket B, 2026-07-12):
+# burn-guard-/Not-Aus-Halts (/etc/solartown/*.halt) stoppen Reaktor/Merger —
+# ein Halt, der laenger liegt als der Selbstheiler braucht, heisst "Fabrik
+# steht still" und war bisher unsichtbar (Befund: deploy-reactor.halt hielt
+# den Deploy-Reaktor ~6h an, keine Meldung). Alter des AELTESTEN Halt-Files
+# in Minuten; kein Halt = 0 -> ok (Edge raeumt die Meldung ab).
+HALT_AGE_MIN=0; HALT_NAME=keins
+for f in /etc/solartown/*.halt; do
+  [ -e "$f" ] || continue
+  age=$(( ($(date +%s) - $(stat -c %Y "$f")) / 60 ))
+  if [ "$age" -gt "$HALT_AGE_MIN" ]; then HALT_AGE_MIN=$age; HALT_NAME=$(basename "$f"); fi
+done
+report fabrik_halt   "$(verdict hlt $HALT_AGE_MIN 10 30 gt)" "Halt=$HALT_NAME seit ${HALT_AGE_MIN}min (warn>10, crit>30)"
+
 if [ "${1:-}" = "--selftest" ]; then
   curl -sf -m 10 -X POST "$WA_URL" -H 'Content-Type: application/json' \
     -d "{\"recipient\":\"$WA_JID\",\"message\":\"✅ [WP0-Selbsttest] Frühwarn-Reflex auf $HOST scharf: MemAvailable=${MEM_AVAIL_GB}G, PSI=${PSI_SOME:-0}, vk.slice=${VK_PCT}%, user.slice=${USER_PCT}%. Meldeweg bewiesen (critical→WhatsApp, Tick 60s).\"}" \
