@@ -214,3 +214,19 @@ Der Plan benennt ein handfestes Problem (gemeinsame Single-Points-of-Failure mit
 **Asks:**
 - [ ] Versehe jedes Arbeitspaket (W1 bis W5) mit mindestens einem konkreten, überprüfbaren Done-Kriterium, das vorab klar definiert, wann das Paket als abgeschlossen gilt.
 - [ ] Da laut Status-Update W2 und W3 bereits als 'umgesetzt' gelten, prüfe und dokumentiere abschließend, ob die in der Erfolgs-Kriterien-Sektion definierten checks für diese Pakete aktuell bestanden werden.
+
+## Reviewer-Verdict — quick (glm-5.2) — 2026-07-12
+
+**Verdict:** `needs-changes`
+
+Der Plan benennt ein handfestes, belegtes Problem (gemeinsame Single-Points-of-Failure mit Vorfall am 2026-06-11) und hat eine saubere Scope-Abgrenzung. Allerdings fehlen den einzelnen Arbeitspaketen explizite Done-Kriterien auf Paket-Ebene — die messbaren Erfolgskriterien existieren nur gesammelt auf Plan-Ebene.
+
+**Findings:**
+- [major] **Fehlende Done-Kriterien auf Arbeitspaket-Ebene** — Keines der Arbeitspakete W1–W5 hat ein eigenes überprüfbares Done-Kriterium. Die Sektion 'Erfolgs-Kriterien' listet messbare Checks,但这些 sind nicht den Phasen zugeordnet. Die Konvention verlangt pro Phase ein überprüfbares Done-Kriterium.
+- [minor] **Architekturentscheidung W4 wenig begründet** — W4 empfieht 'vorerst belassen', aber im Gegensatz zu W2 (wo Alternativen explizit genannt und bewertet werden) fehlt ein Begründungs-Abgleich für die verworfene Alternative (neutrale Domain).
+- [minor] **Offene Frage zur Ingest-Rate ohne Zuordnung** — W3 nennt als Folge-Frage die 63–119G/Tag-Produktion, markiert sie aber nur als 'eigene Karte'. Es ist unklar, ob bereits eine Karte existiert oder diese noch erstellt werden muss.
+
+**Asks:**
+- [ ] Versehe jedes Arbeitspaket W1–W5 mit mindestens einem konkreten, überprüfbaren Done-Kriterium (z.B. durch Zuordnung der bestehenden Erfolgs-Kriterien zu den jeweiligen Paketen).
+- [ ] Da laut Status-Update W2 und W3 bereits umgesetzt sind, dokumentiere abschließend, ob die zugehörigen Checks aus den Erfolgs-Kriterien aktuell bestanden werden.
+- [ ] Ergänze bei W4 eine kurze Begründung, warum die Alternative (neutrale Domain) verworfen wurde, analog zu W2.
