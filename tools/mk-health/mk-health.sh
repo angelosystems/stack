@@ -151,6 +151,6 @@ fi
 # DSN aus der kanonischen Env-Datei — ohne sie lief connect() gegen den
 # Binary-Default (Staging-DB, existiert nicht) und der Reconciler schlug
 # SEIT JEHER still fehl (Befund mk-pipeline-ampel: deploy_state ueberall leer).
-[ -r /etc/master-kanban/db.env ] && . /etc/master-kanban/db.env
+[ -r /etc/master-kanban/db.env ] && { set -a; . /etc/master-kanban/db.env; set +a; }
 timeout 30 /opt/stack/bin/master-kanban deployments reconcile --quiet \
   || echo "deployments reconcile fehlgeschlagen (Ledger :5434 prüfen)" >&2
