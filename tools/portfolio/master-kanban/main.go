@@ -3890,8 +3890,8 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 		}
 		body.Id = strings.TrimSpace(body.Id)
 		body.Lane = strings.TrimSpace(body.Lane)
-		if body.Id == "" || (body.Lane != "plan" && body.Lane != "plan-deep" && body.Lane != "hack") {
-			http.Error(w, "id und gültige lane (plan, plan-deep oder hack) erforderlich", 400)
+		if body.Id == "" || laneTagFor[body.Lane] == "" {
+			http.Error(w, "id und gültige lane (plan, plan-deep, hack oder human) erforderlich", 400)
 			return
 		}
 
@@ -3910,6 +3910,43 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			http.Error(w, "initiative nicht gefunden: "+body.Id, 404)
 			return
+		}
+
+		// mk-dispatch-gate WP2: Lane-Tag = Zuendung fuers Decomposer-Gate.
+		if err := setLaneTag(r.Context(), p, body.Id, laneTagFor[body.Lane]); err != nil {
+			http.Error(w, "lane-Tag setzen fehlgeschlagen: "+err.Error(), 500)
+			return
+		}
+
+		if body.Lane == "human" {
+			// Nur Menschen: Tag gesetzt, dispatched-Event, keine Automatik.
+			payloadBytes, _ := json.Marshal(map[string]string{"lane": "human", "note": body.Note})
+			_, _ = p.Exec(r.Context(),
+				`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+				 VALUES ($1, 'dispatched', 'master', $2::jsonb, 'master-kanban')`,
+				body.Id, string(payloadBytes))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "lane": "human"})
+			return
+		}
+
+		if body.Lane == "plan" || body.Lane == "plan-deep" {
+			// Karte hat schon ein approved PRD? Dann KEIN neues Scaffold —
+			// Re-Emit weckt den Decomposer fuer die frisch vergebene Lane.
+			if slug, path, layer, status := approvedPlanItem(r.Context(), p, body.Id); slug != "" {
+				if err := reEmitPlanApproved(r.Context(), slug, path, layer, status); err != nil {
+					http.Error(w, "lane-Tag gesetzt, aber Re-Emit fehlgeschlagen: "+err.Error()+" — Decomposer nimmt das Event beim naechsten Catch-up", 500)
+					return
+				}
+				payloadBytes, _ := json.Marshal(map[string]string{"lane": body.Lane, "ref": slug, "via": "re-emit"})
+				_, _ = p.Exec(r.Context(),
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1, 'dispatched', 'master', $2::jsonb, 'master-kanban')`,
+					body.Id, string(payloadBytes))
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{"ok": true, "lane": body.Lane, "reemitted": slug})
+				return
+			}
 		}
 
 		if body.Lane == "hack" {

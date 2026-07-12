@@ -377,7 +377,9 @@
             <option value="hack">Vibe Kanban (hack)</option>
             <option value="plan">Solartown (plan)</option>
             <option value="plan-deep">Solartown Deep-Review (plan-deep)</option>
+            <option value="human">Nur Menschen (keine Automatik)</option>
           </select>
+          <p class="text-[10px] text-slate-400 mt-1">Dispatch vergibt das lane-Tag — ohne Tag baut keine Automatik (Testphasen-Gate).</p>
         </div>
       </div>
       <div>
@@ -766,17 +768,20 @@ function liveKanban() {
       });
     },
 
-    // SSO-Ablauf erkennen: nginx/oauth2-proxy beantwortet API-Calls dann mit
-    // 302 → /oauth2/sign_in; fetch folgt dem Redirect und liefert Login-HTML.
+    // SSO-Ablauf erkennen. Authentik-Stack (seit 2026-07-12): API-Locations
+    // liefern 401 JSON (authentik-domain-protect-api.conf). oauth2-Redirect-
+    // Check bleibt als Fallback für Stacks ohne API-Variante.
     authGuard(r) {
-      if (r.redirected && r.url.includes('/oauth2/')) {
+      if (r.status === 401 || (r.redirected && r.url.includes('/oauth2/'))) {
         this.authExpired = true;
         throw new Error('SSO-Session abgelaufen');
       }
       return r;
     },
     reauth() {
-      location.href = '/oauth2/start?rd=' + encodeURIComponent(location.href);
+      // Voller Reload → nginx-401-Redirect → idp-Login (meist transparent,
+      // weil die idp-Session noch lebt) → zurück auf /cockpit.
+      location.reload();
     },
 
     // ── Karten-Detail: Side-Peek (P5) ──
