@@ -207,6 +207,69 @@ func TestJourneyGateSatisfied(t *testing.T) {
 	}
 }
 
+// TestDSNProbeSatisfied — die zusätzliche Promote-Stufe „DSN-Regression des
+// SHA" (SC4, PRD cicd-stack-tooling). Verlangt ein PROBE-Result mit dsn_ok=true
+// für app+sha. Der ROT-FALL (dsn_ok=false, reproduzierbar mit dem
+// <rig>_clean@5433-Bug) MUSS das Gate ausschließen — der generische HTTP-smoke
+// bliebe grün, aber dieses Gate wird rot. Genau das ist der SC4-Beweis.
+func TestDSNProbeSatisfied(t *testing.T) {
+	dir := t.TempDir()
+	longSha := "8a3f1c92b7e640d2af93ce1b09d6f2a5c8e1d7b3"
+	write := func(name string, r dsnProbeResult) {
+		b, _ := json.Marshal(r)
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// (1) Leeres Verzeichnis → nicht erfüllt (Rot-Fall-Beweis → exit 68).
+	if ok, _, _ := dsnProbeSatisfied(dir, "fin", longSha); ok {
+		t.Fatal("leeres Probes-Verzeichnis MUSS unerfüllt sein (sonst kein Gate)")
+	}
+
+	// (2) ROT-FALL (SC4-Kern): Probe existiert für app+sha, aber dsn_ok=false —
+	// der <rig>_clean@5433-Bug. Der generische HTTP-/version-Smoke bliebe grün;
+	// dieses Gate MUSS rot sein. Genau das ist der deterministische Beweis, den
+	// SC4 verlangt.
+	write("fin-probe-red.json", dsnProbeResult{
+		App: "fin", Ref: longSha,
+		DSN: "postgres://remote:remote@127.0.0.1:5433/fin_clean",
+		OK:  false,
+	})
+	if ok, _, _ := dsnProbeSatisfied(dir, "fin", longSha); ok {
+		t.Fatal("rote DSN-Probe (dsn_ok=false) MUSS das Gate rot sein — das ist der SC4-Beweis")
+	}
+
+	// (3) Ablenker: falsche app, falsche SHA — werden ignoriert.
+	write("other-probe.json", dsnProbeResult{App: "master-kanban", Ref: longSha, DSN: "postgres://x/solartown_clean", OK: true})
+	write("fin-wrongsha.json", dsnProbeResult{App: "fin", Ref: "f00dcafe00000000", DSN: "postgres://x/solartown_clean", OK: true})
+	if ok, _, _ := dsnProbeSatisfied(dir, "fin", longSha); ok {
+		t.Fatal("Ablenker (andere app/SHA) dürfen NICHT durchwinken")
+	}
+
+	// (4) Grünes Probe mit KURZER SHA im Ref, Anfrage mit langer SHA → Präfix-Match.
+	write("fin-probe-green.json", dsnProbeResult{
+		App: "fin", Ref: "8a3f1c92",
+		DSN: "postgres://remote:remote@127.0.0.1:5433/solartown_clean",
+		OK:  true,
+	})
+	ok, proof, observed := dsnProbeSatisfied(dir, "fin", longSha)
+	if !ok {
+		t.Fatal("grünes Probe (kurze SHA) MUSS die lange SHA durchwinken (Präfix)")
+	}
+	if proof == "" {
+		t.Fatal("Beweis-Dateipfad fehlt")
+	}
+	if observed == "" {
+		t.Fatal("beobachteter DSN fehlt")
+	}
+
+	// (5) Andere app fragt dieselbe SHA an → nicht erfüllt (app ist Teil des Gates).
+	if ok, _, _ := dsnProbeSatisfied(dir, "sa-canary", longSha); ok {
+		t.Fatal("Probe einer anderen app darf keine Fremd-app durchwinken")
+	}
+}
+
 func pcHasFlag(args []string, flag string) bool {
 	for _, a := range args {
 		if a == flag {

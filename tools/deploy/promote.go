@@ -51,6 +51,7 @@ const (
 	exNoStaging    = 65 // Gate (a): kein grüner Staging-Smoke für die SHA
 	exNoApproval   = 66 // Gate (b): kein frisches Approval → kein Deploy
 	exNoJourney    = 67 // Gate (a2): kein grünes Journey-gate-Result für die SHA (nur wenn JOURNEY_PROMOTE_GATE=1)
+	exBadDSN       = 68 // Gate (a3): kein grünes DSN-Probe für die SHA (nur wenn DSN_REGRESSION_GATE=1) — SC4
 	exUnavailable  = 69 // Ledger/DB nicht erreichbar (EX_UNAVAILABLE)
 	exDeployFailed = 70 // deploy-gt.sh Build/Ship/Swap-Miss
 	exSmokeFailed  = 75 // Prod-Smoke rot (Rollback versucht)
@@ -222,6 +223,52 @@ func journeyGateSatisfied(resultsDir, app, sha string) (bool, string) {
 	return false, ""
 }
 
+// dsnProbeResult ist die relevante Teilmenge des sa-staging-dsn-probe Result-
+// JSON (/var/lib/sa-staging/dsn-probes/<app>-<ts>.json, SC4 des PRD cicd-stack-
+// tooling). Eine Probe zeigt: die staging-bewiesene SHA verbindet sich gegen
+// den ERWARTETEN rig-DSN (z.B. solartown_clean@5433), nicht gegen einen
+// phantomhaften <rig>_clean@5433-Platzhalter, der erst in prod auffällt. Der
+// generische HTTP-/version-Smoke bleibt bei kaputtem DSN grün — genau dieses
+// Gate fängt den Regressions-Fall deterministisch (SC4).
+type dsnProbeResult struct {
+	App string `json:"app"`
+	Ref string `json:"ref"`    // SHA (kurz oder lang), präfix-tolerant wie der Prod-Smoke
+	DSN string `json:"dsn"`    // beobachteter DSN, z.B. "...@127.0.0.1:5433/solartown_clean"
+	OK  bool   `json:"dsn_ok"` // true = DSN verbindet + zeigt auf erwartete DB
+}
+
+// dsnProbeSatisfied prüft, ob im Probes-Verzeichnis ein GRÜNES DSN-Probe für
+// (app, sha) liegt: dsn_ok=true, app passt, ref präfix-matcht die SHA. Ein
+// Treffer reicht. Gibt (ok, Beweis-Dateipfad, beobachteten DSN) zurück. Pure
+// genug für Unit-Tests (nimmt das Verzeichnis als Argument — keine festver-
+// drahteten Pfade). SC4 (PRD cicd-stack-tooling): "DSN-Regression des SHA" als
+// eigene Promote-Stufe — der <rig>_clean@5433-Bug MUSS hier rot sein, auch
+// wenn der HTTP-/version-Smoke grün bleibt.
+func dsnProbeSatisfied(probesDir, app, sha string) (bool, string, string) {
+	entries, err := os.ReadDir(probesDir)
+	if err != nil {
+		return false, "", ""
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		p := filepath.Join(probesDir, e.Name())
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var r dsnProbeResult
+		if err := json.Unmarshal(b, &r); err != nil {
+			continue
+		}
+		if r.App == app && r.OK && shaPrefixMatch(r.Ref, sha) {
+			return true, p, r.DSN
+		}
+	}
+	return false, "", ""
+}
+
 // recordProdLive schreibt (Upsert) die Prod-Zeile env='prod' source='promote'
 // status='live'. Upsert auf (service,environment,git_sha) = Idempotenz (D11);
 // eine quarantänisierte Zeile (rolled_back) wird NIE überschrieben.
@@ -311,7 +358,7 @@ func fail(code int, format string, a ...any) {
 }
 
 func promoteCmd() *cobra.Command {
-	var manifestPath, approvalDir, dsn, deployGt, deployNode, actor, journeyResultsDir string
+	var manifestPath, approvalDir, dsn, deployGt, deployNode, actor, journeyResultsDir, dsnProbesDir string
 	var dryRun bool
 
 	c := &cobra.Command{
@@ -396,6 +443,26 @@ func promoteCmd() *cobra.Command {
 				fmt.Printf("→ Journey grün: %s@%s [%s]\n", app, short(sha), proof)
 			}
 
+			// ── Gate (a3): DSN-Regression des SHA (hinter Env-Flag, Default AUS) ──
+			// SC4 (PRD cicd-stack-tooling): expliziter DSN-Regressions-Smoke, der
+			// den <rig>_clean@5433-Bug DETERMINISTISCH reproduziert — nicht nur
+			// implizit über den generischen HTTP-/version-Smoke (der grün bleibt,
+			// obwohl der DSN rot ist). Scharf nur bei DSN_REGRESSION_GATE=1; ohne
+			// Flag unverändertes Verhalten. Läuft NACH Journey (67), VOR Approval
+			// (66), damit die Reihenfolge Staging(65) → Journey(67) → DSN(68) →
+			// Approval (66) beweisbar bleibt. Eine Probe mit dsn_ok=false ist der
+			// Beweis, dass der Bug wieder da ist → exit 68.
+			if os.Getenv("DSN_REGRESSION_GATE") == "1" {
+				ok, proof, observed := dsnProbeSatisfied(dsnProbesDir, app, sha)
+				if !ok {
+					fail(exBadDSN, "kein grünes DSN-Probe für %s@%s (DSN_REGRESSION_GATE=1) — nicht promotefähig.\n"+
+						"  Beweis fehlt ODER Probe rot (z.B. <rig>_clean@5433-Bug, SC4).\n"+
+						"  Erst grün fahren:  sa-staging-dsn-probe %s %s\n"+
+						"  (Probes-Verzeichnis: %s)", app, short(sha), app, short(sha), dsnProbesDir)
+				}
+				fmt.Printf("→ DSN-Regression grün: %s@%s [%s] dsn=%s\n", app, short(sha), proof, observed)
+			}
+
 			// ── Gate (b): frisches Approval für (app, sha) ──────────────────
 			appr, err := checkApproval(approvalDir, app, sha, time.Now())
 			if err != nil {
@@ -451,6 +518,7 @@ func promoteCmd() *cobra.Command {
 	hn, _ := os.Hostname()
 	c.Flags().StringVar(&actor, "actor", envOr("DEPLOY_ACTOR", "promote@"+hn), "deployed_by im Ledger")
 	c.Flags().StringVar(&journeyResultsDir, "journey-results-dir", envOr("JOURNEY_RESULTS_DIR", "/var/lib/journey-runner/results"), "Journey-Result-JSONs (nur relevant bei JOURNEY_PROMOTE_GATE=1)")
+	c.Flags().StringVar(&dsnProbesDir, "dsn-probes-dir", envOr("DSN_PROBES_DIR", "/var/lib/sa-staging/dsn-probes"), "DSN-Probe-JSONs (nur relevant bei DSN_REGRESSION_GATE=1, SC4)")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "prüft beide Gates, deployt/smoked/schreibt aber nicht")
 	return c
 }
