@@ -198,6 +198,44 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			}
 		}
 
+		// idea/soon→now: Arbeits-Evidenz-Vollzug (ADR-0011 now-Eintritt:
+		// "Execution gestartet — erster Bead hooked/in_progress ODER Workspace
+		// live"). Greift NUR bei vergebener Lane (Dispatch-Gate hat geoeffnet);
+		// quantbot propose-only (Regel 3), locked respektiert applyStageProposal.
+		if init.Stage == "idea" || init.Stage == "soon" {
+			arbeitLaeuft := false
+			for _, b := range beads {
+				if b.Status == "hooked" || b.Status == "in_progress" {
+					arbeitLaeuft = true
+					break
+				}
+			}
+			if !arbeitLaeuft {
+				for _, ws := range workspaces {
+					if ws.Status == "running" || ws.Status == "waiting" {
+						arbeitLaeuft = true
+						break
+					}
+				}
+			}
+			if arbeitLaeuft {
+				var laneVergeben bool
+				_ = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative_tag t
+				     WHERE t.initiative_id=$1 AND t.kind='lane')`, init.ID).Scan(&laneVergeben)
+				if laneVergeben {
+					proposeOnly := init.Firma == "quantbot"
+					if moved, reason, err := applyStageProposal(ctx, p, init.ID, "now",
+						map[string]any{"evidence": "arbeit-laeuft (bead hooked/in_progress oder workspace aktiv)"},
+						"flow-manager", proposeOnly); err == nil && moved {
+						fmt.Printf("→ %s: %s→now (Arbeits-Evidenz)\n", init.ID, init.Stage)
+					} else if err == nil && reason != "" {
+						_ = reason
+					}
+				}
+			}
+		}
+
+
 		// Check if lower layers (Reactor, vk-Sage) are engaged (MUST-FIX Nygard/Newman)
 		engaged, reason, err := isLowerLayerEngaged(ctx, p, init.ID, beads, workspaces)
 		if err != nil {
