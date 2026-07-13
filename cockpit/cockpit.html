@@ -153,7 +153,8 @@
                       <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
                         <span class="text-[10px] text-slate-400" x-text="c.id"></span>
                         <span x-show="c.kinder_count > 0" class="text-[10px] px-1 rounded bg-indigo-100 text-indigo-700 font-semibold" :title="c.kinder_count + ' Kind-Karten'" x-text="'▾ ' + c.kinder_count"></span>
-                        <span x-show="c.dispatch_lane" class="text-[10px] px-1 rounded font-medium" :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700'}[c.dispatch_lane] || 'bg-slate-100 text-slate-600'" :title="'Dispatch-Lane (Mario): ' + c.dispatch_lane" x-text="{'solartown':'⛏ Solartown','vibe-kanban':'⚡ VK','human':'✋ Mensch'}[c.dispatch_lane] || c.dispatch_lane"></span>
+                        <span x-show="c.dispatch_lane" class="text-[10px] px-1 rounded font-medium" :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700','session':'bg-indigo-100 text-indigo-700'}[c.dispatch_lane] || 'bg-slate-100 text-slate-600'" :title="'Dispatch-Lane (Mario): ' + c.dispatch_lane" x-text="{'solartown':'⛏ Solartown','vibe-kanban':'⚡ VK','human':'✋ Mensch','session':'🤖 Session'}[c.dispatch_lane] || c.dispatch_lane"></span>
+                        <span x-show="c.session_tag" class="text-[10px] px-1 rounded bg-indigo-50 text-indigo-600 font-mono" :title="'Session: ' + c.session_tag" x-text="'🤖 ' + c.session_tag"></span>
                         <span x-show="!c.dispatch_lane && c.approved_plan && ['idea','soon','now'].includes(c.stage)" class="text-[10px] px-1 rounded font-semibold bg-amber-100 text-amber-800" title="PRD approved, aber noch keine Lane vergeben — wartet auf deinen Dispatch (Gate haelt)">⏳ Lane?</span>
                         <span x-show="c.tier" class="text-[10px] px-1 rounded font-medium" :class="tierChip(c.tier)" x-text="tierLabel(c.tier)"></span>
                         <!-- Pipeline-Ampel (mk-pipeline-ampel): ⚒ Beads · S Staging · P Prod -->
@@ -433,6 +434,7 @@
             <option value="plan">Solartown (plan)</option>
             <option value="plan-deep">Solartown Deep-Review (plan-deep)</option>
             <option value="human">Nur Menschen (keine Automatik)</option>
+            <option value="session">Claude-Session (baut inline)</option>
           </select>
           <p class="text-[10px] text-slate-400 mt-1">Dispatch vergibt das lane-Tag — ohne Tag baut keine Automatik (Testphasen-Gate).</p>
         </div>
@@ -519,13 +521,14 @@
             <dd class="flex items-center gap-2">
               <select @change="dispatchFromDetail($event.target)"
                 class="text-xs px-1.5 py-0.5 rounded font-semibold border-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-300"
-                :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700'}[detail.initiative.dispatch_lane] || 'bg-amber-100 text-amber-800'"
+                :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700','session':'bg-indigo-100 text-indigo-700'}[detail.initiative.dispatch_lane] || 'bg-amber-100 text-amber-800'"
                 title="Lane vergeben = Dispatch (Gate oeffnet fuer diese Karte)">
                 <option value="" :selected="!detail.initiative.dispatch_lane">⏳ Lane wählen…</option>
                 <option value="hack" :selected="detail.initiative.dispatch_lane === 'vibe-kanban'">⚡ Vibe Kanban</option>
                 <option value="plan" :selected="detail.initiative.dispatch_lane === 'solartown'">⛏ Solartown</option>
                 <option value="plan-deep">⛏ Solartown + Deep-Review</option>
                 <option value="human" :selected="detail.initiative.dispatch_lane === 'human'">✋ Nur Menschen</option>
+                <option value="session" :selected="detail.initiative.dispatch_lane === 'session'">🤖 Claude-Session</option>
               </select>
               <span x-show="!detail.initiative.dispatch_lane" class="text-[10px] text-amber-700">ohne Lane baut keine Automatik</span>
             </dd>
@@ -1028,7 +1031,7 @@ function liveKanban() {
       if (!this.detail || !this.detail.initiative || !sel.value) return;
       const id = this.detail.initiative.id;
       const lane = sel.value;
-      const label = { hack: 'Vibe Kanban', plan: 'Solartown', 'plan-deep': 'Solartown + Deep-Review', human: 'Nur Menschen' }[lane] || lane;
+      const label = { hack: 'Vibe Kanban', plan: 'Solartown', 'plan-deep': 'Solartown + Deep-Review', human: 'Nur Menschen', session: 'Claude-Session' }[lane] || lane;
       if (!confirm(id + ' → Lane „' + label + '" dispatchen?' + (lane === 'hack' ? ' (startet sofort einen VK-Workspace)' : ''))) {
         sel.value = ''; await this.openDetail(id); return;
       }

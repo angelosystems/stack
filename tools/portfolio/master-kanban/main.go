@@ -332,7 +332,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", os.Getenv("PORTFOLIO_DSN"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings(), cmdParent())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings(), cmdParent(), cmdSessionClaim())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -3920,15 +3920,16 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if body.Lane == "human" {
-			// Nur Menschen: Tag gesetzt, dispatched-Event, keine Automatik.
-			payloadBytes, _ := json.Marshal(map[string]string{"lane": "human", "note": body.Note})
+		if body.Lane == "human" || body.Lane == "session" {
+			// human: nur Menschen. session: eine Claude-Session baut inline —
+			// in beiden Faellen Tag + Event, keine Fabrik-Aktion.
+			payloadBytes, _ := json.Marshal(map[string]string{"lane": laneTagFor[body.Lane], "note": body.Note})
 			_, _ = p.Exec(r.Context(),
 				`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
 				 VALUES ($1, 'dispatched', 'master', $2::jsonb, 'master-kanban')`,
 				body.Id, string(payloadBytes))
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"ok": true, "lane": "human"})
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "lane": laneTagFor[body.Lane]})
 			return
 		}
 

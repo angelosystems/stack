@@ -15,7 +15,7 @@ import (
 // laneTagFor uebersetzt die Dispatch-Lane in den Tag-Wert.
 var laneTagFor = map[string]string{
 	"plan": "solartown", "plan-deep": "solartown",
-	"hack": "vibe-kanban", "human": "human",
+	"hack": "vibe-kanban", "human": "human", "session": "session",
 }
 
 // setLaneTag setzt lane=<wert> + lane-source=mario an der Karte und raeumt
