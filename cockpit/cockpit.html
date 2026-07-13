@@ -149,6 +149,7 @@
                         <span class="text-[10px] text-slate-400" x-text="c.id"></span>
                         <span x-show="c.kinder_count > 0" class="text-[10px] px-1 rounded bg-indigo-100 text-indigo-700 font-semibold" :title="c.kinder_count + ' Kind-Karten'" x-text="'▾ ' + c.kinder_count"></span>
                         <span x-show="c.dispatch_lane" class="text-[10px] px-1 rounded font-medium" :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700'}[c.dispatch_lane] || 'bg-slate-100 text-slate-600'" :title="'Dispatch-Lane (Mario): ' + c.dispatch_lane" x-text="{'solartown':'⛏ Solartown','vibe-kanban':'⚡ VK','human':'✋ Mensch'}[c.dispatch_lane] || c.dispatch_lane"></span>
+                        <span x-show="!c.dispatch_lane && c.approved_plan && ['idea','soon','now'].includes(c.stage)" class="text-[10px] px-1 rounded font-semibold bg-amber-100 text-amber-800" title="PRD approved, aber noch keine Lane vergeben — wartet auf deinen Dispatch (Gate haelt)">⏳ Lane?</span>
                         <span x-show="c.tier" class="text-[10px] px-1 rounded font-medium" :class="tierChip(c.tier)" x-text="tierLabel(c.tier)"></span>
                         <!-- Pipeline-Ampel (mk-pipeline-ampel): ⚒ Beads · S Staging · P Prod -->
                         <span x-show="c.beads_total > 0" class="text-[10px] px-1 rounded font-semibold"
@@ -463,6 +464,11 @@
             <dd x-text="fmtDate(detail.initiative.updated_at)"></dd>
             <dt class="text-slate-400">Letzte Aktivität</dt>
             <dd x-text="fmtRel(detail.initiative.last_activity)"></dd>
+            <dt class="text-slate-400">Lane</dt>
+            <dd>
+              <span x-show="detail.initiative.dispatch_lane" class="text-xs px-1.5 py-0.5 rounded font-semibold" :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700'}[detail.initiative.dispatch_lane] || 'bg-slate-100 text-slate-600'" x-text="{'solartown':'⛏ Solartown','vibe-kanban':'⚡ Vibe Kanban','human':'✋ Nur Menschen'}[detail.initiative.dispatch_lane] || detail.initiative.dispatch_lane"></span>
+              <span x-show="!detail.initiative.dispatch_lane" class="text-xs text-amber-700">⏳ wartet auf deinen Dispatch — ohne Lane baut keine Automatik</span>
+            </dd>
             <dt class="text-slate-400">Umfang</dt>
             <dd class="flex gap-3">
               <span x-show="detail.initiative.bead_count">🐝 <span x-text="detail.initiative.bead_count"></span></span>
