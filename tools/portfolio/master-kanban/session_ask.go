@@ -20,6 +20,11 @@ import (
 
 var sessionAskBusy sync.Map // initiativeID -> true solange eine Frage laeuft
 
+// Leitplanke: hoechstens 2 gleichzeitige Session-Resumes boxweit — jeder
+// Lauf laedt einen vollen Session-Kontext (RAM/Kosten); mehr parallele
+// Mammut-Resumes wuerden werkstatt real belasten.
+var sessionAskSlots = make(chan struct{}, 2)
+
 func sessionComment(p *pgxpool.Pool, initiativeID, actor, text string) {
 	payload, _ := json.Marshal(map[string]string{"text": text})
 	_, _ = p.Exec(context.Background(),
@@ -29,6 +34,7 @@ func sessionComment(p *pgxpool.Pool, initiativeID, actor, text string) {
 
 func runSessionAsk(p *pgxpool.Pool, initiativeID, title, sessionID, frage string) {
 	defer sessionAskBusy.Delete(initiativeID)
+	defer func() { <-sessionAskSlots }()
 	kurz := sessionID
 	if len(kurz) > 8 {
 		kurz = kurz[:8]
@@ -41,7 +47,11 @@ func runSessionAsk(p *pgxpool.Pool, initiativeID, title, sessionID, frage string
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "claude", "--resume", sessionID, "-p", prompt, "--max-turns", "3")
+	// Leitplanke: Lesen erlaubt (bessere Antworten), Schreiben/Ausfuehren HART
+	// verboten — zusaetzlich zur Prompt-Rahmung.
+	cmd := exec.CommandContext(ctx, "claude", "--resume", sessionID, "-p", prompt,
+		"--max-turns", "3",
+		"--disallowedTools", "Bash,Edit,Write,NotebookEdit,Agent,TodoWrite")
 	cmd.Dir = "/root" // Sessions laufen auf werkstatt in /root; ponytail: CWD je Karte aus plan_item.repo
 	cmd.Env = append(cmd.Environ(), "HOME=/root")
 	out, err := cmd.Output()
@@ -100,6 +110,13 @@ func handleSessionAsk(p *pgxpool.Pool) http.HandlerFunc {
 		}
 		if _, busy := sessionAskBusy.LoadOrStore(body.Id, true); busy {
 			http.Error(w, "an dieser Karte laeuft schon eine Frage — Antwort kommt als Kommentar", 429)
+			return
+		}
+		select {
+		case sessionAskSlots <- struct{}{}:
+		default:
+			sessionAskBusy.Delete(body.Id)
+			http.Error(w, "schon 2 Session-Fragen in Arbeit (boxweite Kappe) — gleich erneut versuchen", 429)
 			return
 		}
 		frage := strings.TrimSpace(body.Text)
