@@ -3920,6 +3920,11 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, "lane-Tag setzen fehlgeschlagen: "+err.Error(), 500)
 			return
 		}
+		// Dispatch = bewusste Uebergabe an den Fluss: ein frueheres Hand-Move-
+		// Lock wird geloest, damit die Evidenz-Automatik die Karte bewegen darf
+		// (Mario behaelt die Hoheit — der naechste Hand-Move lockt wieder).
+		_, _ = p.Exec(r.Context(), `UPDATE portfolio.initiative
+		     SET stage_locked_by_human=false WHERE id=$1`, body.Id)
 
 		if body.Lane == "human" || body.Lane == "session" {
 			// human: nur Menschen. session: eine Claude-Session baut inline —
