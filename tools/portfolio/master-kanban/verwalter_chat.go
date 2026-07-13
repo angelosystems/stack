@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -149,6 +150,8 @@ func handleVerwalterChat() http.HandlerFunc {
 				}
 				msgs = append(msgs, chatMsg{Von: von, Text: body, At: at})
 			}
+			// Chronologisch aelteste zuerst (die API liefert neueste zuerst).
+			sort.Slice(msgs, func(a, b int) bool { return msgs[a].At < msgs[b].At })
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"messages": msgs,
