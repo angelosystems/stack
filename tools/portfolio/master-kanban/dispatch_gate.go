@@ -43,27 +43,29 @@ func setLaneTag(ctx context.Context, p *pgxpool.Pool, initiativeID, lane string)
 
 // approvedPlanItem liefert (slug, path, layer, status) des juengsten
 // approved(-with-notes) plan_items der Karte — leer, wenn keins existiert.
-func approvedPlanItem(ctx context.Context, p *pgxpool.Pool, initiativeID string) (slug, path, layer, status string) {
+func approvedPlanItem(ctx context.Context, p *pgxpool.Pool, initiativeID string) (slug, path, layer, status, repo string) {
 	_ = p.QueryRow(ctx,
-		`SELECT slug, COALESCE(path,''), COALESCE(layer,'prd'), status
+		`SELECT slug, COALESCE(path,''), COALESCE(layer,'prd'), status, COALESCE(repo,'')
 		 FROM portfolio.plan_item
 		 WHERE initiative_id=$1 AND status IN ('approved','approved-with-notes')
 		 ORDER BY updated_at DESC LIMIT 1`, initiativeID).
-		Scan(&slug, &path, &layer, &status)
+		Scan(&slug, &path, &layer, &status, &repo)
 	return
 }
 
 // reEmitPlanApproved wiederholt das plan.status-changed-Event in town.events
 // (:5433), damit der laufende Decomposer die frisch dispatchte Karte sofort
 // zerlegt (idempotent: Claims + Kinder-Check im Decomposer). Best-effort.
-func reEmitPlanApproved(ctx context.Context, slug, path, layer, status string) error {
+func reEmitPlanApproved(ctx context.Context, slug, path, layer, status, repo string) error {
 	sp, err := solartownPool()
 	if err != nil {
 		return fmt.Errorf("solartown-Pool: %w", err)
 	}
+	// repo MUSS mit: der Decomposer erwartet payload['repo'] (KeyError-Befund
+	// Event 1450 — Re-Emit ohne repo liess die Zerlegung ins Leere laufen).
 	payload, _ := json.Marshal(map[string]string{
 		"slug": slug, "path": path, "layer": layer,
-		"old": status, "new": status,
+		"old": status, "new": status, "repo": repo,
 	})
 	_, err = sp.Exec(ctx, `SELECT town.emit('plan.status-changed', $1::jsonb, 'master-kanban')`, string(payload))
 	return err

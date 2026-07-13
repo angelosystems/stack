@@ -3937,8 +3937,8 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 		if body.Lane == "plan" || body.Lane == "plan-deep" {
 			// Karte hat schon ein approved PRD? Dann KEIN neues Scaffold —
 			// Re-Emit weckt den Decomposer fuer die frisch vergebene Lane.
-			if slug, path, layer, status := approvedPlanItem(r.Context(), p, body.Id); slug != "" {
-				if err := reEmitPlanApproved(r.Context(), slug, path, layer, status); err != nil {
+			if slug, path, layer, status, repo := approvedPlanItem(r.Context(), p, body.Id); slug != "" {
+				if err := reEmitPlanApproved(r.Context(), slug, path, layer, status, repo); err != nil {
 					http.Error(w, "lane-Tag gesetzt, aber Re-Emit fehlgeschlagen: "+err.Error()+" — Decomposer nimmt das Event beim naechsten Catch-up", 500)
 					return
 				}
