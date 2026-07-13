@@ -465,9 +465,18 @@
             <dt class="text-slate-400">Letzte Aktivität</dt>
             <dd x-text="fmtRel(detail.initiative.last_activity)"></dd>
             <dt class="text-slate-400">Lane</dt>
-            <dd>
-              <span x-show="detail.initiative.dispatch_lane" class="text-xs px-1.5 py-0.5 rounded font-semibold" :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700'}[detail.initiative.dispatch_lane] || 'bg-slate-100 text-slate-600'" x-text="{'solartown':'⛏ Solartown','vibe-kanban':'⚡ Vibe Kanban','human':'✋ Nur Menschen'}[detail.initiative.dispatch_lane] || detail.initiative.dispatch_lane"></span>
-              <span x-show="!detail.initiative.dispatch_lane" class="text-xs text-amber-700">⏳ wartet auf deinen Dispatch — ohne Lane baut keine Automatik</span>
+            <dd class="flex items-center gap-2">
+              <select @change="dispatchFromDetail($event.target)"
+                class="text-xs px-1.5 py-0.5 rounded font-semibold border-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-300"
+                :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700'}[detail.initiative.dispatch_lane] || 'bg-amber-100 text-amber-800'"
+                title="Lane vergeben = Dispatch (Gate oeffnet fuer diese Karte)">
+                <option value="" :selected="!detail.initiative.dispatch_lane">⏳ Lane wählen…</option>
+                <option value="hack" :selected="detail.initiative.dispatch_lane === 'vibe-kanban'">⚡ Vibe Kanban</option>
+                <option value="plan" :selected="detail.initiative.dispatch_lane === 'solartown'">⛏ Solartown</option>
+                <option value="plan-deep">⛏ Solartown + Deep-Review</option>
+                <option value="human" :selected="detail.initiative.dispatch_lane === 'human'">✋ Nur Menschen</option>
+              </select>
+              <span x-show="!detail.initiative.dispatch_lane" class="text-[10px] text-amber-700">ohne Lane baut keine Automatik</span>
             </dd>
             <dt class="text-slate-400">Umfang</dt>
             <dd class="flex gap-3">
@@ -914,6 +923,29 @@ function liveKanban() {
         return 'plan';
       }
       return 'hack';
+    },
+    async dispatchFromDetail(sel) {
+      if (!this.detail || !this.detail.initiative || !sel.value) return;
+      const id = this.detail.initiative.id;
+      const lane = sel.value;
+      const label = { hack: 'Vibe Kanban', plan: 'Solartown', 'plan-deep': 'Solartown + Deep-Review', human: 'Nur Menschen' }[lane] || lane;
+      if (!confirm(id + ' → Lane „' + label + '" dispatchen?' + (lane === 'hack' ? ' (startet sofort einen VK-Workspace)' : ''))) {
+        sel.value = ''; await this.openDetail(id); return;
+      }
+      try {
+        const r = await fetch(this.apiBase + '/api/dispatch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, lane, note: '' }),
+        });
+        if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
+        await this.refresh();
+        await this.openDetail(id);
+        this.showToast('Lane vergeben: ' + label);
+      } catch (e) {
+        this.showToast('Dispatch fehlgeschlagen: ' + e.message, 'error');
+        await this.openDetail(id);
+      }
     },
     async submitDispatchDrawer() {
       if (!this.detail || !this.detail.initiative) return;
