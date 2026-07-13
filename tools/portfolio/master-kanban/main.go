@@ -2714,6 +2714,7 @@ func cmdServe() *cobra.Command {
 			// P2 — Dispatch aus der Karte (st-bopm)
 			http.HandleFunc("/api/dispatch", handleDispatch(p))
 			http.HandleFunc("/api/parent", handleParent(p))
+			http.HandleFunc("/api/verwalter/chat", handleVerwalterChat())
 
 			// Expose WIP limits to cockpit UI (P2.3)
 			http.HandleFunc("/api/wip-limits", func(w http.ResponseWriter, r *http.Request) {

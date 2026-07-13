@@ -50,6 +50,9 @@
       <a href="/ressourcen" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Ressourcen</a>
       <a href="/health" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Health</a>
       <a href="https://vibekanban.stayawesome.app" target="_blank" rel="noopener" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Vibe Kanban ↗</a>
+      <button @click="toggleChat()" class="px-3 py-1 rounded-md text-sm font-medium"
+        :class="chatOpen ? 'bg-violet-100 text-violet-800' : 'text-slate-500 hover:text-slate-900'"
+        title="Chat mit dem Master-Kanban-Verwalter (Antwort = ein Agent-Run)">💬 Verwalter</button>
     </nav>
 
     <div class="flex gap-2 flex-1" x-show="view==='board'">
@@ -123,7 +126,9 @@
                 <h2 class="font-semibold uppercase tracking-wide text-sm" x-text="f.label"></h2>
                 <button @click="pinTop(f.id)" class="text-slate-300 hover:text-sky-600 text-sm leading-none" title="nach oben holen">⤴</button>
                 <span class="text-xs text-slate-400" x-text="(counts[f.id]||0) + ' total'"></span>
-                <span class="text-xs font-medium text-emerald-600 ml-4" x-show="capacity[f.id]" x-text="capacity[f.id] ? ('🟢 ' + capacity[f.id].polecats + ' Polecats frei · ' + capacity[f.id].vkslots + ' vk-Slots') : ''"></span>
+                <span class="text-xs font-medium ml-4" x-show="capacity[f.id]"
+                  :class="capacity[f.id] && capacity[f.id].vkslots < 0 ? 'text-amber-600' : 'text-emerald-600'"
+                  x-text="capacity[f.id] ? ((capacity[f.id].vkslots < 0 ? '🟠 ' : '🟢 ') + capacity[f.id].polecats + ' Polecats frei · ' + (capacity[f.id].vkslots < 0 ? 'VK überbucht (' + (-capacity[f.id].vkslots) + ')' : capacity[f.id].vkslots + ' vk-Slots')) : ''"></span>
               </div>
               <div class="text-xs text-slate-500">
                 now: <span x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span>
@@ -142,7 +147,7 @@
                   </div>
                   <template x-for="c in cardsIn(f.id, stage)" :key="c.id">
                     <article :data-id="c.id" @click="openDetail(c.id)"
-                      class="card-drag mb-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md p-2 text-sm shadow-sm"
+                      class="card-drag mb-2 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-sm shadow-sm hover:shadow transition-shadow"
                       :class="c._child ? 'ml-4 border-l-2 border-l-indigo-300' : ''">
                       <div class="font-medium leading-snug"><span x-show="c._child" class="text-indigo-400 mr-0.5">↳</span><span x-text="c.title"></span></div>
                       <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
@@ -340,6 +345,47 @@
   </main>
 
   <!-- ════ KARTEN-DETAIL: Side-Peek im Notion-Stil (P5) ════ -->
+  <!-- Verwalter-Chat Slide-out (PRD mk-verwalter-chat WP2) -->
+  <aside x-show="chatOpen" x-cloak
+    x-transition:enter="transition ease-out duration-200"
+    x-transition:enter-start="translate-x-full" x-transition:enter-end="translate-x-0"
+    x-transition:leave="transition ease-in duration-150"
+    x-transition:leave-start="translate-x-0" x-transition:leave-end="translate-x-full"
+    class="fixed right-0 top-0 h-full w-[clamp(360px,32vw,460px)] bg-white shadow-2xl z-40 flex flex-col border-l border-slate-200">
+    <header class="px-4 py-3 border-b border-slate-200 flex items-center justify-between shrink-0 bg-violet-50">
+      <div>
+        <div class="font-semibold text-slate-800">💬 Master-Kanban-Verwalter</div>
+        <div class="text-[11px] text-slate-500">Antwort = ein Agent-Run (Minuten, kein Instant-Chat)</div>
+      </div>
+      <button @click="toggleChat()" class="p-1.5 rounded hover:bg-violet-100 text-slate-500" title="schließen">✕</button>
+    </header>
+    <div class="flex-1 overflow-y-auto px-4 py-3 space-y-2" x-ref="chatScroll">
+      <template x-for="(m, idx) in chatMsgs" :key="idx">
+        <div :class="m.von === 'mario' ? 'flex justify-end' : 'flex justify-start'">
+          <div class="max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap"
+            :class="m.von === 'mario' ? 'bg-sky-100 text-sky-900' : 'bg-slate-100 text-slate-800'">
+            <div x-text="m.text"></div>
+            <div class="text-[10px] mt-1 opacity-60" x-text="fmtRel(m.at)"></div>
+          </div>
+        </div>
+      </template>
+      <div x-show="chatRunning" class="flex justify-start">
+        <div class="bg-violet-50 text-violet-700 rounded-lg px-3 py-2 text-sm animate-pulse">🤔 Verwalter denkt nach — sein Run läuft…</div>
+      </div>
+      <div x-show="chatError" class="text-xs text-rose-700 bg-rose-50 rounded p-2" x-text="chatError"></div>
+      <div x-show="!chatMsgs.length && !chatError" class="text-xs text-slate-400 text-center pt-8">Noch keine Nachrichten — frag ihn z.&nbsp;B. nach seinen offenen Findings oder einer Lane-Empfehlung.</div>
+    </div>
+    <footer class="p-3 border-t border-slate-200 shrink-0">
+      <div class="flex gap-2">
+        <textarea x-model="chatText" @keydown.meta.enter="sendChat()" @keydown.ctrl.enter="sendChat()"
+          placeholder="Nachricht an den Verwalter… (⌘/Strg+Enter sendet)"
+          class="flex-1 border border-slate-200 rounded px-2 py-1.5 text-sm h-16 resize-none focus:outline-none focus:ring-2 focus:ring-violet-300"></textarea>
+        <button @click="sendChat()" :disabled="!chatText.trim() || chatSending"
+          class="px-3 rounded bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white text-sm font-semibold self-stretch">Senden</button>
+      </div>
+    </footer>
+  </aside>
+
   <div x-show="detailOpen" x-cloak x-transition.opacity.duration.150ms
     class="fixed inset-0 bg-slate-900/20 z-30" @click="closeDetail()"></div>
 
@@ -749,6 +795,40 @@ function liveKanban() {
 
     detail: null,
     detailOpen: false,
+    chatOpen: false, chatMsgs: [], chatText: '', chatRunning: false, chatSending: false, chatError: '', chatTimer: null,
+    toggleChat() {
+      this.chatOpen = !this.chatOpen;
+      if (this.chatOpen) { this.closeDetail(); this.loadChat(); this.chatTimer = setInterval(() => this.loadChat(), 8000); }
+      else { clearInterval(this.chatTimer); this.chatTimer = null; }
+    },
+    async loadChat() {
+      try {
+        const r = await fetch(this.apiBase + '/api/verwalter/chat');
+        if (!r.ok) throw new Error(await r.text());
+        const d = await r.json();
+        const stick = !this.$refs.chatScroll || (this.$refs.chatScroll.scrollTop + this.$refs.chatScroll.clientHeight >= this.$refs.chatScroll.scrollHeight - 40);
+        this.chatMsgs = d.messages || [];
+        this.chatRunning = !!d.running;
+        this.chatError = '';
+        if (stick) this.$nextTick(() => { if (this.$refs.chatScroll) this.$refs.chatScroll.scrollTop = this.$refs.chatScroll.scrollHeight; });
+      } catch (e) { this.chatError = 'Verwalter nicht erreichbar: ' + e.message; }
+    },
+    async sendChat() {
+      const text = this.chatText.trim();
+      if (!text || this.chatSending) return;
+      this.chatSending = true;
+      try {
+        const r = await fetch(this.apiBase + '/api/verwalter/chat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        this.chatText = '';
+        this.chatRunning = true;
+        await this.loadChat();
+      } catch (e) { this.chatError = 'Senden fehlgeschlagen: ' + e.message; }
+      finally { this.chatSending = false; }
+    },
     detailExpanded: false,
     copied: false,
     dragging: false,
