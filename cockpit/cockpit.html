@@ -543,6 +543,17 @@
                   title="Kopiert 'claude --resume <id>' — im Terminal einfuegen, und du bist in der Session, die diese Karte gebaut hat">⧉ Session aufrufen</button>
               </dd>
             </template>
+            <template x-if="detail.initiative.session_tag">
+              <dd class="col-span-2 mt-1">
+                <div class="flex gap-1.5">
+                  <input x-model="sessionAskText" @keydown.enter="askSession()" type="text"
+                    placeholder="Frage an die Session… (Antwort kommt als Kommentar, dauert Minuten)"
+                    class="flex-1 border border-indigo-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-300">
+                  <button @click="askSession()" :disabled="!sessionAskText.trim() || sessionAskPending"
+                    class="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white font-semibold" x-text="sessionAskPending ? '…' : 'Fragen'"></button>
+                </div>
+              </dd>
+            </template>
             <dt class="text-slate-400">Umfang</dt>
             <dd class="flex gap-3">
               <span x-show="detail.initiative.bead_count">🐝 <span x-text="detail.initiative.bead_count"></span></span>
@@ -1037,6 +1048,24 @@ function liveKanban() {
         return 'plan';
       }
       return 'hack';
+    },
+    sessionAskText: '', sessionAskPending: false,
+    async askSession() {
+      const text = this.sessionAskText.trim();
+      if (!text || !this.detail || this.sessionAskPending) return;
+      this.sessionAskPending = true;
+      const id = this.detail.initiative.id;
+      try {
+        const r = await fetch(this.apiBase + '/api/session/ask', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, text }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        this.sessionAskText = '';
+        this.showToast('Frage gestellt — die Session laedt ihren Kontext, Antwort kommt als Kommentar (Minuten).');
+        await this.openDetail(id);
+      } catch (e) { this.showToast('Frage fehlgeschlagen: ' + e.message, 'error'); }
+      finally { this.sessionAskPending = false; }
     },
     copySessionResume(sessionId) {
       const cmd = 'claude --resume ' + sessionId;
