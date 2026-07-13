@@ -351,7 +351,12 @@
     x-transition:enter-start="translate-x-full" x-transition:enter-end="translate-x-0"
     x-transition:leave="transition ease-in duration-150"
     x-transition:leave-start="translate-x-0" x-transition:leave-end="translate-x-full"
-    class="fixed right-0 top-0 h-full w-[clamp(360px,32vw,460px)] bg-white shadow-2xl z-40 flex flex-col border-l border-slate-200">
+    class="fixed right-0 top-0 h-full bg-white shadow-2xl z-40 flex flex-col border-l border-slate-200"
+    :style="'width: ' + chatWidth + 'px'">
+    <!-- Resize-Griff: Breite ziehen (persistiert in localStorage) -->
+    <div @mousedown.prevent="startChatResize($event)"
+      class="absolute left-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-violet-300 active:bg-violet-400 z-50"
+      title="Breite ziehen"></div>
     <header class="px-4 py-3 border-b border-slate-200 flex items-center justify-between shrink-0 bg-violet-50">
       <div>
         <div class="font-semibold text-slate-800">💬 Master-Kanban-Verwalter</div>
@@ -379,7 +384,7 @@
       <div class="flex gap-2">
         <textarea x-model="chatText" @keydown.meta.enter="sendChat()" @keydown.ctrl.enter="sendChat()"
           placeholder="Nachricht an den Verwalter… (⌘/Strg+Enter sendet)"
-          class="flex-1 border border-slate-200 rounded px-2 py-1.5 text-sm h-16 resize-none focus:outline-none focus:ring-2 focus:ring-violet-300"></textarea>
+          class="flex-1 border border-slate-200 rounded px-2 py-1.5 text-sm min-h-16 max-h-72 resize-y focus:outline-none focus:ring-2 focus:ring-violet-300" style="height:4rem"></textarea>
         <button @click="sendChat()" :disabled="!chatText.trim() || chatSending"
           class="px-3 rounded bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white text-sm font-semibold self-stretch">Senden</button>
       </div>
@@ -796,6 +801,21 @@ function liveKanban() {
     detail: null,
     detailOpen: false,
     chatOpen: false, chatMsgs: [], chatText: '', chatRunning: false, chatSending: false, chatError: '', chatTimer: null,
+    chatWidth: parseInt(localStorage.getItem('chatWidth') || '420', 10),
+    startChatResize(e) {
+      const move = (ev) => {
+        this.chatWidth = Math.min(Math.max(window.innerWidth - ev.clientX, 340), Math.round(window.innerWidth * 0.9));
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        document.body.style.userSelect = '';
+        localStorage.setItem('chatWidth', String(this.chatWidth));
+      };
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    },
     toggleChat() {
       this.chatOpen = !this.chatOpen;
       if (this.chatOpen) { this.closeDetail(); this.loadChat(); this.chatTimer = setInterval(() => this.loadChat(), 8000); }
