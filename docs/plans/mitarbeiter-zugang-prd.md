@@ -591,3 +591,28 @@ angelosystems): Contents=RW, Pull-requests=RW, kein Webhook, „only this
 account", installiert auf stayawesomeOS+master-kanban. Dann App-ID + private
 key (.pem) an die Session → /etc/crew-gh-app.env + Vault + Broker starten +
 Container-Remotes setzen + E2E (Branch-Push ok, main-Push blockiert).
+
+### Bahn 1 — GitHub App LIVE + E2E bewiesen (2026-07-14)
+
+App `stayawesome-crew` (ID 4296175, owner angelosystems), installiert
+(installation 146526042). **⚠ Mario wählte 3 Repos** (stayawesomeOS, stack,
+master-kanban) — `stack` ist Fabrik-Infra, war nicht empfohlen. Entschärft:
+der Minter fordert Tokens NUR für stayawesomeOS+master-kanban an → stack ist
+für MA aktuell unerreichbar (Cross-Repo-Isolation bewiesen: quantbot →
+„Repository not found"). Offene Frage an Mario: stack aus Installation
+entfernen (sauber) oder lassen (latent, minter-gated).
+
+- Key im Vault `/root/.secrets/stayawesome/crew-gh-app.pem` (600), Config
+  `/etc/crew-gh-app.env` (600). Broker `crew-gh-token-broker.service`
+  (User=root, SO_REUSEADDR, ExecStartPre wartet auf vz-crew-IP, Restart=always,
+  reboot-fest). Token-Scope = 2 Repos, TTL 9min, Key nie im Container.
+- **E2E bewiesen (aus dem Container):** clone master-kanban → Commit
+  Author=Angelo + Crew-Session-Trailer → Branch-Push `crew-test/e2e`
+  DURCHGEGANGEN → `main`-Push BLOCKIERT („protected branch hook declined /
+  Changes must be made through a pull request") → quantbot-clone
+  „Repository not found". Test-Branch wieder gelöscht.
+
+**Weg B ist damit komplett:** Session codet selbst (Branch→PR→Fabrik,
+attribuiert, main-geschützt) UND steuert die Fabrik (MK-Broker + dispatch +
+plan-approve, firma-gescoped) UND kann Staging-Ops (crew-ops). Offen nur noch
+Modell (W3 Abo / GLM-Bugfix) + stack-Installations-Frage.
