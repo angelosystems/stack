@@ -510,3 +510,33 @@ plan-edit/plan-git. → Broker muss Allow-Liste sein, kein Voll-Proxy.
   approven → Auto-Decompose) ODER bewusst bei Mario/Quick-Review lassen.
   = Governance-Entscheid.
 - MCP auch für Claude-Provider registrieren (wenn Abo da).
+
+### plan-approve firma-gescoped + Ops-Trennung (2026-07-14)
+
+**Mario-Entscheide:** (1) Mitarbeiter dürfen eigene stayawesome-PRDs approven;
+(2) Ops-Reichweite = nur Staging, Prod nur mit Co-Sign.
+
+**plan-approve gescoped (DEPLOYED):** Opus-Agent, Commit master-kanban 2db0e59
+(`planApproveScopeBlocks` → Plan→Initiative auflösen → `mitarbeiterBlocksWrite`;
+5 Tests). Binary gebaut+geswappt (Backup master-kanban.bak-vor-planapprove-
+20260714), serve neu. **E2E live bewiesen:** angelo approve Fremd-Plan
+(qb-gitops-branch-model) → 403 mit klarer Meldung VOR jedem File-Write/Commit;
+Admin unverändert; Scoping-Regression grün (angelo weiter nur 35 stayawesome).
+Im Broker freigeschaltet (`location = /api/plan-approve`) → durch den Broker
+Fremd-Firma weiter 403 (Backend-Scope). **Ungetestet bewusst:** eigenes PRD
+approven → würde echte Decomposition/Build auslösen (Unit-Test deckt die
+„own passes"-Logik ab).
+
+**Bahn 2 (Staging-Ops) — DESIGN, wartet auf Mario-Go:** deploy-Tool ist
+estate-weite Root-Infra (auch Prod/mario-prod) → NICHT für MA. Stattdessen
+scoped Unix-User `crew-ops` auf Staging (167.233.82.201): sudo nur
+systemctl start/stop/restart/status + journalctl für die SA-Staging-Units
+(sa-fin, documenso, inbox-zero-web/worker, 2 Canaries); kein root, keine
+Secrets, keine anderen Boxen; SSH-Key im Container, nft-Egress nur
+Container→Staging:22; Prod via Co-Sign. Ad-hoc-Migrationen bewusst raus
+(Secret-Exposure). Staging root-erreichbar verifiziert, keine Nicht-Root-User
+dort. **Offen:** Mario-Go für crew-ops-Zuschnitt.
+
+**Bahn 1 (GitHub-PR-Coding) — wartet auf Angelos GitHub-Username** für
+Collaborator (stayawesomeOS + master-kanban, main protected) + fine-grained
+PAT im Container.
