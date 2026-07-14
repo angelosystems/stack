@@ -616,3 +616,25 @@ entfernen (sauber) oder lassen (latent, minter-gated).
 attribuiert, main-geschützt) UND steuert die Fabrik (MK-Broker + dispatch +
 plan-approve, firma-gescoped) UND kann Staging-Ops (crew-ops). Offen nur noch
 Modell (W3 Abo / GLM-Bugfix) + stack-Installations-Frage.
+
+### Modelle scharf: Fable + GLM 5.2 + DeepSeek (2026-07-14, Mario-Wunsch)
+
+- **Fable LIVE:** claude3-Token (Vault `claude3-token.env`,
+  CLAUDE_CODE_OAUTH_TOKEN) als root-owned `/etc/crew-claude.env` +
+  EnvironmentFile in claudecodeui.service. Verifiziert im exakten Dienst-
+  Kontext: `claude -p --model claude-fable-5` → „FABLELIVE". (Abo-Inventur
+  sagte fälschlich „claude3 abgeräumt" — Konto existiert + hat Fable, dies
+  ist auch das Session-Konto → gemeinsames Limit beachten.) Hinweis:
+  claudecodeui-Statuspunkt prüft ANTHROPIC_API_KEY/.credentials.json, NICHT
+  den OAuth-Token → zeigt evtl. „not connected", Session läuft aber.
+- **GLM 5.2 LIVE (opencode-Bug UMGANGEN):** Der ai-sdk-@anthropic↔Z.ai-Pfad
+  liefert 0 Tokens (house-wide). Fix: zai-glm auf **@ai-sdk/openai-compatible
+  + `https://api.z.ai/api/coding/paas/v4`** umgestellt (Coding-Plan-Key
+  funktioniert dort; paas/v4 ohne coding = „insufficient balance").
+  Verifiziert: glm-5.2/4.6/4.5 alle „OK", opencode run glm-5.2 → „GLM52OK"
+  (6 Tokens). **⚠ Derselbe Fix heilt den Fabrik-GLM-Executor** (eigener
+  Follow-up für /opt/vk-lane bzw. opencode-Config der Fabrik).
+- **DeepSeek** bleibt als günstiges Modell (deepseek-chat, default).
+
+Modelle im Cockpit-Picker: Claude→Fable/Opus/Sonnet · OpenCode→GLM-5.2/4.6/
+4.5 + DeepSeek. Keys/Token host-/container-seitig (bewusst, wie GLM/DeepSeek).
