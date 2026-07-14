@@ -63,8 +63,11 @@ tools/deploy/deploy
 # crm-Recipe getrackt (PRD crm-twenty-produktion G9); übrige deploys/ bewusst
 # Box-lokal — breiteres Whitelisting = eigener Entscheid
 !deploys/
+deploys/*
 !deploys/stayawesome-prod/
+deploys/stayawesome-prod/*
 !deploys/stayawesome-prod/crm/
+deploys/stayawesome-prod/crm/*
 !deploys/stayawesome-prod/crm/docker-compose.yml
 
 docs/*
