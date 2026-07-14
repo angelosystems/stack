@@ -469,3 +469,44 @@ als **Connected**; Provider-Umschaltung + Modellwahl je Session (GLM-4.6/
 
 **Netto-Stand:** Login→App→Onboarding→Agent (DeepSeek) läuft E2E. GLM-Flat
 und Claude-Fable sind die zwei offenen Modell-Wege (GLM=Bugfix, Claude=Abo).
+
+### Weg B — Fabrik-Steuerung über Master Kanban (gescopter Broker, 2026-07-14)
+
+Ziel (Mario): Session soll selbst coden UND die Fabrik steuern (Karten, VK/
+Solartown-Dispatch), alles hart auf stayawesome begrenzt.
+
+**Code-Befund (verifiziert, tragend):** Das MK-Backend scoped ausschließlich
+über den `X-Auth-Request-Email`-Header gegen `MK_MITARBEITER_SCOPE`. Der
+`PORTFOLIO_API_KEY` UMGEHT das Scoping (god-mode). Die W4-Guards decken die
+Karten-Endpunkte (create/comment/update/move/archive/merge/capture) UND
+**dispatch** (Scope-Check VOR Build-Auslösung, main.go handleDispatch Z.29 vor
+Z.41). **Ungescoped/mächtig:** `plan-approve` (löst Decomposition aus),
+plan-edit/plan-git. → Broker muss Allow-Liste sein, kein Voll-Proxy.
+
+**Gebaut — MK-Identitäts-Broker (Muster wie SSO-Header-Injektion):**
+- nginx-Vhost `crew-mk-broker` auf `10.230.0.1:7790` (nur crew-Bridge).
+  Pinnt `X-Auth-Request-Email=angelo.calcagno@…` host-seitig, LÖSCHT jede vom
+  Container gesendete Identität/Key. Allow-Liste: initiatives, initiative,
+  create, comment, update, move, archive, merge, capture, dispatch. Alles
+  andere (plan-approve, …) → 403.
+- nft `crew_guard`: chirurgisches Allow nur für `10.230.0.1:7790` (reboot-fest
+  in crew-guard.nft). Direkter :7780-Zugriff bleibt geblockt.
+- Container: master-kanban-Binary (nur HTTP-Client im mcp-Modus, KEINE DSN,
+  KEIN Key) + Wrapper `mk-mcp` → als OpenCode-MCP-Tool `master-kanban`
+  registriert (api-url = Broker).
+
+**Sicherheit bewiesen (aus dem Container):**
+- Board-Read über Broker: nur stayawesome (35 Karten).
+- **Spoofing tot:** Container sendet selbst `X-Auth-Request-Email: mario@` →
+  Broker überschreibt → weiter nur stayawesome.
+- `plan-approve` → 403 (Allow-Liste). Fremd-`create` (quantbot) → 403.
+  Fremd-`dispatch` (lane=plan) → 403 VOR Build. Direkt-:7780 → zu.
+
+**Offen für Vollausbau Weg B:**
+- **GitHub-Weg (Code in die Fabrik):** Angelos GitHub-Username → Collaborator
+  (stayawesomeOS + master-kanban, main protected) + fine-grained PAT im
+  Container. Damit: Session codet → Branch → PR → Test-Gate/Merger/Staging.
+- **plan-approve härten:** entweder scopen (dann dürfen Mitarbeiter PRDs
+  approven → Auto-Decompose) ODER bewusst bei Mario/Quick-Review lassen.
+  = Governance-Entscheid.
+- MCP auch für Claude-Provider registrieren (wenn Abo da).
