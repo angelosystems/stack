@@ -82,6 +82,30 @@ UI, (b) kein Twenty-Passwort-Login — Google-SSO.
 - Invite-Link liegt jetzt HINTER dem Admins-Gate — Team-Onboarding erfordert
   erst Gruppen-Hebung im IdP.
 
+## Nachtrag 2 (2026-07-14): Login final + Gotchas
+
+- **Google-Login E2E bestätigt** (Mario, Inkognito): Authentik-Gate → Google →
+  Workspace lädt. **Twenty-Passwort-Login abgeschaltet**
+  (`AUTH_PASSWORD_ENABLED=false`; client-config `password:false, google:true`).
+  API-Key bleibt unabhängig gültig (rest 200) — Admin-Automation läuft weiter
+  über den Key (getRoles/Metadata/Invites via `/metadata` + Bearer, kein
+  Passwort-Login mehr nötig).
+- **Redirect-URIs** am OAuth-Client `755700364983-lku7…` registriert (Mario
+  manuell): `…/auth/google/redirect` + `…/auth/google-apis/get-access-token`.
+  Google akzeptiert (authorize 302).
+- **Workspace-Mitgliedschaft:** Google-Login authentifiziert nur — der User
+  muss Workspace-Mitglied sein, sonst „User does not have access to this
+  workspace". Fix: `sendInvitations(emails:[…], roleId:<Admin>)` via
+  `/metadata` + Bearer (Arg heißt `emails` direkt, NICHT `sendInviteLinkInput`).
+  Mario (mario.gemuenden@stayawesome.de) als Admin eingeladen. Invite-Hash
+  `a4c0eb6c-…`. ⚠️ gaias TWENTY-Passwort = crm-admin.json (NICHT das
+  Google-Passwort aus gaia-credentials.json).
+- **GOTCHA Blank-Workspace:** Nach mehreren Domain-Zustandswechseln hatte Marios
+  normales Chrome-Profil einen stale Cache/Service-Worker → Hülle lädt, Daten
+  nicht (alle API-Calls trotzdem 200). Server war sauber (kein CSP/WS/CF-Transform,
+  Schema valide). Fix: Inkognito / „Cache leeren und hart neu laden" / Website-Daten
+  löschen. Erste Diagnose-Anlaufstelle bei Twenty-Blank = Browser-Cache, nicht Server.
+
 ## Offene Punkte
 
 - [ ] **AP-Flow-Smoke** (W4-Restpunkt): ActivePieces-Connection auf Twenty
