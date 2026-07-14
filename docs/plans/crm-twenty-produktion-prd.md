@@ -1,7 +1,7 @@
 ---
 title: CRM-Produktion — Twenty als Stack-Tool (Immobilien · Hotel-B2B · Fundraising)
 slug: crm-twenty-produktion
-status: approved
+status: in-progress   # MVP G1-G10 geliefert 07-14 (s. -delivery.md); offen: AP-Flow, HubSpot-Import, W5
 layer: prd
 parent_plan: null   # Dach-Suche 2026-07-14: fundraising-crm-twenty ist abandoned (Vorgänger, kein Dach); sa-deployment-platform = Plattform-PRD, kein CRM-Dach; Board hat keine crm/twenty-Karte (mk list geprüft) → bewusst null
 tier: library
