@@ -562,3 +562,32 @@ restart sa-staging-canary → OK (45ms aktiv); fremde Unit (authentik) →
 verweigert; rohes `sudo systemctl` → kein Recht; `/opt/inbox-zero/.env` +
 `/root/.secrets` → Permission denied; Audit-Log zeigt alle 3 Aktionen.
 Key im Vault: `/root/.secrets/stayawesome/crew-ops-staging`.
+
+### Bahn 1 — GitHub App (Pro-Variante, 2026-07-14)
+
+Mario-Entscheid: zentraler Git-Bot als **GitHub App** (kein per-MA-Account),
+Attribution der SSO-Session. angelosystems auf **Pro** geupgradet (verifiziert:
+plan=pro).
+
+**Gebaut/gesetzt:**
+- **Branch-Protection** auf `main` von stayawesomeOS + master-kanban:
+  require_PR (1 Approval), enforce_admins=FALSE (Admin-Bypass → Session/Fabrik/
+  Mario pushen main weiter, verifiziert per Empty-Commit), no force-push.
+  → Die App (Nicht-Admin-Identität) wird dadurch auf PRs beschränkt; nur so
+  kann ein Nicht-Admin-Token main NICHT pushen (jedes angelosystems-Token
+  würde als Owner bypassen — deshalb ist die App nötig, nicht ein PAT).
+- **Attribution im Container (root-verankert):** /etc/gitconfig (Author=Angelo
+  Calcagno), /etc/crew-identity (444, root), prepare-commit-msg-Hook
+  (/etc/crew-git-hooks) → Trailer `Crew-Session: angelo.calcagno@…`. Bewiesen.
+- **Host-Minter** /usr/local/bin/crew-gh-mint (App-JWT via openssl → 2-Repo-
+  gescoptes Installation-Token) + **Token-Broker** crew-gh-token-broker
+  (10.230.0.1:7791, git-credential-Format; Unit ConditionPathExists=
+  /etc/crew-gh-app.env). Container-credential-helper in /etc/gitconfig, nft
+  erlaubt 7791. App-Secret bleibt host-seitig, Container bekommt nur
+  kurzlebige (9min) Tokens.
+
+**OFFEN (Mario-Browser-Klick):** GitHub App anlegen (settings/apps/new als
+angelosystems): Contents=RW, Pull-requests=RW, kein Webhook, „only this
+account", installiert auf stayawesomeOS+master-kanban. Dann App-ID + private
+key (.pem) an die Session → /etc/crew-gh-app.env + Vault + Broker starten +
+Container-Remotes setzen + E2E (Branch-Push ok, main-Push blockiert).
