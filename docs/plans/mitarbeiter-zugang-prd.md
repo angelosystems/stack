@@ -441,3 +441,31 @@ Onboarding-Wizard headless gegen 127.0.0.1:4101 durchgeklickt (kein Raten):
 - **Fazit:** Die ganze Kette (SSO → Platform-Mode → Onboarding → App) läuft.
   Der EINZIGE Rest zum Session-Start ist die Claude-Auth im Container = W3.
   Kein Bug. Screenshots: scratchpad crew-pw/shots.
+
+### Agenten-Verdrahtung + ehrlicher Modell-Befund (2026-07-14)
+
+Mario-Wunsch: Multi-Agent, nicht nur Claude. claudecodeui kann nativ
+Claude/Cursor/Codex/OpenCode; OpenCode bringt Multi-Model.
+
+**Gebaut:** OpenCode 1.17.20 im Container (User angelo), Config +
+auth.json (Z.ai/GLM-Flat-Key + DeepSeek-Key, Mario-Go geteilter Flat-Key),
+systemweiter Symlink → PATH, Service-Restart. claudecodeui erkennt OpenCode
+als **Connected**; Provider-Umschaltung + Modellwahl je Session (GLM-4.6/
+5.1/5.2, DeepSeek V4 Flash/Pro) in der UI verifiziert.
+
+**Ehrlicher Test-Befund (RCA, kein Raten):**
+- **DeepSeek über OpenCode: FUNKTIONIERT** end-to-end (echte Antwort,
+  Tokens gezählt). = Default gesetzt (`deepseek/deepseek-chat`). Angelo hat
+  damit sofort einen arbeitsfähigen Agenten.
+- **GLM/zai-glm über OpenCode: 0 Tokens, keine Antwort** — obwohl die
+  direkte Z.ai-Anthropic-API (curl, auch streaming) sauber antwortet.
+  **Reproduziert IDENTISCH auf der Haus-Box** (opencode 1.17.4 + 1.17.20) →
+  vorbestehender opencode/AI-SDK-Bug gegen den Z.ai-Anthropic-Stream, NICHT
+  durch diesen Bau verursacht. Der Flat-Key hängt am Anthropic-Coding-Plan
+  (paas/v4 = „insufficient balance"), also ist der /api/anthropic-Pfad
+  Pflicht. **Follow-up:** opencode-zai-glm-Integration fixen (AI-SDK-Version/
+  Header) — eigener kleiner Task; betrifft auch die Fabrik-GLM-Executor.
+- **Claude Code: „Not logged in"** in der UI (W3) — braucht Abo.
+
+**Netto-Stand:** Login→App→Onboarding→Agent (DeepSeek) läuft E2E. GLM-Flat
+und Claude-Fable sind die zwei offenen Modell-Wege (GLM=Bugfix, Claude=Abo).
