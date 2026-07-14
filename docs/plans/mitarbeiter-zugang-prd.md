@@ -382,3 +382,30 @@ werkstatt+Container statt eigene Box). Fable orchestriert, W4 via Opus-Subagent.
    Container `su - angelo -c 'claude setup-token'`, Konto in
    `claude-abo-watch` (multi-account-nativ). = Marios Handgriff (Kauf).
 5. **/opt/stack-Push:** PRD-Commits (Mario-Wort).
+
+### Go-Live vollzogen — 2026-07-14 (Mario-Go „leg los" + benanntes Cert-Go)
+
+1. ✅ DNS `crew.stayawesome.app` → 178.104.255.22 proxied (via cf-dns,
+   Record bc2293d9).
+2. ✅ LE-Cert crew.stayawesome.app (DNS-01, self-renewing) + Vhost enabled
+   + nginx reload. **E2E: https://crew.stayawesome.app → 302 idp-Login.**
+3. ✅ MK-Deploy: Binary-Swap (Backup `master-kanban.bak-vor-scope-20260714`),
+   Drop-in `20-mitarbeiter-scope.conf` (MK_MITARBEITER_SCOPE=
+   angelo.calcagno@stayawesome.de=stayawesome), serve restart.
+   **SC3 live bewiesen:** Angelo-Mail = 35 Karten, alle stayawesome (0
+   fremde); Admin = 191 Karten über 5 Firmen (Regression ok); move auf
+   quantbot-Karte als Angelo → 403.
+4. ✅ Pushes: stack 5e9d32e, master-kanban 0babce8.
+5. ✅ plan_item auf eigene Karte umgehängt (cf-mitarbeiter-zugang),
+   tier=library gesetzt.
+6. ✅ crew-guard.service aktiv (Isolation nach Unit-Start re-verifiziert),
+   Regression master/vibekanban 302 ok.
+
+**OFFEN (einziger Rest): W3 = Angelos Claude-Abo** (Kauf durch Mario →
+`machinectl shell crew-angelo` → `su - angelo -c 'claude setup-token'` →
+Konto in claude-abo-watch aufnehmen). Bis dahin: Login + Cockpit
+funktionieren, Sessions können mangels Anthropic-Auth nicht starten.
+Folge-Punkte (nicht blockierend): master.stayawesome.app-Vhost-Policy um
+dept-stayawesome erst wenn Angelo das Board-UI sehen soll; GitHub-
+Collaborator-Invite (W5) braucht Angelos GitHub-Username; MA #2 =
+Rezept im Memory reference_crew_mitarbeiter_container.
