@@ -34,81 +34,106 @@
     <button @click="reauth()" class="px-3 py-1 rounded bg-white text-amber-700 hover:bg-amber-50 font-semibold">Neu anmelden</button>
   </div>
 
-  <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-6 sticky top-0 z-10">
-    <h1 class="text-lg font-semibold tracking-tight">master-kanban <span class="text-xs text-emerald-600 ml-1" x-text="apiOk ? '● live' : '○ offline'"></span></h1>
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-10">
+    <!-- Zeile 1: Marke · Ansichten · Seiten · Werkzeuge -->
+    <div class="px-6 h-12 flex items-center gap-4">
+      <h1 class="text-base font-semibold tracking-tight shrink-0 flex items-baseline gap-1.5">master-kanban
+        <span class="text-[11px] font-medium" :class="apiOk ? 'text-emerald-600' : 'text-slate-400'" x-text="apiOk ? '● live' : '○ offline'"></span>
+      </h1>
 
-    <!-- View-Umschalter: Board | Pipeline | Backlog -->
-    <nav class="flex gap-1 bg-slate-100 rounded-lg p-1">
-      <template x-for="v in views" :key="v.id">
-        <button @click="switchView(v.id)"
-          :class="view === v.id ? 'bg-white shadow text-slate-900' : 'text-slate-500'"
-          class="px-3 py-1 rounded-md text-sm font-medium">
-          <span x-text="v.label"></span>
-          <span x-show="v.id==='backlog' && backlog.length" class="ml-1 text-[10px] bg-amber-200 text-amber-900 rounded-full px-1.5" x-text="backlog.length"></span>
+      <!-- View-Umschalter: Board | Pipeline | Backlog | Releases -->
+      <nav class="flex gap-0.5 bg-slate-100 rounded-lg p-0.5 shrink-0">
+        <template x-for="v in views" :key="v.id">
+          <button @click="switchView(v.id)"
+            :class="view === v.id ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'"
+            class="px-3 py-1 rounded-md text-sm font-medium">
+            <span x-text="v.label"></span>
+            <span x-show="v.id==='backlog' && backlog.length" class="ml-1 text-[10px] bg-amber-200 text-amber-900 rounded-full px-1.5" x-text="backlog.length"></span>
+          </button>
+        </template>
+      </nav>
+
+      <!-- Seiten-Links: leise, klar getrennt vom View-Umschalter -->
+      <nav class="flex items-center gap-0.5 text-sm min-w-0 overflow-hidden">
+        <a href="/programme" class="px-2 py-1 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap" title="Programmuebersicht: Software → Owner → Karten">Programme</a>
+        <a href="/ressourcen" class="px-2 py-1 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap">Ressourcen</a>
+        <a href="/health" class="px-2 py-1 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap">Health</a>
+        <a href="https://vibekanban.stayawesome.app" target="_blank" rel="noopener" class="px-2 py-1 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap">Vibe Kanban <span class="text-slate-400">↗</span></a>
+      </nav>
+
+      <!-- Werkzeuge rechts -->
+      <div class="ml-auto flex items-center gap-2 shrink-0 relative">
+        <button @click="toggleChat()" class="px-2.5 py-1 rounded-md text-sm font-medium whitespace-nowrap"
+          :class="chatOpen ? 'bg-violet-100 text-violet-800' : 'text-violet-700 hover:bg-violet-50'"
+          title="Chat mit dem Master-Kanban-Verwalter (Antwort = ein Agent-Run)">💬 Verwalter</button>
+        <button x-show="me && me.is_admin" @click="openRoster()"
+          class="px-2 py-1 rounded-md text-sm text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+          title="Personen-Verzeichnis verwalten (nur Admin)">👥</button>
+        <button @click="driftOpen = !driftOpen" x-show="drift && drift.drift_total > 0"
+          class="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-medium hover:bg-amber-200 whitespace-nowrap"
+          title="Drift: Board-stage vs. Evidenz (Beads/Pläne)">
+          🩺 <span x-text="drift ? drift.drift_total : 0"></span>
         </button>
-      </template>
-      <a href="/ressourcen" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Ressourcen</a>
-      <a href="/health" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Health</a>
-      <a href="https://vibekanban.stayawesome.app" target="_blank" rel="noopener" class="px-3 py-1 rounded-md text-sm font-medium text-slate-500 hover:text-slate-900">Vibe Kanban ↗</a>
-      <button @click="toggleChat()" class="px-3 py-1 rounded-md text-sm font-medium"
-        :class="chatOpen ? 'bg-violet-100 text-violet-800' : 'text-slate-500 hover:text-slate-900'"
-        title="Chat mit dem Master-Kanban-Verwalter (Antwort = ein Agent-Run)">💬 Verwalter</button>
-    </nav>
+        <div x-show="driftOpen" x-cloak @click.outside="driftOpen=false"
+          class="absolute right-0 top-10 z-40 w-96 bg-white border border-slate-200 rounded-lg shadow-xl p-3 text-left">
+          <div class="font-semibold text-slate-700 mb-2 flex justify-between items-center">
+            <span>🩺 Drift-Befunde</span>
+            <span class="text-[10px] text-slate-400" x-text="drift ? (drift.drift_total + ' / ' + drift.active_initiatives + ' aktiv') : ''"></span>
+          </div>
+          <ul class="space-y-1.5">
+            <template x-for="f in (drift ? drift.findings : [])" :key="f.id">
+              <li class="flex items-start gap-2">
+                <span class="text-[10px] px-1 rounded shrink-0 bg-amber-100 text-amber-800" x-text="f.drift"></span>
+                <div class="min-w-0">
+                  <button @click="driftOpen=false; openDetail(f.id)" class="font-mono text-[11px] text-sky-700 hover:underline" x-text="f.id"></button>
+                  <div class="text-[11px] text-slate-500 font-normal" x-text="f.detail"></div>
+                </div>
+              </li>
+            </template>
+          </ul>
+          <div x-show="drift && drift.drift_total===0" class="text-slate-400 text-xs">Kein Drift 🎉</div>
+        </div>
+        <span class="text-xs text-slate-400 hidden xl:inline whitespace-nowrap" x-text="lastFetched"></span>
+        <button @click="refresh()" class="px-2 py-1 text-slate-500 border border-slate-200 rounded-md hover:bg-slate-100" title="neu laden">↻</button>
+      </div>
+    </div>
 
-    <div class="flex gap-2 flex-1" x-show="view==='board'">
+    <!-- Zeile 2 (nur Board): Filter-Leiste — Firmen · Tier · Software · Owner -->
+    <div x-show="view==='board'" class="px-6 py-1.5 border-t border-slate-100 bg-slate-50 flex items-center gap-1.5 flex-wrap">
       <template x-for="f in orderedFirmas" :key="f.id">
         <button @click="toggleFirma(f.id)"
-          :class="filter[f.id] ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-300'"
-          class="px-3 py-1 rounded-full text-sm font-medium hover:opacity-80">
+          :class="filter[f.id] ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'"
+          class="px-2.5 py-0.5 rounded-full text-xs font-medium border transition-colors">
           <span x-text="f.icon"></span>
           <span x-text="f.label"></span>
-          <span class="opacity-60 text-xs ml-1" x-text="counts[f.id] || 0"></span>
+          <span class="opacity-50 ml-0.5" x-text="counts[f.id] || 0"></span>
         </button>
       </template>
-      <span class="w-px bg-slate-200 mx-1"></span>
+      <span class="w-px h-4 bg-slate-300 mx-1.5"></span>
       <template x-for="t in tiers" :key="t.id">
         <button @click="tierFilter = (tierFilter === t.id ? '' : t.id)"
-          :class="tierFilter === t.id ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-300'"
-          class="px-2.5 py-1 rounded-full text-xs font-medium hover:opacity-80" :title="'Tier: ' + t.label">
+          :class="tierFilter === t.id ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'"
+          class="px-2.5 py-0.5 rounded-full text-xs font-medium border transition-colors" :title="'Tier: ' + t.label">
           <span x-text="t.icon"></span><span x-text="t.label"></span>
         </button>
       </template>
+      <span class="w-px h-4 bg-slate-300 mx-1.5"></span>
       <select x-model="softwareFilter"
-        class="text-xs border border-slate-300 rounded-full px-2.5 py-1 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
+        :class="softwareFilter ? 'border-sky-400 text-sky-800' : 'border-slate-200 text-slate-500'"
+        class="text-xs border rounded-full px-2.5 py-0.5 bg-white focus:outline-none focus:ring-2 focus:ring-sky-300"
         title="nach Software filtern">
         <option value="">alle Software</option>
         <template x-for="s in allSoftware" :key="s"><option :value="s" x-text="s"></option></template>
       </select>
-    </div>
-    <div class="flex-1" x-show="view!=='board'"></div>
-
-    <div class="text-xs text-slate-500 flex gap-3 items-center relative">
-      <button @click="driftOpen = !driftOpen" x-show="drift && drift.drift_total > 0"
-        class="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-medium hover:bg-amber-200"
-        title="Drift: Board-stage vs. Evidenz (Beads/Pläne)">
-        🩺 <span x-text="drift ? drift.drift_total : 0"></span> Drift
-      </button>
-      <div x-show="driftOpen" x-cloak @click.outside="driftOpen=false"
-        class="absolute right-0 top-9 z-40 w-96 bg-white border border-slate-200 rounded-lg shadow-xl p-3 text-left">
-        <div class="font-semibold text-slate-700 mb-2 flex justify-between items-center">
-          <span>🩺 Drift-Befunde</span>
-          <span class="text-[10px] text-slate-400" x-text="drift ? (drift.drift_total + ' / ' + drift.active_initiatives + ' aktiv') : ''"></span>
-        </div>
-        <ul class="space-y-1.5">
-          <template x-for="f in (drift ? drift.findings : [])" :key="f.id">
-            <li class="flex items-start gap-2">
-              <span class="text-[10px] px-1 rounded shrink-0 bg-amber-100 text-amber-800" x-text="f.drift"></span>
-              <div class="min-w-0">
-                <button @click="driftOpen=false; openDetail(f.id)" class="font-mono text-[11px] text-sky-700 hover:underline" x-text="f.id"></button>
-                <div class="text-[11px] text-slate-500 font-normal" x-text="f.detail"></div>
-              </div>
-            </li>
-          </template>
-        </ul>
-        <div x-show="drift && drift.drift_total===0" class="text-slate-400 text-xs">Kein Drift 🎉</div>
-      </div>
-      <span x-text="lastFetched"></span>
-      <button @click="refresh()" class="px-2 py-1 border border-slate-300 rounded hover:bg-slate-100">↻</button>
+      <!-- Owner-Filter (mk-user-management): Meine Karten / ohne Owner -->
+      <button @click="ownerFilter = (ownerFilter === 'mine' ? '' : 'mine')"
+        :class="ownerFilter === 'mine' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'"
+        class="px-2.5 py-0.5 rounded-full text-xs font-medium border transition-colors"
+        title="nur Karten, deren Owner ich bin">👤 Meine</button>
+      <button @click="ownerFilter = (ownerFilter === 'none' ? '' : 'none')"
+        :class="ownerFilter === 'none' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'"
+        class="px-2.5 py-0.5 rounded-full text-xs font-medium border transition-colors"
+        title="Karten ohne Owner (Aufraeum-Sicht)">∅ Owner</button>
     </div>
   </header>
 
@@ -152,6 +177,12 @@
                       <div class="font-medium leading-snug"><span x-show="c._child" class="text-indigo-400 mr-0.5">↳</span><span x-text="c.title"></span></div>
                       <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
                         <span class="text-[10px] text-slate-400" x-text="c.id"></span>
+                        <!-- Owner-Chip (mk-person-assign): Initialen-Avatar bzw. Zuweis-Affordanz -->
+                        <button x-show="c.owner_email" @click.stop="openPicker('initiative', c.id, c.id)"
+                          class="inline-flex items-center justify-center w-4 h-4 rounded-full bg-sky-600 text-white text-[8px] font-bold leading-none shrink-0 hover:ring-2 hover:ring-sky-300"
+                          :title="'Owner: ' + (c.owner_name || c.owner_email)" x-text="initials(c.owner_name || c.owner_email)"></button>
+                        <button x-show="!c.owner_email" @click.stop="openPicker('initiative', c.id, c.id)"
+                          class="text-[11px] leading-none text-slate-300 hover:text-sky-600 shrink-0" title="Owner zuweisen">⊕</button>
                         <span x-show="c.kinder_count > 0" class="text-[10px] px-1 rounded bg-indigo-100 text-indigo-700 font-semibold" :title="c.kinder_count + ' Kind-Karten'" x-text="'▾ ' + c.kinder_count"></span>
                         <span x-show="c.dispatch_lane" class="text-[10px] px-1 rounded font-medium" :class="{'solartown':'bg-violet-100 text-violet-700','vibe-kanban':'bg-teal-100 text-teal-700','human':'bg-rose-100 text-rose-700','session':'bg-indigo-100 text-indigo-700'}[c.dispatch_lane] || 'bg-slate-100 text-slate-600'" :title="'Dispatch-Lane (Mario): ' + c.dispatch_lane" x-text="{'solartown':'⛏ Solartown','vibe-kanban':'⚡ VK','human':'✋ Mensch','session':'🤖 Session'}[c.dispatch_lane] || c.dispatch_lane"></span>
                         <span x-show="c.session_tag" class="text-[10px] px-1 rounded bg-indigo-50 text-indigo-600 font-mono" :title="'Erschaffer-Session (bleibt auch nach Lane-Wechsel verlinkt + befragbar): ' + c.session_tag" x-text="'🤖 ' + (c.session_tag || '').slice(0, 8)"></span>
@@ -194,6 +225,12 @@
                             <span class="px-1 rounded text-[10px]" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
                             <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500"
                               :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                            <!-- Assignee-Chip (mk-person-assign) -->
+                            <button x-show="it.assignee_email" @click.stop="openPicker('plan_item', it.id, c.id)"
+                              class="inline-flex items-center justify-center w-4 h-4 rounded-full bg-indigo-600 text-white text-[8px] font-bold leading-none shrink-0 hover:ring-2 hover:ring-indigo-300"
+                              :title="'Assignee: ' + it.assignee_email" x-text="initials(it.assignee_email)"></button>
+                            <button x-show="!it.assignee_email" @click.stop="openPicker('plan_item', it.id, c.id)"
+                              class="text-[11px] leading-none text-slate-300 hover:text-indigo-600 shrink-0" title="Assignee zuweisen">⊕</button>
                           </div>
                         </template>
                         <div x-show="!treeOf(c.id).length" class="text-[11px] text-slate-400">lade…</div>
@@ -555,6 +592,21 @@
                 </div>
               </dd>
             </template>
+            <!-- Owner prominent (mk-user-management): Name + Uebergeben -->
+            <dt class="text-slate-400">Owner</dt>
+            <dd class="flex items-center gap-2">
+              <template x-if="detail.initiative.owner_email">
+                <span class="inline-flex items-center gap-1.5">
+                  <span class="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold inline-flex items-center justify-center"
+                    x-text="initials(detail.initiative.owner_name || detail.initiative.owner_email)"></span>
+                  <span x-text="detail.initiative.owner_name || detail.initiative.owner_email"></span>
+                </span>
+              </template>
+              <span x-show="!detail.initiative.owner_email" class="text-slate-400">—</span>
+              <button @click="openPicker('initiative', detail.initiative.id, detail.initiative.id)"
+                class="text-[11px] px-1.5 py-0.5 rounded border border-slate-300 hover:bg-slate-50 text-slate-600"
+                title="Ownership an eine andere Person uebergeben">übergeben ▾</button>
+            </dd>
             <dt class="text-slate-400">Umfang</dt>
             <dd class="flex gap-3">
               <span x-show="detail.initiative.bead_count">🐝 <span x-text="detail.initiative.bead_count"></span></span>
@@ -589,6 +641,12 @@
                   <span class="px-1 rounded text-[10px] shrink-0" :class="statusChip(it.status)" x-text="it.status || '—'"></span>
                   <span x-show="rollup[it.slug]" class="text-[10px] text-slate-500 shrink-0"
                     :title="'Beads: closed/total'">🐝<span x-text="rollup[it.slug] ? rollup[it.slug].closed + '/' + rollup[it.slug].total : ''"></span></span>
+                  <!-- Assignee-Chip (mk-person-assign) -->
+                  <button x-show="it.assignee_email" @click.stop="openPicker('plan_item', it.id, detail.initiative.id)"
+                    class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-indigo-600 text-white text-[9px] font-bold leading-none shrink-0 hover:ring-2 hover:ring-indigo-300"
+                    :title="'Assignee: ' + it.assignee_email" x-text="initials(it.assignee_email)"></button>
+                  <button x-show="!it.assignee_email" @click.stop="openPicker('plan_item', it.id, detail.initiative.id)"
+                    class="text-xs leading-none text-slate-300 hover:text-indigo-600 shrink-0" title="Assignee zuweisen">⊕</button>
                 </div>
               </template>
               <div x-show="!treeOf(detail.initiative.id).length" class="text-sm text-slate-400">lade…</div>
@@ -741,6 +799,77 @@
     </div>
   </div>
 
+  <!-- ════ PERSON-PICKER (mk-person-assign): Owner/Assignee wählen ════ -->
+  <div x-show="pickerOpen" x-cloak class="fixed inset-0 bg-slate-900/40 z-50 flex items-center justify-center p-4" @click.self="closePicker()">
+    <div class="bg-white rounded-lg shadow-xl max-w-sm w-full overflow-hidden flex flex-col max-h-[80vh]" @click.stop>
+      <header class="px-5 py-3 border-b border-slate-200 flex justify-between items-center">
+        <h3 class="font-semibold text-slate-800 text-sm" x-text="pickerTarget && pickerTarget.target === 'initiative' ? 'Owner zuweisen' : 'Assignee zuweisen'"></h3>
+        <button @click="closePicker()" class="text-slate-400 hover:text-slate-600">✕</button>
+      </header>
+      <div class="overflow-y-auto flex-1 divide-y divide-slate-100">
+        <button @click="assignPerson('')" class="w-full text-left px-5 py-2.5 text-sm text-rose-600 hover:bg-rose-50 font-medium">— entfernen —</button>
+        <template x-for="p in persons.filter(x => x.active)" :key="p.email">
+          <button @click="assignPerson(p.email)" class="w-full text-left px-5 py-2 hover:bg-sky-50 flex items-center gap-2.5">
+            <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-sky-600 text-white text-[10px] font-bold shrink-0" x-text="initials(p.display_name || p.email)"></span>
+            <span class="min-w-0">
+              <span class="block text-sm font-medium text-slate-800 truncate" x-text="p.display_name || p.email"></span>
+              <span class="block text-[10px] text-slate-400 truncate" x-text="p.role + ((p.firmas || []).length ? ' · ' + (p.firmas || []).join(', ') : '')"></span>
+            </span>
+          </button>
+        </template>
+        <div x-show="!persons.filter(x => x.active).length" class="px-5 py-6 text-center text-xs text-slate-400">Keine aktiven Personen im Verzeichnis.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ VERZEICHNIS (mk-person-assign): Roster-Mini-Admin, nur is_admin ════ -->
+  <div x-show="rosterOpen" x-cloak class="fixed inset-0 bg-slate-900/40 z-50 flex items-center justify-center p-4" @click.self="rosterOpen = false">
+    <div class="bg-white rounded-lg shadow-xl max-w-lg w-full overflow-hidden flex flex-col max-h-[85vh]" @click.stop>
+      <header class="px-5 py-3 border-b border-slate-200 flex justify-between items-center">
+        <h3 class="font-semibold text-slate-800">👥 Personen-Verzeichnis</h3>
+        <button @click="rosterOpen = false" class="text-slate-400 hover:text-slate-600">✕</button>
+      </header>
+      <div class="overflow-y-auto flex-1 divide-y divide-slate-100">
+        <template x-for="p in persons" :key="p.email">
+          <div class="px-5 py-2 flex items-center gap-3 text-sm">
+            <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-slate-600 text-white text-[10px] font-bold shrink-0" x-text="initials(p.display_name || p.email)"></span>
+            <div class="flex-1 min-w-0">
+              <div class="font-medium text-slate-800 truncate" x-text="p.display_name || p.email"></div>
+              <div class="text-[11px] text-slate-400 truncate">
+                <span x-text="p.email"></span> · <span x-text="p.role"></span><span x-show="(p.firmas || []).length" x-text="' · ' + (p.firmas || []).join(', ')"></span>
+              </div>
+            </div>
+            <span x-show="!p.active" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-500 shrink-0">inaktiv</span>
+            <button @click="editPersonForm(p)" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100 shrink-0" title="bearbeiten">✏️</button>
+            <button x-show="p.active" @click="deactivatePerson(p.email)" class="text-xs px-2 py-1 rounded border border-rose-200 text-rose-600 hover:bg-rose-50 shrink-0" title="deaktivieren">Deaktivieren</button>
+          </div>
+        </template>
+        <div x-show="!persons.length" class="px-5 py-6 text-center text-xs text-slate-400">Noch keine Personen im Verzeichnis.</div>
+      </div>
+      <footer class="px-5 py-3 border-t border-slate-200 bg-slate-50 space-y-2 shrink-0">
+        <div class="text-xs font-semibold uppercase tracking-wider text-slate-500">Person anlegen / bearbeiten</div>
+        <div class="grid grid-cols-2 gap-2">
+          <input x-model="rosterForm.email" type="email" placeholder="E-Mail" class="border border-slate-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-sky-300">
+          <input x-model="rosterForm.display_name" type="text" placeholder="Anzeigename" class="border border-slate-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-sky-300">
+          <select x-model="rosterForm.role" class="border border-slate-300 rounded px-2 py-1 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-sky-300">
+            <option value="mitarbeiter">mitarbeiter</option>
+            <option value="admin">admin</option>
+          </select>
+          <input x-model="rosterForm.firmas" type="text" placeholder="firmas (kommagetrennt)" class="border border-slate-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-sky-300">
+        </div>
+        <div class="flex items-center justify-between">
+          <label class="flex items-center gap-1.5 text-sm text-slate-600">
+            <input type="checkbox" x-model="rosterForm.active" class="rounded border-slate-300"> aktiv
+          </label>
+          <div class="flex gap-2">
+            <button @click="resetRosterForm()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-100 bg-white">Leeren</button>
+            <button @click="savePerson()" class="text-xs px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-semibold">Speichern</button>
+          </div>
+        </div>
+      </footer>
+    </div>
+  </div>
+
   <!-- Toasts Container -->
   <div class="fixed bottom-5 right-5 z-50 space-y-2">
     <template x-for="t in toasts" :key="t.id">
@@ -824,6 +953,17 @@ function liveKanban() {
     dispatchDrawerLane: 'hack',
     dispatchDrawerNote: '',
 
+    // ── Personen / Zuweisung (mk-person-assign) ──
+    me: null,
+    persons: [],
+    personsLoaded: false,
+    pickerOpen: false,
+    pickerTarget: null,        // { target: 'initiative'|'plan_item', id }
+    pickerInitiativeId: '',    // welcher Baum nach einer plan_item-Zuweisung neu geladen wird
+    rosterOpen: false,
+    rosterForm: { email: '', display_name: '', role: 'mitarbeiter', firmas: '', active: true },
+    ownerFilter: '',           // '' | 'mine' (Owner = ich) | 'none' (ohne Owner)
+
     detail: null,
     detailOpen: false,
     chatOpen: false, chatMsgs: [], chatText: '', chatRunning: false, chatSending: false, chatError: '', chatTimer: null,
@@ -899,6 +1039,7 @@ function liveKanban() {
     },
     async init() {
       await this.refresh();
+      this.loadWhoami();
       this.loadRollup();
       this.loadCapacity();
       this.loadDrift();
@@ -1428,7 +1569,8 @@ function liveKanban() {
     cardsIn(firma, stage) {
       const list = this.cards.filter(c => c.firma === firma && c.stage === stage
         && (!this.softwareFilter || (c.softwares || []).includes(this.softwareFilter))
-        && (!this.tierFilter || c.tier === this.tierFilter));
+        && (!this.tierFilter || c.tier === this.tierFilter)
+        && this.ownerMatch(c));
       // Karten-Hierarchie: Kinder direkt unter ihr Dach reihen (nur wenn das
       // Dach in derselben Zelle liegt); _child markiert die Einrueckung.
       // ponytail: kein Auf/Zu-Toggle — Kinder sind immer sichtbar (Ceiling:
@@ -1506,6 +1648,123 @@ function liveKanban() {
           }
         },
       });
+    },
+
+    // ── Personen / Zuweisung (mk-person-assign) ──
+    // 1-2 Grossbuchstaben aus Anzeigename (Wortanfaenge) oder E-Mail-Local-Part.
+    // Owner-Filter-Kern: '' = alle; 'mine' = Owner ist meine SSO-Mail;
+    // 'none' = Karte hat keinen Owner (Aufraeum-Sicht).
+    ownerMatch(c) {
+      if (!this.ownerFilter) return true;
+      if (this.ownerFilter === 'none') return !c.owner_email;
+      const self = (this.me && this.me.email || '').toLowerCase();
+      return !!self && (c.owner_email || '').toLowerCase() === self;
+    },
+    initials(nameOrEmail) {
+      if (!nameOrEmail) return '?';
+      let base = String(nameOrEmail).trim();
+      if (base.includes('@')) base = base.split('@')[0];
+      const words = base.split(/[\s._+-]+/).filter(Boolean);
+      if (!words.length) return base.slice(0, 2).toUpperCase();
+      if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+      return (words[0][0] + words[1][0]).toUpperCase();
+    },
+    async loadWhoami() {
+      try {
+        const r = await fetch(this.apiBase + '/api/whoami');
+        if (r.ok) this.me = await r.json();
+      } catch (e) { /* whoami optional — ohne me bleiben Admin-UIs schlicht aus */ }
+    },
+    async loadPersons(force) {
+      if (this.personsLoaded && !force) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/persons');
+        if (r.ok) { this.persons = await r.json(); this.personsLoaded = true; }
+      } catch (e) { /* Verzeichnis optional */ }
+    },
+    openPicker(target, id, initiativeId) {
+      this.pickerTarget = { target, id };
+      this.pickerInitiativeId = initiativeId || '';
+      this.pickerOpen = true;
+      this.loadPersons();
+    },
+    closePicker() {
+      this.pickerOpen = false;
+      this.pickerTarget = null;
+    },
+    async assignPerson(personEmail) {
+      if (!this.pickerTarget) return;
+      const tgt = this.pickerTarget.target;
+      const initId = this.pickerInitiativeId;
+      try {
+        const r = await fetch(this.apiBase + '/api/assign', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...this.pickerTarget, person_email: personEmail }),
+        });
+        if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
+        this.closePicker();
+        if (tgt === 'initiative') {
+          await this.refresh(true);
+          if (this.detail && this.detail.initiative && this.detail.initiative.id === initId) await this.openDetail(initId);
+        } else if (initId) {
+          // Plan-Baum-Cache invalidieren + neu laden — Chip aktualisiert ohne Full-Reload.
+          const pr = await fetch(this.apiBase + '/api/plans?initiative=' + encodeURIComponent(initId));
+          this.plansCache[initId] = pr.ok ? await pr.json() : [];
+        }
+        this.showToast(personEmail ? 'Zugewiesen: ' + personEmail : 'Zuweisung entfernt');
+      } catch (e) {
+        this.showToast('Zuweisung fehlgeschlagen: ' + e.message, 'error');
+      }
+    },
+    // ── Verzeichnis / Roster-Mini-Admin (nur is_admin) ──
+    openRoster() {
+      this.rosterOpen = true;
+      this.resetRosterForm();
+      this.loadPersons(true);
+    },
+    resetRosterForm() {
+      this.rosterForm = { email: '', display_name: '', role: 'mitarbeiter', firmas: '', active: true };
+    },
+    editPersonForm(p) {
+      this.rosterForm = {
+        email: p.email || '',
+        display_name: p.display_name || '',
+        role: p.role || 'mitarbeiter',
+        firmas: (p.firmas || []).join(', '),
+        active: p.active !== false,
+      };
+    },
+    async savePerson() {
+      const f = this.rosterForm;
+      if (!f.email.trim()) { this.showToast('E-Mail fehlt', 'error'); return; }
+      try {
+        const r = await fetch(this.apiBase + '/api/person', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: f.email.trim(),
+            display_name: f.display_name.trim(),
+            role: f.role,
+            firmas: f.firmas.split(',').map(s => s.trim()).filter(Boolean),
+            active: !!f.active,
+          }),
+        });
+        if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
+        await this.loadPersons(true);
+        this.resetRosterForm();
+        this.showToast('Person gespeichert');
+      } catch (e) { this.showToast('Speichern fehlgeschlagen: ' + e.message, 'error'); }
+    },
+    async deactivatePerson(email) {
+      if (!confirm(email + ' deaktivieren?')) return;
+      try {
+        const r = await fetch(this.apiBase + '/api/person/deactivate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
+        await this.loadPersons(true);
+        this.showToast('Deaktiviert: ' + email);
+      } catch (e) { this.showToast('Deaktivieren fehlgeschlagen: ' + e.message, 'error'); }
     },
   };
 }
