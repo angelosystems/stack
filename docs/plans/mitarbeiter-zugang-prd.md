@@ -540,3 +540,25 @@ dort. **Offen:** Mario-Go für crew-ops-Zuschnitt.
 **Bahn 1 (GitHub-PR-Coding) — wartet auf Angelos GitHub-Username** für
 Collaborator (stayawesomeOS + master-kanban, main protected) + fine-grained
 PAT im Container.
+
+### Bahn 2 — Staging-Ops LIVE (crew-ops, 2026-07-14, Mario-Go)
+
+Scoped Ops-Zugang auf Staging (167.233.82.201), OHNE das estate-weite
+deploy-Tool. Gebaut + bewiesen:
+- **Wrapper** `/usr/local/bin/crew-ops-ctl` (auf Staging): erlaubt NUR
+  start/stop/restart/status/logs für die SA-Staging-Units (sa-fin, documenso,
+  inbox-zero-web/worker, sa-staging-canary, sa-staging-node-canary). Fremde
+  Unit → verweigert. `logger -t crew-ops` auditiert jede Aktion.
+- **User** `crew-ops` (uid 1000, in KEINER App-Gruppe → Secrets unlesbar),
+  sudoers `NOPASSWD: nur crew-ops-ctl` (kein root-Shell, kein rohes systemctl).
+- **Zugang** aus dem Container: SSH-Key `~/.ssh/crew-ops-staging` (nur
+  crew-ops@staging), ssh-config-Alias `staging-ops`, openssh-client im
+  Container. nft: Egress ist über Public-IP ohnehin offen (Doku-Regel).
+- **Prod bleibt außen vor** (kein Zugang; Prod via Promote/Co-Sign).
+- Ad-hoc-Migrationen bewusst RAUS (Secret-Exposure).
+
+**E2E bewiesen (aus dem Container):** status sa-fin läuft (als crew-ops);
+restart sa-staging-canary → OK (45ms aktiv); fremde Unit (authentik) →
+verweigert; rohes `sudo systemctl` → kein Recht; `/opt/inbox-zero/.env` +
+`/root/.secrets` → Permission denied; Audit-Log zeigt alle 3 Aktionen.
+Key im Vault: `/root/.secrets/stayawesome/crew-ops-staging`.
