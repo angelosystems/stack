@@ -427,3 +427,17 @@ direkt; Server-Middleware umgeht den JWT und nutzt den ersten DB-User
 restart. Verifiziert: `/api/auth/user` ohne Token → 200 user=angelo;
 `platform-user` im Client-Bundle. **SSO ist damit die einzige Anmeldung.**
 Kein AGPL-Modifikations-Trigger (Config/Env, kein Quellcode-Patch).
+
+### E2E-Durchklick via Playwright (2026-07-14)
+
+Onboarding-Wizard headless gegen 127.0.0.1:4101 durchgeklickt (kein Raten):
+- **Git Configuration:** Name/Email gefüllt (Angelo Calcagno /
+  angelo.calcagno@stayawesome.de), „Next" → grüner Haken. Durabel im
+  Container gesetzt (git config --global verifiziert).
+- **Connect Agents:** Wizard meldet wörtlich „Claude Code — Claude CLI is
+  not authenticated. Run claude /login or configure ANTHROPIC_API_KEY."
+  Alle Agenten optional → „Complete Setup" führt in die App
+  („Choose Your Project / No projects found").
+- **Fazit:** Die ganze Kette (SSO → Platform-Mode → Onboarding → App) läuft.
+  Der EINZIGE Rest zum Session-Start ist die Claude-Auth im Container = W3.
+  Kein Bug. Screenshots: scratchpad crew-pw/shots.
