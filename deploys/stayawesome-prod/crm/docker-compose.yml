@@ -1,0 +1,93 @@
+# crm (Twenty CRM) auf stayawesome-prod — Recipe nach Upstream v2.20.0
+#
+# PRD: docs/plans/crm-twenty-produktion-prd.md (D1 Container-Ausnahme, D2
+# dedizierte DB, D5 Tag-Pin, D8 Upstream-Abgleich). Ersetzt das Coolify-Recipe
+# vom 06/23er-Stand (twenty-postgres-spilo ist upstream Geschichte — v2.20.0
+# nutzt plain postgres:16; Migrationen laufen im server-Container).
+#
+# Steuerung:  deploy stayawesome-prod crm up|logs|restart
+# Secrets:    /root/.secrets/stayawesome/crm.env (Vault, nie im Repo)
+# Upgrade:    NUR bewusst — pg_dump → Tag anheben → up → Smoke (D5, R2)
+#
+services:
+  server:
+    image: twentycrm/twenty:v2.20.0
+    container_name: crm-server
+    restart: always
+    env_file:
+      - /root/.secrets/stayawesome/crm.env
+    ports:
+      - "127.0.0.1:8096:3000"
+    volumes:
+      - server-local-data:/app/packages/twenty-server/.local-storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - crm_default
+
+  worker:
+    image: twentycrm/twenty:v2.20.0
+    container_name: crm-worker
+    restart: always
+    command: ["yarn", "worker:prod"]
+    env_file:
+      - /root/.secrets/stayawesome/crm.env
+    environment:
+      DISABLE_DB_MIGRATIONS: "true"           # Migrationen laufen im server
+      DISABLE_CRON_JOBS_REGISTRATION: "true"  # Cron-Registrierung ebenso
+    volumes:
+      - server-local-data:/app/packages/twenty-server/.local-storage
+    depends_on:
+      db:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    networks:
+      - crm_default
+
+  db:
+    image: postgres:16
+    container_name: crm-db
+    restart: always
+    env_file:
+      # liefert POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB (Werte = PG_DATABASE_*)
+      - /root/.secrets/stayawesome/crm.env
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -h localhost -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - crm_default
+
+  redis:
+    image: redis:alpine
+    container_name: crm-redis
+    restart: always
+    command: ["--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - crm_default
+
+volumes:
+  db-data:
+  server-local-data:
+
+networks:
+  crm_default:
+    name: crm_default
