@@ -59,6 +59,29 @@ Invite-Link (public, für Mario/Team): `https://crm.stayawesome.app/invite/a4c0e
 7. psql `-c "a;b"` = eine Transaktion — Fehler in b rollt a zurück
    (event_claims-INSERT-Falle).
 
+## Nachtrag 2026-07-14 (später am Tag): Authentik-Perimeter + Google-SSO
+
+Mario-Anweisungen aus dem Review des Live-Stands: (a) Authentik MUSS vor die
+UI, (b) kein Twenty-Passwort-Login — Google-SSO.
+
+- **Authentik-ForwardAuth LIVE:** Provider `crm-forward-auth` (pk 21, Klon der
+  listmonk-Config), Application `crm`, Policy-Binding Gruppe „authentik Admins"
+  (Mario-Pick), Provider im Embedded Outpost. vhost umgebaut (Backup
+  `crm.stayawesome.app.bak-pre-authentik`): UI-Location mit `auth_request`,
+  **API-Pfade `/rest|/graphql|/metadata|/healthz|/client-config|/files`
+  ausgenommen** (Bearer-Auth). Beweise: UI anonym → 302 auf
+  `outpost.goauthentik.io/start`; `/rest` anonym 403 / mit Key 200; healthz 200.
+- **Google-OAuth in Twenty aktiv** (`client-config.authProviders.google=true`),
+  Creds = bestehender GCP-Client (google-oauth-client.json, Projekt 7557…).
+  **Wartet auf Mario-GCP-Klick:** Redirect-URI
+  `https://crm.stayawesome.app/auth/google/redirect` am Client ergänzen
+  (für W5-Mail-Sync gleich `…/auth/google-apis/get-access-token` mit).
+- **Passwort-Login-Abschaltung** (`AUTH_PASSWORD_ENABLED=false`) erst NACH
+  verifiziertem Google-Login — sonst Aussperr-Risiko (gaia-Admin loggt via
+  Google ein, API-Key bleibt unabhängig gültig).
+- Invite-Link liegt jetzt HINTER dem Admins-Gate — Team-Onboarding erfordert
+  erst Gruppen-Hebung im IdP.
+
 ## Offene Punkte
 
 - [ ] **AP-Flow-Smoke** (W4-Restpunkt): ActivePieces-Connection auf Twenty
