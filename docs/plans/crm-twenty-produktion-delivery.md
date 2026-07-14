@@ -110,9 +110,89 @@ UI, (b) kein Twenty-Passwort-Login — Google-SSO.
 
 - [ ] **AP-Flow-Smoke** (W4-Restpunkt): ActivePieces-Connection auf Twenty
   (API-Key liegt im Vault), erster Flow schreibt Testkontakt.
-- [ ] **HubSpot-Import** (O2): wartet auf Connector-Autorisierung durch Mario.
+- [x] **HubSpot-Import** (O2): LIVE — siehe Nachtrag 3.
 - [ ] **W5 Google-Login/Mail-Sync** (O1): GCP-OAuth-Client = Mario-Klick;
   Callback-URLs im PRD-W5.
 - [ ] Alt-Volumes + alte Board-Karten (`sk-fundraising-crm-twenty`,
   Coolify-MENSCH-Karte) aufräumen/schließen — Mario-Klick.
 - [ ] SMTP für Invite-/System-Mails (EMAIL_* Env) — optional, Invite-Link geht auch so.
+
+## Nachtrag 3 (2026-07-14): HubSpot-Fundraising-Import LIVE
+
+**Zugriffsweg (O2 gelöst):** HubSpot-MCP als **claude.ai-Connector** (nicht als
+lokaler CLI-MCP). Grund: HubSpots gehosteter MCP (`mcp.hubspot.com`) hat
+**keine Dynamic Client Registration** (`registration_endpoint:null`) und ist ein
+Confidential Client — der lokale CLI-Weg braucht eine vorregistrierte
+`client_id`+`client_secret` (MCP-Auth-App), der Private-App-Weg war für Mario
+gesperrt. Der Connector nutzt Anthropics registrierten Client → nur „Zulassen"
+in HubSpot. **Wichtig:** Connector muss im CLI-Konto `claude3@stayawesome.de`
+angelegt sein, damit `mcp__claude_ai_HubSpot__*` in der CLI erscheinen.
+
+**Scope:** zwei Fundraising-Pipelines (`39495489` Fundraising Series A +
+`default` Fundraising Mario). Immobilien-/Firmensales-/Bürgschaft-Pipelines
+bewusst NICHT (Mario-Pick). Firmensales gescopt = nur 1 Platzhalter-Deal.
+
+**Importiert & verifiziert (crm.stayawesome.app):**
+| Objekt | Menge | Mapping |
+|---|---|---|
+| Opportunities | 321 | pipeline=FUNDRAISING, stage gemappt (LOST/ERSTKONTAKT/PITCH/VERHANDLUNG), amount, closeDate, pointOfContact + company verlinkt |
+| People (Investoren) | 221 | name/email/phone/jobTitle, companyId |
+| Companies (Fonds) | 137 | name, domainName |
+| Notizen | 291 | Twenty-Notes (bodyV2.markdown), an Opportunity + Person gehängt |
+
+**Provenance-Tags (Mario-Ask 07-14):** neue Felder `quelle` (SELECT, Default-Wert
+gesetzt =`HUBSPOT`, oranger Chip) + `hubspotId` (TEXT, Original-Objekt-ID) auf
+person/company/opportunity — alle 679 Records getaggt. Damit: UI-Filter „alles
+aus HubSpot" + idempotenter Re-Sync über die hubspotId.
+
+**Gotchas (fürs nächste Mal):**
+1. **Cloudflare blockt python-urllib** (HTTP 403, „error code 1010" = Browser-
+   Signatur) — `User-Agent`-Header setzen (curl kam durch). Betrifft jeden
+   nicht-Browser-Client gegen die CF-proxied Domain.
+2. **Twenty Rate-Limit = 100 req / 60 s** → Throttle ~85/min (0,7 s Gap) +
+   429-Retry mit Backoff. ~680 Creates + 291 Notes = mehrere Minuten.
+3. **Twenty auto-erzeugt Companies aus Personen-E-Mail-Domains** — erzeugte 41
+   „Unbenannte Firma [hash]" (Rauschen, gelöscht) + 22 echt-benannte Arbeitgeber
+   (behalten). Companies danach 163.
+4. **DE-Telefon-Lokalformate** (`0561 95379-600`) → `INVALID_PHONE_NUMBER`
+   (libphonenumber) → Fallback: Person ohne `phones` anlegen (8 Fälle).
+5. **noteTarget-Write** = Morph-Relation via `targetOpportunityId` /
+   `targetPersonId` (NICHT `opportunityId`). Note-Body akzeptiert
+   `bodyV2:{markdown:…}` (→ blocknote auto-konvertiert).
+6. **query_crm_data**-Output = TSV in `.results[0].content`; groß → landet als
+   File, per jq/Python parsen. `SELECT DEAL.x FROM NOTE …` liefert Cross-Object-
+   Verknüpfung mit.
+
+**Import-Artefakte** (Session 2c0aad00 scratchpad): `import_to_twenty.py`,
+`import_notes.py`, `tag_and_cleanup.py` + Ledger `company_map/person_map/opp_map/
+note_map.json` (hs_id→twenty_id, für Re-Sync).
+
+**Noch offen:** Twenty-Demo-Seed (Notion/Stripe/Ivan Zhao — 5 Comp/5 People/6 Opp)
+separat wegräumen.
+
+## Nachtrag 4 (2026-07-14): Immobilien-Import + zwei Betriebs-Gotchas
+
+**Immobilien-Erbe importiert** (W0 des Folge-PRDs `immo-akquise-automat` im
+fin-Repo, quick approved-with-notes): 225 Deals aus 3 HubSpot-Pipelines →
+Opportunities (IMMO_KAUF 3 / IMMO_INVESTOREN 23 / IMMO_DEALFLOW 199), 97 neue
+People, 136 neue Companies — Dedup gegen den Fundraising-Import über die
+gemeinsamen hs_id→twenty_id-Ledger (12 Kontakte, 1 Firma wiederverwendet).
+Neues Feld `hubspotStage` (TEXT) auf Opportunity = verlustfreie Original-Stage;
+Tags (`quelle`, `hubspotId`) diesmal direkt beim Anlegen. 14 Deal-Notizen
+angehängt.
+
+**GOTCHA 7 — SELECT-Options-PATCH:** Beim Mergen von Options via
+`PATCH /rest/metadata/fields/<id>` MÜSSEN die bestehenden Options-Objekte ihre
+`id`-Felder behalten. Ohne ids legt Twenty die Optionen neu an und **nullt die
+Feldwerte aller Bestands-Records** (passiert mit `pipeline`: 321
+Fundraising-Opportunities standen auf null; per Ledger repariert).
+`schema-setup.sh` macht es richtig (`$cur + [neue]`, cur unangetastet) — nie
+„aufräumen" und ids strippen.
+
+**GOTCHA 8 — der `gaia-agents`-Key hat MEHRERE Schreiber:** Parallel zum
+Import legte ein anderer Prozess (Local-B2B-Sales-Strecke, Welle A) ~56 People
++ Begleit-Companies über denselben API-Key an (`createdBy` ist damit NICHT
+eindeutig einem Job zuzuordnen). Die 41 „Unbenannte Firma"-Löschungen aus
+Nachtrag 3 stammten von DIESEM Prozess (Freemail-Domains), nicht vom
+HubSpot-Import — Löschung folgenlos, aber: vor Massen-Löschungen immer gegen
+die eigenen Ledger prüfen, nicht gegen `createdBy`.
