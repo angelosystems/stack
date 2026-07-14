@@ -409,3 +409,21 @@ Folge-Punkte (nicht blockierend): master.stayawesome.app-Vhost-Policy um
 dept-stayawesome erst wenn Angelo das Board-UI sehen soll; GitHub-
 Collaborator-Invite (W5) braucht Angelos GitHub-Username; MA #2 =
 Rezept im Memory reference_crew_mitarbeiter_container.
+
+### Nachtrag — doppelte Anmeldung entfernt (2026-07-14)
+
+Befund (Mario): hinter dem SSO erschien noch der tool-eigene „Welcome to
+CloudCLI / Create Account"-Screen — eine redundante zweite Anmeldung, da
+Authentik die Identität bereits feststellt und jeder MA seine eigene
+Container-Instanz hat.
+
+Fix ohne Vendor-Code-Patch (Ponytail Stufe 4 — eingebaute Funktion):
+claudecodeui hat einen **Platform-Mode** (`VITE_IS_PLATFORM=true`). Client
+(Flag im Build eingebacken) überspringt Setup+Login und setzt die Identität
+direkt; Server-Middleware umgeht den JWT und nutzt den ersten DB-User
+(REST + WebSocket). Umgesetzt: einmalig DB-User `angelo` via app-eigenem
+`/api/auth/register` angelegt, `VITE_IS_PLATFORM=true` in Container-.env +
+`claudecodeui.service`-Env, Client neu gebaut (`build:client`), Service
+restart. Verifiziert: `/api/auth/user` ohne Token → 200 user=angelo;
+`platform-user` im Client-Bundle. **SSO ist damit die einzige Anmeldung.**
+Kein AGPL-Modifikations-Trigger (Config/Env, kein Quellcode-Patch).
