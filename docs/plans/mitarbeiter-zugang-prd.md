@@ -1,7 +1,7 @@
 ---
 title: Mitarbeiter-Zugang — Claude-Code-Sessions im Browser hinter Google-SSO
 slug: mitarbeiter-zugang
-status: draft
+status: in-progress  # Mario-Go 2026-07-14 (O1-O3 = Empfehlungen); Session-inline-Bau, bewusst nicht approved (Decomposer scharf, kein Fabrik-Bau)
 layer: prd
 parent_plan: null  # bewusst: Dach-Suche 2026-07-14 — Vorgänger sk-tenant-workspaces ist done, Code-Factory-Vision ist Kontext (references), kein Karten-Dach; eigenständige library-Initiative
 scope: Mitarbeiter bekommen eine Web-Surface für eigene Claude-Code-Sessions (Session-Liste, Resume, Modell-Auswahl) auf einer isolierten Box hinter Authentik/Google-SSO — plus Master-Kanban-Zugang, der hart auf die Stay-Awesome-Zeile begrenzt ist.
@@ -141,11 +141,18 @@ Tragende Entscheidungen:
 
 ## Work Packages
 
-### W0 — Box + Nutzer-Fundament (Granularität 3)
-Neue hcloud-Box `crew` (Klasse ccx23 genügt für 2-3 Mitarbeiter; O1),
-key-only SSH nur für Ops, pro Mitarbeiter Linux-User + `$HOME`,
-Node 22 + claude-CLI + git. Inventur-Nachweis: Box enthält keinerlei
-bestehende Secrets/Repos (Lehre aus dem speicher-Befund des Coder-Anlaufs).
+### W0 — Container-Fundament auf werkstatt (Granularität 3)
+**O1 ENTSCHIEDEN (Mario, 2026-07-14): keine eigene Box — Mitarbeiter-Zugang
+ist Teil der Code Factory und läuft auf werkstatt, Isolation per
+systemd-nspawn-Container je Mitarbeiter** (nativ, kein Docker; erfüllt die
+Kern-Einsicht „Maschinen-/Container-Grenze"). Pro MA ein Container
+`crew-<name>` (Ubuntu-24.04-Rootfs auf dem 300-GB-Volume
+`/mnt/werkstatt-data/crew/`), eigener Netz-Namespace (veth+NAT):
+werkstatt-localhost (MK :7780 Header-Trust, PG :5434/:5435, VK, WA-Bridge)
+und Host-Dateisystem sind von innen unerreichbar; nur der
+claudecodeui-Port wird auf 127.0.0.1:41xx des Hosts geforwardet.
+Im Container: User <name>, Node 22, claude-CLI, git. Inventur-Nachweis:
+Container enthält keinerlei Host-Secrets/-Mounts.
 Done: SC4-Inventur dokumentiert im Delivery-Abschnitt.
 
 ### W1 — SSO-Kette (Granularität 3)
@@ -311,3 +318,67 @@ Strukturell sehr starkes PRD mit klarer Problembelegung, expliziter Scope-Abgren
 - [x] Füge eine kurze »Open Questions«- oder »Entscheidungsbedarf«-Sektion hinzu, die O1 (Server-Go) und eventuell O2/O3 als_BLOCKER_ oder _PENDING_ markiert, damit klar ist, was vor Start von W0/W3 entschieden werden muss. *(eingearbeitet: Sektion „Entscheidungsbedarf" mit Blocker-Tabelle + Decomposer-Hinweis)*
 - [x] Beschreibe den Rollback-Pfad für W4: Was passiert, wenn das MK-Scoping im Prod Probleme macht? Gibt es einen Toggle, oder ist es ein Revert des Commits? *(eingearbeitet: dreistufiger Rollback in W4 — Policy-Binding raus / leeres Rollen-Mapping / git revert)*
 - [x] Kläre in W3, ob claude-abo-watch nativ mehrere Konten unterstützt oder ob pro Konto Konfigurationsaufwand entsteht — das beeinflusst die Skalierbarkeit des Ansatzes bei weiteren Mitarbeitern (O4). *(eingearbeitet: multi-account-nativ, 4 Konten heute; je Konto ein Vault-Token-File + Eintrag; usage-API-Grenze der setup-Tokens dokumentiert)*
+
+## Delivery — Session-inline-Bau 2026-07-14
+
+Gebaut in der laufenden Session (Mario-Go „setz es um", O1 revidiert:
+werkstatt+Container statt eigene Box). Fable orchestriert, W4 via Opus-Subagent.
+
+**W0 Container-Fundament (werkstatt, LIVE):**
+- nspawn-Container `crew-angelo` (Ubuntu 24.04, Rootfs auf
+  `/mnt/werkstatt-data/crew/machines/`), User `angelo`, Autostart enabled
+  (`machinectl enable`).
+- Netz-Zone `crew` (Bridge `vz-crew`, 10.230.0.0/24, Container .11,
+  NAT via networkd). DNS über resolved (1.1.1.1/9.9.9.9).
+- **Isolation (SC4) bewiesen** via `nft` Tabelle `crew_guard`
+  (`/etc/nftables.d/crew-guard.nft`, reboot-fest über `crew-guard.service`):
+  neu-initiierter Container→Host/Docker-Bridges/Tluster/Tailscale gesperrt,
+  established (Port-Forward-Antwort) frei, Internet+HTTPS offen. Getestet:
+  Host-Dienste :7780/:22/PG/:54682/:8765 aus dem Container ALLE zu,
+  172.x/100.64 zu, github.com → 200.
+
+**W2 Surface (LIVE im Container):**
+- Node 22 + claude-CLI 2.1.209 + `siteboon/claudecodeui` (Commit 038d960),
+  Production-Build, `claudecodeui.service` (User angelo, :3001) enabled+aktiv.
+- Host-Forward `crew-forward-angelo.service` (socat, DynamicUser)
+  127.0.0.1:4101 → 10.230.0.11:3001; Smoke `curl :4101` → 200.
+
+**W1 SSO-Kette (Backend fertig, Vhost STAGED):**
+- Authentik (idp, via API): Provider `crew-forward-auth` pk 19
+  (forward_single, external_host crew.stayawesome.app — exakter Host
+  überschreibt Domain-Catch-all pk 7), Application `crew`, Policy-Binding
+  Gruppe `dept-stayawesome`, Provider 19 im Embedded-Outpost.
+  Per-App-Matching verifiziert: `/start?rd=crew` → OAuth-Client der crew-App.
+- nginx-Vhost `sites-available/crew.stayawesome.app` geschrieben
+  (Domain-Forward-Auth-Muster wie vibekanban, Backend :4101, WebSocket),
+  `nginx -t` grün. **Bewusst NICHT enabled** (Cert fehlt bis DNS).
+
+**W4 Master-Kanban-Firma-Scoping (committet in /opt/master-kanban, NICHT deployt):**
+- Zentraler Wächter `mitarbeiter_scope.go`; Env `MK_MITARBEITER_SCOPE`
+  (`email=firma[,…]`, leer = Verhalten heute = Rollback-Stufe 2). Alle
+  karten-mutierenden Endpunkte + `/api/create` gescoped; Lese-Filter +
+  404/403. 69 Tests grün (`go test ./...`), inkl. Regression Admin
+  unverändert. Commits a3752a6 + 0babce8 (lokal, ungepusht). Binary gebaut
+  nach `/opt/stack/bin/master-kanban.new` (Scope-Feature verifiziert).
+
+**Board:** Karte `cf-mitarbeiter-zugang` (idea), session-geclaimt.
+
+### Offene Go-Live-Freigaben (nach außen wirkend / prod-Restart — bewusst gebündelt)
+
+1. **DNS:** A-Record `crew.stayawesome.app` → 178.104.255.22 (proxied) —
+   Classifier-gated. Danach Cert (DNS-01 oder webroot), dann Vhost
+   `ln -s … sites-enabled/ && nginx -t && systemctl reload nginx`.
+2. **MK-Deploy:** `mv /opt/stack/bin/master-kanban{.new,}` + Drop-in
+   `Environment=MK_MITARBEITER_SCOPE=angelo.calcagno@stayawesome.de=stayawesome`
+   an `master-kanban-serve.service` + Restart (Reihenfolge-Wächter: erst
+   Backend grün, DANN Schritt 3). Deploy-Mirror /opt/stack ↔ Quelle
+   /opt/master-kanban beachten; /opt/master-kanban-Push (2 Commits).
+3. **Vhost-Policy schon gesetzt** (dept-stayawesome an App crew) — greift
+   erst mit DNS+Cert. Master-Kanban-Vhost-Policy NICHT verändert (crew ist
+   eigener Vhost; MK-Zugang für Mitarbeiter kommt über das Backend-Scoping,
+   Policy-Erweiterung an master.stayawesome.app ist separater Schritt wenn
+   Angelo auch das Board-UI sehen soll).
+4. **W3 Anthropic-Abo für Angelo:** eigenes Claude-Konto anlegen, im
+   Container `su - angelo -c 'claude setup-token'`, Konto in
+   `claude-abo-watch` (multi-account-nativ). = Marios Handgriff (Kauf).
+5. **/opt/stack-Push:** PRD-Commits (Mario-Wort).
