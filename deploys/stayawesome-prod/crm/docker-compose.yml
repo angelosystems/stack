@@ -62,7 +62,10 @@ services:
       # liefert POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB (Werte = PG_DATABASE_*)
       - /root/.secrets/stayawesome/crm.env
     volumes:
-      - db-data:/var/lib/postgresql/data
+      # db16-data (NICHT db-data): das Alt-Volume ist Spilo-Layout und mit
+      # postgres:16 inkompatibel; Alt-Volumes crm_db-data/crm_server-local-data
+      # bleiben als Waisen bis zum Aufräum-Klick (waren verifiziert leer)
+      - db16-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -h localhost -d postgres"]
       interval: 10s
@@ -85,7 +88,7 @@ services:
       - crm_default
 
 volumes:
-  db-data:
+  db16-data:
   server-local-data:
 
 networks:
