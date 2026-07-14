@@ -15,7 +15,7 @@
   .lane-stripe-mariobrain  { border-left: 4px solid #8b5cf6; }
   .lane-stripe-angeloos    { border-left: 4px solid #64748b; }
   .lane-stripe-stack       { border-left: 4px solid #f43f5e; }
-  .col-now-overflow { box-shadow: inset 0 0 0 2px #ef4444; }
+  .col-now-overflow { box-shadow: inset 0 0 0 1px #fca5a5; background: #fef7f7; }
   .card-drag { cursor: grab; }
   .card-drag:active { cursor: grabbing; }
   .activity-spark { display:inline-block;width:36px;height:8px;background:linear-gradient(90deg,#e5e7eb 30%,#94a3b8 70%,#475569 100%);border-radius:2px;vertical-align:middle; }
@@ -35,42 +35,42 @@
   </div>
 
   <header class="bg-white border-b border-slate-200 sticky top-0 z-10">
-    <!-- Zeile 1: Marke · Ansichten · Seiten · Werkzeuge -->
-    <div class="px-6 h-12 flex items-center gap-4">
-      <h1 class="text-base font-semibold tracking-tight shrink-0 flex items-baseline gap-1.5">master-kanban
-        <span class="text-[11px] font-medium" :class="apiOk ? 'text-emerald-600' : 'text-slate-400'" x-text="apiOk ? '● live' : '○ offline'"></span>
+    <!-- Zeile 1: Kommandoleiste — Marke · Ansichten · Seiten · Werkzeuge -->
+    <div class="px-6 h-12 flex items-center gap-4 bg-slate-900">
+      <h1 class="text-base font-semibold tracking-tight shrink-0 flex items-baseline gap-1.5 text-white">master-kanban
+        <span class="text-[11px] font-medium" :class="apiOk ? 'text-emerald-400' : 'text-slate-500'" x-text="apiOk ? '● live' : '○ offline'"></span>
       </h1>
 
       <!-- View-Umschalter: Board | Pipeline | Backlog | Releases -->
-      <nav class="flex gap-0.5 bg-slate-100 rounded-lg p-0.5 shrink-0">
+      <nav class="flex gap-0.5 bg-white/10 rounded-lg p-0.5 shrink-0">
         <template x-for="v in views" :key="v.id">
           <button @click="switchView(v.id)"
-            :class="view === v.id ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'"
-            class="px-3 py-1 rounded-md text-sm font-medium">
+            :class="view === v.id ? 'bg-white shadow-sm text-slate-900' : 'text-slate-300 hover:text-white'"
+            class="px-3 py-1 rounded-md text-sm font-medium transition-colors">
             <span x-text="v.label"></span>
-            <span x-show="v.id==='backlog' && backlog.length" class="ml-1 text-[10px] bg-amber-200 text-amber-900 rounded-full px-1.5" x-text="backlog.length"></span>
+            <span x-show="v.id==='backlog' && backlog.length" class="ml-1 text-[10px] bg-amber-300 text-amber-900 rounded-full px-1.5" x-text="backlog.length"></span>
           </button>
         </template>
       </nav>
 
       <!-- Seiten-Links: leise, klar getrennt vom View-Umschalter -->
       <nav class="flex items-center gap-0.5 text-sm min-w-0 overflow-hidden">
-        <a href="/programme" class="px-2 py-1 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap" title="Programmuebersicht: Software → Owner → Karten">Programme</a>
-        <a href="/ressourcen" class="px-2 py-1 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap">Ressourcen</a>
-        <a href="/health" class="px-2 py-1 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap">Health</a>
-        <a href="https://vibekanban.stayawesome.app" target="_blank" rel="noopener" class="px-2 py-1 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap">Vibe Kanban <span class="text-slate-400">↗</span></a>
+        <a href="/programme" class="px-2 py-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 whitespace-nowrap transition-colors" title="Programmuebersicht: Software → Owner → Karten">Programme</a>
+        <a href="/ressourcen" class="px-2 py-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 whitespace-nowrap transition-colors">Ressourcen</a>
+        <a href="/health" class="px-2 py-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 whitespace-nowrap transition-colors">Health</a>
+        <a href="https://vibekanban.stayawesome.app" target="_blank" rel="noopener" class="px-2 py-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 whitespace-nowrap transition-colors">Vibe Kanban <span class="text-slate-500">↗</span></a>
       </nav>
 
       <!-- Werkzeuge rechts -->
       <div class="ml-auto flex items-center gap-2 shrink-0 relative">
-        <button @click="toggleChat()" class="px-2.5 py-1 rounded-md text-sm font-medium whitespace-nowrap"
-          :class="chatOpen ? 'bg-violet-100 text-violet-800' : 'text-violet-700 hover:bg-violet-50'"
+        <button @click="toggleChat()" class="px-2.5 py-1 rounded-md text-sm font-medium whitespace-nowrap transition-colors"
+          :class="chatOpen ? 'bg-violet-500/30 text-violet-200' : 'text-violet-300 hover:text-violet-200 hover:bg-white/10'"
           title="Chat mit dem Master-Kanban-Verwalter (Antwort = ein Agent-Run)">💬 Verwalter</button>
         <button x-show="me && me.is_admin" @click="openRoster()"
-          class="px-2 py-1 rounded-md text-sm text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+          class="px-2 py-1 rounded-md text-sm text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
           title="Personen-Verzeichnis verwalten (nur Admin)">👥</button>
         <button @click="driftOpen = !driftOpen" x-show="drift && drift.drift_total > 0"
-          class="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-medium hover:bg-amber-200 whitespace-nowrap"
+          class="text-xs px-2 py-1 rounded-full bg-amber-400/15 text-amber-300 border border-amber-400/30 font-medium hover:bg-amber-400/25 whitespace-nowrap transition-colors"
           title="Drift: Board-stage vs. Evidenz (Beads/Pläne)">
           🩺 <span x-text="drift ? drift.drift_total : 0"></span>
         </button>
@@ -93,20 +93,20 @@
           </ul>
           <div x-show="drift && drift.drift_total===0" class="text-slate-400 text-xs">Kein Drift 🎉</div>
         </div>
-        <span class="text-xs text-slate-400 hidden xl:inline whitespace-nowrap" x-text="lastFetched"></span>
-        <button @click="refresh()" class="px-2 py-1 text-slate-500 border border-slate-200 rounded-md hover:bg-slate-100" title="neu laden">↻</button>
+        <span class="text-xs text-slate-500 hidden xl:inline whitespace-nowrap" x-text="lastFetched"></span>
+        <button @click="refresh()" class="px-2 py-1 text-slate-400 border border-white/15 rounded-md hover:bg-white/10 hover:text-white transition-colors" title="neu laden">↻</button>
       </div>
     </div>
 
-    <!-- Zeile 2 (nur Board): Filter-Leiste — Firmen · Tier · Software · Owner -->
-    <div x-show="view==='board'" class="px-6 py-1.5 border-t border-slate-100 bg-slate-50 flex items-center gap-1.5 flex-wrap">
+    <!-- Zeile 2 (nur Board): Filter-Leiste — Firmen (in Firma-Farbe) · Tier · Software · Owner -->
+    <div x-show="view==='board'" class="px-6 py-1.5 bg-white flex items-center gap-1.5 flex-wrap">
       <template x-for="f in orderedFirmas" :key="f.id">
         <button @click="toggleFirma(f.id)"
-          :class="filter[f.id] ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'"
+          :class="filter[f.id] ? firmaChipOn[f.id] : 'bg-white text-slate-400 border-slate-200 hover:border-slate-400 hover:text-slate-600'"
           class="px-2.5 py-0.5 rounded-full text-xs font-medium border transition-colors">
           <span x-text="f.icon"></span>
           <span x-text="f.label"></span>
-          <span class="opacity-50 ml-0.5" x-text="counts[f.id] || 0"></span>
+          <span class="opacity-60 ml-0.5" x-text="counts[f.id] || 0"></span>
         </button>
       </template>
       <span class="w-px h-4 bg-slate-300 mx-1.5"></span>
@@ -143,36 +143,37 @@
     <template x-if="view==='board'">
       <div class="space-y-6" x-init="$nextTick(() => initFirmaSort($el))">
         <template x-for="f in orderedFirmas" :key="f.id">
-          <section x-show="filter[f.id]" :data-firma="f.id" :class="'lane-stripe-' + f.id" class="bg-white rounded-lg shadow-sm">
-            <header class="px-5 py-3 flex items-center justify-between border-b border-slate-200">
+          <section x-show="filter[f.id]" :data-firma="f.id" :class="'lane-stripe-' + f.id" class="bg-white rounded-xl shadow-sm overflow-hidden">
+            <header class="px-5 py-2.5 flex items-center justify-between border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
               <div class="flex items-center gap-3">
                 <span class="firma-grip cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500 select-none" title="ziehen zum Umsortieren">⠿</span>
-                <span class="text-xl" x-text="f.icon"></span>
-                <h2 class="font-semibold uppercase tracking-wide text-sm" x-text="f.label"></h2>
+                <span class="text-lg leading-none" x-text="f.icon"></span>
+                <h2 class="font-semibold uppercase tracking-wider text-[13px] text-slate-800" x-text="f.label"></h2>
                 <button @click="pinTop(f.id)" class="text-slate-300 hover:text-sky-600 text-sm leading-none" title="nach oben holen">⤴</button>
-                <span class="text-xs text-slate-400" x-text="(counts[f.id]||0) + ' total'"></span>
-                <span class="text-xs font-medium ml-4" x-show="capacity[f.id]"
-                  :class="capacity[f.id] && capacity[f.id].vkslots < 0 ? 'text-amber-600' : 'text-emerald-600'"
+                <span class="text-[11px] text-slate-400" x-text="(counts[f.id]||0) + ' Karten'"></span>
+                <span class="text-[11px] font-medium ml-3 px-2 py-0.5 rounded-full border" x-show="capacity[f.id]"
+                  :class="capacity[f.id] && capacity[f.id].vkslots < 0 ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-emerald-700 bg-emerald-50 border-emerald-200'"
                   x-text="capacity[f.id] ? ((capacity[f.id].vkslots < 0 ? '🟠 ' : '🟢 ') + capacity[f.id].polecats + ' Polecats frei · ' + (capacity[f.id].vkslots < 0 ? 'VK überbucht (' + (-capacity[f.id].vkslots) + ')' : capacity[f.id].vkslots + ' vk-Slots')) : ''"></span>
               </div>
-              <div class="text-xs text-slate-500">
-                now: <span x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span>
-                <span x-show="nowCount(f.id) > f.wip" class="ml-2 text-red-600 font-semibold">WIP überschritten</span>
+              <div class="text-[11px] text-slate-500 flex items-center gap-2">
+                <span>In Arbeit: <span class="font-semibold text-slate-700" x-text="nowCount(f.id)"></span> / <span x-text="f.wip"></span></span>
+                <span x-show="nowCount(f.id) > f.wip" class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200 font-semibold">WIP überschritten</span>
               </div>
             </header>
-            <div class="grid grid-cols-5 divide-x divide-slate-200">
+            <div class="grid grid-cols-5 divide-x divide-slate-100">
               <template x-for="stage in stages" :key="stage">
                 <div class="p-3 min-h-[120px]"
                   :class="stage === 'now' && nowCount(f.id) > f.wip ? 'col-now-overflow' : ''"
                   :data-firma="f.id" :data-stage="stage"
                   x-init="$nextTick(() => initSortable($el))">
-                  <div class="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center justify-between">
+                  <div class="text-[11px] uppercase tracking-wider font-semibold text-slate-500 mb-2 flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="stageDot[stage]"></span>
                     <span x-text="stageLabel[stage]"></span>
-                    <span class="text-slate-400 font-normal" x-text="cardsIn(f.id, stage).length"></span>
+                    <span class="ml-auto text-[10px] font-medium text-slate-400 bg-slate-100 rounded-full px-1.5 py-px" x-text="cardsIn(f.id, stage).length"></span>
                   </div>
                   <template x-for="c in cardsIn(f.id, stage)" :key="c.id">
                     <article :data-id="c.id" @click="openDetail(c.id)"
-                      class="card-drag mb-2 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-sm shadow-sm hover:shadow transition-shadow"
+                      class="card-drag mb-2 bg-white border border-slate-200 rounded-lg p-2.5 text-sm shadow-sm hover:shadow-md hover:border-slate-300 hover:-translate-y-px transition-all"
                       :class="c._child ? 'ml-4 border-l-2 border-l-indigo-300' : ''">
                       <div class="font-medium leading-snug"><span x-show="c._child" class="text-indigo-400 mr-0.5">↳</span><span x-text="c.title"></span></div>
                       <div class="text-xs text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
@@ -245,7 +246,7 @@
                     placeholder="Titel… (Enter)"
                     class="w-full text-sm border border-slate-300 rounded-md px-2 py-1 mb-1 focus:outline-none focus:ring-2 focus:ring-sky-300">
                   <button @click="startAdd(f.id, stage)"
-                    class="w-full text-left text-xs text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded px-1.5 py-1">＋ Neu</button>
+                    class="w-full text-left text-xs text-slate-400 hover:text-slate-600 border border-dashed border-transparent hover:border-slate-300 hover:bg-slate-50 rounded-md px-1.5 py-1 transition-colors">＋ Neu</button>
                 </div>
               </template>
             </div>
@@ -256,7 +257,7 @@
 
     <!-- ════ PIPELINE-VIEW (das Planungs-Kanban: Spalten = Plan-Status) ════ -->
     <template x-if="view==='pipeline'">
-      <section class="bg-white rounded-lg shadow-sm">
+      <section class="bg-white rounded-xl shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
           <h2 class="font-semibold uppercase tracking-wide text-sm">Plan-Pipeline</h2>
           <span class="text-xs text-slate-400">Spalten = Frontmatter-Status · Karten = Wurzel-Pläne mit Unterbaum</span>
@@ -296,7 +297,7 @@
 
     <!-- ════ BACKLOG-VIEW (lane-lose Beads + Triage, P2.3) ════ -->
     <template x-if="view==='backlog'">
-      <section class="bg-white rounded-lg shadow-sm">
+      <section class="bg-white rounded-xl shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
           <h2 class="font-semibold uppercase tracking-wide text-sm">Backlog</h2>
           <span class="text-xs text-slate-400">offene Beads ohne lane:*-Label · Triage routet nach Vibe Kanban oder Solartown</span>
@@ -326,7 +327,7 @@
 
     <!-- ════ RELEASES-VIEW (Release-Ledger: was läuft mit welchem Commit, WP4) ════ -->
     <template x-if="view==='releases'">
-      <section class="bg-white rounded-lg shadow-sm">
+      <section class="bg-white rounded-xl shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-slate-200 flex items-center gap-3">
           <h2 class="font-semibold uppercase tracking-wide text-sm">Releases</h2>
           <span class="text-xs text-slate-400">jüngste Ledger-Zeile je (service, environment) · SoT: portfolio.deployments (:5434) · Probe versöhnt alle 60 s</span>
@@ -918,6 +919,17 @@ function liveKanban() {
     // DB-Stage-Werte bleiben englisch (idea/soon/now/watching/done) — nur Anzeige-Labels deutsch.
     stages: ['idea', 'soon', 'now', 'watching', 'done'],
     stageLabel: { idea: 'Idee', soon: 'Bereit', now: 'In Arbeit', watching: 'Nachweis', done: 'Fertig' },
+    // Fluss-Farbcode der Spaltenkoepfe: grau → blau → amber → violett → gruen
+    stageDot: { idea: 'bg-slate-300', soon: 'bg-sky-400', now: 'bg-amber-400', watching: 'bg-violet-400', done: 'bg-emerald-400' },
+    // aktiver Firma-Filter-Chip traegt die Stripe-Farbe der Sektion
+    firmaChipOn: {
+      stayawesome:   'bg-cyan-600 border-cyan-600 text-white',
+      'code-factory':'bg-amber-500 border-amber-500 text-white',
+      quantbot:      'bg-emerald-600 border-emerald-600 text-white',
+      mariobrain:    'bg-violet-600 border-violet-600 text-white',
+      stack:         'bg-rose-500 border-rose-500 text-white',
+      angeloos:      'bg-slate-600 border-slate-600 text-white',
+    },
     planCols: [
       { id: 'draft',       label: 'Draft' },
       { id: 'review',      label: 'In Review' },
