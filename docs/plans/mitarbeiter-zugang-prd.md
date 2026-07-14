@@ -3,7 +3,7 @@ title: Mitarbeiter-Zugang — Claude-Code-Sessions im Browser hinter Google-SSO
 slug: mitarbeiter-zugang
 status: draft
 layer: prd
-parent_plan: /opt/docs/code-factory/20-vision.md
+parent_plan: null  # bewusst: Dach-Suche 2026-07-14 — Vorgänger sk-tenant-workspaces ist done, Code-Factory-Vision ist Kontext (references), kein Karten-Dach; eigenständige library-Initiative
 scope: Mitarbeiter bekommen eine Web-Surface für eigene Claude-Code-Sessions (Session-Liste, Resume, Modell-Auswahl) auf einer isolierten Box hinter Authentik/Google-SSO — plus Master-Kanban-Zugang, der hart auf die Stay-Awesome-Zeile begrenzt ist.
 tier: library
 software: mitarbeiter-zugang
@@ -14,6 +14,7 @@ review:
   panel-mode: critique
   panel-focus: [architecture, compliance]
 references:
+  - /opt/docs/code-factory/20-vision.md
   - Vorgänger-Karte sk-tenant-workspaces (done; PRD-File war Phantom — dieses PRD ist der reale Nachfolger)
   - /opt/docs/konventionen/adr/0011-master-kanban-board-konvention.md
   - Memory reference_stayawesome_sso (Authentik + Google-Federation, Migrations-Rezept)
