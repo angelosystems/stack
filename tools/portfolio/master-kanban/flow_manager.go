@@ -119,6 +119,11 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 	}
 
 	diagnosedCount := 0
+	// GLM-Sicherungsschalter: scheitert eine Diagnose an Limit/Erreichbarkeit,
+	// versucht dieser Sweep KEINE weitere (Flag-Delta bleibt offen, der
+	// naechste Sweep probiert wieder EINE). Ohne den Schalter rannten ~49
+	// offene Deltas pro Runde ins tote Z.ai-Wochenlimit (429-Hammer).
+	glmDown := false
 
 	// 3. For each initiative, gather context and diagnose if flagged
 	for _, init := range initiatives {
@@ -340,6 +345,9 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			if !flowActionChanged(lastFlowActionHash(ctx, p, init.ID), flaggedReasons) {
 				continue // Delta-Gate hält: bekannter Zustand, nichts zu tun
 			}
+			if glmDown {
+				continue // Sicherungsschalter: GLM ist in dieser Runde down
+			}
 
 			fmt.Printf("Diagnosing flagged card %s (%s, Stage: %s, Firma: %s)\n", init.ID, init.Title, init.Stage, init.Firma)
 			fmt.Printf("  -> Flagged reasons: %s\n", strings.Join(flaggedReasons, " | "))
@@ -347,6 +355,11 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			diagnosis, err := diagnoseFlaggedCard(init, beads, workspaces, events, flaggedReasons)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  ❌ Error diagnosing card %s: %v\n", init.ID, err)
+				if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "rate_limit") ||
+					strings.Contains(err.Error(), "call GLM error") {
+					glmDown = true
+					fmt.Println("  ⛔ GLM nicht verfuegbar — keine weiteren Diagnose-Versuche in dieser Runde (Deltas bleiben offen)")
+				}
 				continue
 			}
 
