@@ -165,7 +165,7 @@ func runMcpServer(apiURL string) error {
 				},
 				{
 					Name:        "capture",
-					Description: "Erfasst ein Inline-Event/Aktion und ordnet es der passenden oder Catch-all-Initiative zu. Gewährleistet Idempotenz.",
+					Description: "Erfasst ein Inline-Event/Aktion und ordnet es AUTOMATISCH der passenden oder Catch-all-Initiative zu. NICHT für Kommentare an eine BESTIMMTE Karte — dafür das Tool 'comment' mit der Karten-ID nutzen.",
 					InputSchema: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -179,6 +179,46 @@ func runMcpServer(apiURL string) error {
 							},
 						},
 						"required": []string{"text"},
+					},
+				},
+				{
+					Name:        "comment",
+					Description: "Schreibt einen Kommentar an eine BESTIMMTE Karte (Initiative) — für Arbeitsfortschritt, Befunde, Übergaben. Landet sichtbar in der Karten-Historie. Erste Wahl, wenn du an einer Karte arbeitest und Status berichten willst.",
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"id": map[string]any{
+								"type":        "string",
+								"description": "Die Karten-ID (z.B. sa-inbox-zero) — steht auf jeder Karte im Board.",
+							},
+							"text": map[string]any{
+								"type":        "string",
+								"description": "Der Kommentar-Text (Markdown erlaubt).",
+							},
+						},
+						"required": []string{"id", "text"},
+					},
+				},
+				{
+					Name:        "assign",
+					Description: "Setzt den Owner einer Karte oder den Assignee eines PRDs/plan_items — Karte nehmen ('mir zuweisen'), an Kollegen übergeben oder Zuordnung entfernen (person_email leer lassen).",
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"target": map[string]any{
+								"type":        "string",
+								"description": "'initiative' (Karten-Owner) oder 'plan_item' (PRD-Assignee).",
+							},
+							"id": map[string]any{
+								"type":        "string",
+								"description": "Karten-ID (z.B. sa-inbox-zero) bzw. plan_item-ID/-Slug.",
+							},
+							"person_email": map[string]any{
+								"type":        "string",
+								"description": "E-Mail der Person; leer/weglassen = Zuordnung entfernen.",
+							},
+						},
+						"required": []string{"target", "id"},
 					},
 				},
 			}
@@ -196,8 +236,49 @@ func runMcpServer(apiURL string) error {
 				continue
 			}
 
-			if params.Name != "move-stage" && params.Name != "capture" {
+			switch params.Name {
+			case "move-stage", "capture", "comment", "assign":
+			default:
 				sendMcpError(req.ID, -32601, "Method not found (unknown tool): "+params.Name)
+				continue
+			}
+
+			if params.Name == "comment" {
+				var args struct {
+					ID   string `json:"id"`
+					Text string `json:"text"`
+				}
+				if err := json.Unmarshal(params.Arguments, &args); err != nil {
+					sendMcpError(req.ID, -32602, "Invalid tool arguments: "+err.Error())
+					continue
+				}
+				resText, isErr := callMcpToolPost(apiURL, "/api/comment",
+					map[string]string{"id": args.ID, "text": args.Text},
+					"Kommentar an "+args.ID+" geschrieben.")
+				sendMcpResult(req.ID, mcpToolResponse{
+					Content: []mcpToolContent{{Type: "text", Text: resText}},
+					IsError: isErr,
+				})
+				continue
+			}
+
+			if params.Name == "assign" {
+				var args struct {
+					Target      string `json:"target"`
+					ID          string `json:"id"`
+					PersonEmail string `json:"person_email"`
+				}
+				if err := json.Unmarshal(params.Arguments, &args); err != nil {
+					sendMcpError(req.ID, -32602, "Invalid tool arguments: "+err.Error())
+					continue
+				}
+				resText, isErr := callMcpToolPost(apiURL, "/api/assign",
+					map[string]string{"target": args.Target, "id": args.ID, "person_email": args.PersonEmail},
+					"Zuordnung gesetzt: "+args.Target+" "+args.ID+" -> "+args.PersonEmail)
+				sendMcpResult(req.ID, mcpToolResponse{
+					Content: []mcpToolContent{{Type: "text", Text: resText}},
+					IsError: isErr,
+				})
 				continue
 			}
 
@@ -383,6 +464,35 @@ func fetchPlanFileResource(apiURL, id string) (string, string, error) {
 		return "", "", err
 	}
 	return res.Markdown, "text/markdown", nil
+}
+
+// callMcpToolPost ist der generische Schreib-Helfer der MCP-Tools: POST auf
+// einen Board-Endpunkt, Credentials aus dem Env (im crew-Container bewusst
+// leer — Identitaet pinnt der Broker host-seitig). Nicht-200 wird als
+// handlungsleitender Fehlertext an das Modell zurueckgegeben, kein Opcode.
+func callMcpToolPost(apiURL, path string, payload map[string]string, okText string) (string, bool) {
+	b, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", apiURL+path, bytes.NewReader(b))
+	if err != nil {
+		return "Fehler beim Bauen der Anfrage: " + err.Error(), true
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key := os.Getenv("PORTFOLIO_API_KEY"); key != "" {
+		req.Header.Set("X-Api-Key", key)
+	}
+	if email := os.Getenv("PORTFOLIO_AUTH_EMAIL"); email != "" {
+		req.Header.Set("X-Auth-Request-Email", email)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return "Fehler beim Aufruf: " + err.Error(), true
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), true
+	}
+	return okText, false
 }
 
 func callMcpToolMoveStage(apiURL, id, stage string) (string, bool, error) {

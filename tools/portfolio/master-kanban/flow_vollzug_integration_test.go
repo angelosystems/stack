@@ -39,7 +39,7 @@ func TestApplyStageProposal_Integration(t *testing.T) {
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id=$1", id)
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id=$1", id)
 	_, err := p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, stage_locked_by_human, primary_backend)
-		VALUES ($1,'solartown','now','Vollzug Apply Test',false,'plan_file')`, id)
+		VALUES ($1,'code-factory','now','Vollzug Apply Test',false,'plan_file')`, id)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -69,6 +69,17 @@ func TestApplyStageProposal_Integration(t *testing.T) {
 	}
 	if eventCount() != 1 {
 		t.Errorf("forward: erwartet 1 stage_proposed-Event, got %d", eventCount())
+	}
+	// Vollzug hinterlässt ein moved-Event mit from/to (WP1 Haertung):
+	// Drawer-Historie + last_activity zählen den Auto-Move.
+	var movedFrom, movedTo string
+	if err := p.QueryRow(ctx, `SELECT COALESCE(from_stage,''), COALESCE(to_stage,'')
+		FROM portfolio.initiative_event
+		WHERE initiative_id=$1 AND kind='moved' AND actor='flow-manager'
+		ORDER BY at DESC LIMIT 1`, id).Scan(&movedFrom, &movedTo); err != nil {
+		t.Errorf("forward: moved-Event fehlt: %v", err)
+	} else if movedFrom != "now" || movedTo != "watching" {
+		t.Errorf("forward: moved-Event %s→%s, want now→watching", movedFrom, movedTo)
 	}
 
 	// 2. rückwärts blockt: watching→soon (Event geschrieben, kein Move).
@@ -107,6 +118,14 @@ func TestApplyStageProposal_Integration(t *testing.T) {
 	}
 	if eventCount() != before+1 {
 		t.Errorf("halt: Event muss trotzdem geschrieben sein (erwartet %d), got %d", before+1, eventCount())
+	}
+
+	// Genau EIN moved-Event über alle vier Pfade: nur der echte Vollzug (1.)
+	// hinterlässt eins — geblockte Vorschläge (rückwärts/locked/halt) nie.
+	var movedEvents int
+	_ = p.QueryRow(ctx, "SELECT count(*) FROM portfolio.initiative_event WHERE initiative_id=$1 AND kind='moved'", id).Scan(&movedEvents)
+	if movedEvents != 1 {
+		t.Errorf("moved-Events: got %d, want 1 (nur der vollzogene Move)", movedEvents)
 	}
 }
 
@@ -174,7 +193,7 @@ func TestGatherDoneEvidence_Integration(t *testing.T) {
 	mkInit := func(id string) {
 		cleanup(id)
 		_, err := p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-			VALUES ($1,'solartown','watching',$1,'plan_file')`, id)
+			VALUES ($1,'code-factory','watching',$1,'plan_file')`, id)
 		if err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
@@ -186,10 +205,10 @@ func TestGatherDoneEvidence_Integration(t *testing.T) {
 	idA := "st-vollzug-ev-a"
 	mkInit(idA)
 	defer cleanup(idA)
-	_, _ = p.Exec(ctx, `INSERT INTO portfolio.plan_item (id, initiative_id, slug, layer, status)
-		VALUES ($1,$2,'a-slug','implementation','delivered')`, idA+"-pi", idA)
-	_, _ = p.Exec(ctx, `INSERT INTO portfolio.deployments (service, initiative_id, status, deployed_at)
-		VALUES ($1,$2,'live', now())`, svc, idA)
+	_, _ = p.Exec(ctx, `INSERT INTO portfolio.plan_item (id, initiative_id, slug, path, layer, status)
+		VALUES ($1,$2,'a-slug','/x/a-slug-prd.md','implementation','delivered')`, idA+"-pi", idA)
+	_, _ = p.Exec(ctx, `INSERT INTO portfolio.deployments (service, initiative_id, status, deployed_at, git_sha, deployed_by)
+		VALUES ($1,$2,'live', now(), 'testsha00', 'itest')`, svc, idA)
 	evA, err := gatherDoneEvidence(ctx, p, idA)
 	if err != nil {
 		t.Fatalf("gather A: %v", err)
@@ -228,13 +247,13 @@ func TestGatherDoneEvidence_Integration(t *testing.T) {
 	mkInit(idOther)
 	defer cleanup(idC)
 	defer cleanup(idOther)
-	_, _ = p.Exec(ctx, `INSERT INTO portfolio.plan_item (id, initiative_id, slug, layer, status)
-		VALUES ($1,$2,'c-slug','implementation','done')`, idC+"-pi", idC)
+	_, _ = p.Exec(ctx, `INSERT INTO portfolio.plan_item (id, initiative_id, slug, path, layer, status)
+		VALUES ($1,$2,'c-slug','/x/c-slug-prd.md','implementation','done')`, idC+"-pi", idC)
 	_, _ = p.Exec(ctx, `INSERT INTO portfolio.initiative_tag (initiative_id, kind, value)
 		VALUES ($1,'software',$2)`, idC, svc)
 	// Ledger-Vorkommen des Service, aber auf einer ANDEREN Karte.
-	_, _ = p.Exec(ctx, `INSERT INTO portfolio.deployments (service, initiative_id, status, deployed_at)
-		VALUES ($1,$2,'live', now())`, svc, idOther)
+	_, _ = p.Exec(ctx, `INSERT INTO portfolio.deployments (service, initiative_id, status, deployed_at, git_sha, deployed_by)
+		VALUES ($1,$2,'live', now(), 'testsha00', 'itest')`, svc, idOther)
 	evC, err := gatherDoneEvidence(ctx, p, idC)
 	if err != nil {
 		t.Fatalf("gather C: %v", err)

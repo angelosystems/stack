@@ -963,7 +963,11 @@ func cmdServe() *cobra.Command {
 		Short: "JSON-API für Cockpit-Page (Stage 3)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
+			// W4: Mitarbeiter-Firma-Scoping aus MK_MITARBEITER_SCOPE laden
+			// (leer = Verhalten wie heute fuer alle).
+			loadMitarbeiterScope()
 			http.DefaultServeMux = http.NewServeMux()
+			registerUserMgmt(p) // PRD mk-user-management: /api/persons, /api/person(/deactivate), /api/assign
 			http.HandleFunc("/api/initiatives", func(w http.ResponseWriter, r *http.Request) {
 				rows, err := p.Query(r.Context(), `SELECT row_to_json(s) FROM portfolio.initiative_summary s ORDER BY firma, stage, id`)
 				if err != nil {
@@ -1010,6 +1014,13 @@ func cmdServe() *cobra.Command {
 						}
 						items = append(items, item)
 					}
+				}
+
+				// W4: Mitarbeiter sehen nur Karten ihrer Firma — vor jeglicher
+				// Anreicherung filtern, damit keine fremden Karten/Zahlen in die
+				// Antwort gelangen.
+				if firmas, scoped := scopeFirmaFor(r); scoped {
+					items = filterInitiativesForScope(items, firmas, emailOf(r))
 				}
 
 				if len(items) > 0 {
@@ -1229,6 +1240,10 @@ func cmdServe() *cobra.Command {
 					http.Error(w, "initiative nicht gefunden: "+id, 404)
 					return
 				}
+				// W4: fremde Karte existiert fuer den Mitarbeiter nicht (404).
+				if mitarbeiterBlocksRead(w, r, p, id) {
+					return
+				}
 				var j []byte
 				err := p.QueryRow(r.Context(), `SELECT json_build_object(
 					'initiative', (SELECT row_to_json(s) FROM portfolio.initiative_summary s WHERE s.id=$1),
@@ -1415,6 +1430,9 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
+				if mitarbeiterBlocksWrite(w, r, p, body.Id) {
+					return
+				}
 				body.Text = strings.TrimSpace(body.Text)
 				if body.Id == "" || body.Text == "" {
 					http.Error(w, "id und text erforderlich", 400)
@@ -1469,6 +1487,9 @@ func cmdServe() *cobra.Command {
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, err.Error(), 400)
+					return
+				}
+				if mitarbeiterBlocksWrite(w, r, p, body.Id) {
 					return
 				}
 				sets := []string{"updated_at = now()"}
@@ -1527,6 +1548,13 @@ func cmdServe() *cobra.Command {
 					return
 				}
 				body.Title = strings.TrimSpace(body.Title)
+				// W4: Mitarbeiter darf nur in der eigenen Firma anlegen (fehlende
+				// firma -> auf Scope-Firma defaulten, fremde firma -> 403).
+				if firma, blocked := mitarbeiterCreateFirma(w, r, body.Firma); blocked {
+					return
+				} else {
+					body.Firma = firma
+				}
 				prefix, ok := firmaPrefix[body.Firma]
 				if !ok || body.Title == "" {
 					http.Error(w, "firma und title erforderlich", 400)
@@ -1549,9 +1577,12 @@ func cmdServe() *cobra.Command {
 					}
 					id = fmt.Sprintf("%s-%d", base, i)
 				}
+				// Auto-Owner (mk-user-management): Anleger wird Owner; Maschinen-
+				// Anlagen (X-Api-Key, keine SSO-Mail) fallen auf den ersten
+				// Env-Admin zurueck — nie wieder Owner-lose Karten.
 				if _, err := p.Exec(r.Context(),
-					`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-					 VALUES ($1,$2,$3,$4,'plan_file')`, id, body.Firma, body.Stage, body.Title); err != nil {
+					`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend, owner_email)
+					 VALUES ($1,$2,$3,$4,'plan_file',NULLIF($5,''))`, id, body.Firma, body.Stage, body.Title, autoOwnerFor(r)); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
@@ -1585,6 +1616,9 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
+				if mitarbeiterBlocksWrite(w, r, p, body.Id) {
+					return
+				}
 				tag, err := p.Exec(r.Context(),
 					`UPDATE portfolio.initiative SET archived_at = now(), updated_at = now()
 					 WHERE id = $1 AND archived_at IS NULL`, body.Id)
@@ -1615,6 +1649,9 @@ func cmdServe() *cobra.Command {
 				var body struct{ Id, Stage string }
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, err.Error(), 400)
+					return
+				}
+				if mitarbeiterBlocksWrite(w, r, p, body.Id) {
 					return
 				}
 
@@ -1666,6 +1703,9 @@ func cmdServe() *cobra.Command {
 				}
 				if body.DupID == "" || body.ZielID == "" {
 					http.Error(w, `dup_id und ziel_id sind erforderlich (z.B. {"dup_id":"st-alt","ziel_id":"st-ziel"})`, 400)
+					return
+				}
+				if mitarbeiterBlocksWrite(w, r, p, body.DupID) || mitarbeiterBlocksWrite(w, r, p, body.ZielID) {
 					return
 				}
 				rep, err := mergeInitiatives(r.Context(), p, body.DupID, body.ZielID, actorFrom(r), false, body.ForceProposeAck)
@@ -1725,8 +1765,15 @@ func cmdServe() *cobra.Command {
 				}
 
 				actor := actorFrom(r)
-				matchedID, skipped, err := captureEvent(r.Context(), p, body.Text, body.Firma, actor)
+				scopeFirma := primaryScopeFirma(r)
+				matchedID, skipped, err := captureEvent(r.Context(), p, body.Text, body.Firma, actor, scopeFirma)
 				if err != nil {
+					if errors.Is(err, errScopeDenied) {
+						http.Error(w, fmt.Sprintf(
+							"403 — capture ausserhalb deiner Firma %q abgelehnt: der Text trifft eine fremde Karte. Du darfst nur %s-Karten bespielen.",
+							scopeFirma, scopeFirma), http.StatusForbidden)
+						return
+					}
 					http.Error(w, err.Error(), 500)
 					return
 				}
@@ -1862,6 +1909,13 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 404)
 					return
 				}
+				// Firma-Scoping (mitarbeiter-zugang): Approve flippt status +
+				// committet und loest die Fabrik-Decomposition aus — deshalb hier
+				// gescoped wie jeder andere Schreibpfad. Initiative des Plans
+				// aufloesen und dem bestehenden Waechter uebergeben.
+				if planApproveScopeBlocks(w, r, p, it.ID) {
+					return
+				}
 				raw, err := os.ReadFile(it.Path)
 				if err != nil {
 					http.Error(w, err.Error(), 500)
@@ -1948,8 +2002,21 @@ func cmdServe() *cobra.Command {
 			http.HandleFunc("/api/plans", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Access-Control-Allow-Origin", "*")
+				// mk-user-management: Gescopte Mitarbeiter nur mit ?initiative=
+				// und nur fuer lesbare Karten (Firma oder assigned-to-me) —
+				// die parameterlose Voll-Liste bleibt Admin/Maschine.
+				if _, scoped := scopeFirmaFor(r); scoped {
+					init := r.URL.Query().Get("initiative")
+					if init == "" {
+						http.Error(w, "403 — Plan-Gesamtliste ist Admin-Flaeche; rufe /api/plans?initiative=<karten-id> fuer deine Karte auf.", http.StatusForbidden)
+						return
+					}
+					if mitarbeiterBlocksRead(w, r, p, init) {
+						return
+					}
+				}
 				q := `SELECT row_to_json(t) FROM (
-				        SELECT id, initiative_id, parent_id, slug, layer, status, title, repo, path, updated_at
+				        SELECT id, initiative_id, parent_id, slug, layer, status, title, repo, path, updated_at, assignee_email
 				        FROM portfolio.plan_item`
 				var rows pgxRows
 				var err error
@@ -2768,6 +2835,9 @@ func cmdServe() *cobra.Command {
 					http.Error(w, err.Error(), 400)
 					return
 				}
+				if mitarbeiterBlocksWrite(w, r, p, body.Id) {
+					return
+				}
 
 				tx, err := p.Begin(r.Context())
 				if err != nil {
@@ -2897,6 +2967,9 @@ func cmdServe() *cobra.Command {
 				var body struct{ Id string }
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, err.Error(), 400)
+					return
+				}
+				if mitarbeiterBlocksWrite(w, r, p, body.Id) {
 					return
 				}
 
@@ -3642,7 +3715,7 @@ func cmdServe() *cobra.Command {
 			fmt.Println("  GET  /api/flow-thresholds — Configurable flow thresholds")
 			fmt.Println("  POST /api/proposal/accept — Accept proposed card")
 			fmt.Println("  POST /api/proposal/reject — Reject/delete proposed card")
-			return http.ListenAndServe(":"+port, nil)
+			return http.ListenAndServe(":"+port, rosterGate(http.DefaultServeMux))
 		},
 	}
 	c.Flags().StringVar(&port, "port", "7770", "HTTP port")
@@ -3897,6 +3970,9 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, "id und gültige lane (plan, plan-deep, hack oder human) erforderlich", 400)
 			return
 		}
+		if mitarbeiterBlocksWrite(w, r, p, body.Id) {
+			return
+		}
 
 		// Fetch initiative metadata
 		var info struct {
@@ -3982,9 +4058,29 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 			// Execute vk-delegate to spawn workspace
 			exe := findVkDelegate()
 
-			prompt := body.Note
-			if prompt == "" {
-				prompt = info.Title
+			// Dispatch-Kontext-Briefing (E2E-Befund 2026-07-14): der Executor
+			// bekam bisher NUR den Karten-Titel — das PRD (die eigentliche
+			// Spezifikation) reiste nicht mit und der Agent musste raten.
+			// Jetzt: Titel + optionale Note + PRD-Inhalt (gekappt), damit der
+			// Workspace mit der echten Spec startet.
+			prompt := "Karte: " + body.Id + " — " + info.Title
+			if body.Note != "" {
+				prompt += "\n\nDispatch-Note: " + body.Note
+			}
+			var planPath string
+			_ = p.QueryRow(r.Context(),
+				`SELECT path FROM portfolio.plan_item
+				  WHERE initiative_id = $1
+				  ORDER BY (layer='prd') DESC, updated_at DESC LIMIT 1`, body.Id).Scan(&planPath)
+			if planPath != "" {
+				if prd, err := os.ReadFile(planPath); err == nil {
+					const prdCap = 24000
+					text := string(prd)
+					if len(text) > prdCap {
+						text = text[:prdCap] + "\n\n[... PRD gekappt bei 24k Zeichen — Volltext: " + planPath + "]"
+					}
+					prompt += "\n\n== PRD (" + planPath + ") ==\n" + text
+				}
 			}
 
 			cmd := exec.Command(exe,
@@ -4236,7 +4332,11 @@ func firmaFromPath(cwd string) string {
 	return ""
 }
 
-func captureEvent(ctx context.Context, p *pgxpool.Pool, text string, firma string, actor string) (string, bool, error) {
+// captureEvent haengt eine Inline-Aktion an die passende oder Catch-all-Karte.
+// scopeFirma != "" begrenzt einen Mitarbeiter auf seine Firma: das aufgeloeste
+// Ziel muss zur Firma gehoeren, sonst errScopeDenied (Handler -> 403); der
+// Catch-all-Fallback landet dann in der Firma des Mitarbeiters.
+func captureEvent(ctx context.Context, p *pgxpool.Pool, text string, firma string, actor string, scopeFirma string) (string, bool, error) {
 	// 1. Fetch all active non-archived initiative IDs
 	rows, err := p.Query(ctx, `SELECT id, firma FROM portfolio.initiative WHERE archived_at IS NULL`)
 	if err != nil {
@@ -4282,6 +4382,10 @@ func captureEvent(ctx context.Context, p *pgxpool.Pool, text string, firma strin
 	// 3. Fallback to catch-all if no specific initiative matched
 	if matchedID == "" {
 		targetFirma := normalizeFirma(firma)
+		// W4: Mitarbeiter-Catch-all landet immer in der eigenen Firma.
+		if scopeFirma != "" {
+			targetFirma = normalizeFirma(scopeFirma)
+		}
 		if targetFirma == "" {
 			targetFirma = normalizeFirma(guessFirmaFromCWD())
 		}
@@ -4310,6 +4414,18 @@ func captureEvent(ctx context.Context, p *pgxpool.Pool, text string, firma strin
 			} else {
 				return "", false, fmt.Errorf("keine passende Initiative gefunden und keine Catch-all-Initiative in der Datenbank vorhanden")
 			}
+		}
+	}
+
+	// W4: Ist der Actor ein gescopeter Mitarbeiter, muss das aufgeloeste Ziel
+	// zu seiner Firma gehoeren — sonst kein Schreiben (Handler -> 403).
+	if scopeFirma != "" {
+		inScope, err := initiativeInScope(ctx, p, matchedID, []string{scopeFirma})
+		if err != nil {
+			return "", false, err
+		}
+		if !inScope {
+			return "", false, errScopeDenied
 		}
 	}
 
@@ -4362,7 +4478,7 @@ func cmdCapture() *cobra.Command {
 			text := args[0]
 			p := connect()
 
-			matchedID, skipped, err := captureEvent(context.Background(), p, text, firma, "cli")
+			matchedID, skipped, err := captureEvent(context.Background(), p, text, firma, "cli", "")
 			if err != nil {
 				return err
 			}

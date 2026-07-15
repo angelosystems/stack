@@ -99,9 +99,25 @@ func applyStageProposal(ctx context.Context, p *pgxpool.Pool, initiativeID, targ
 	if !move {
 		return false, reason, nil
 	}
-	if _, err := p.Exec(ctx,
+	// Das moved-Event schreibt der DB-Trigger (notify_stage_change) beim
+	// Stage-UPDATE — ein direkter INSERT hier waere ein Doppel-Event. Was dem
+	// Trigger fehlte, war die Attribution (actor=current_user, also immer der
+	// DB-User): der transaktionslokale GUC portfolio.actor (portfolio-030)
+	// stempelt den echten Verursacher in die Drawer-Historie.
+	tx, err := p.Begin(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("Stage-Update %s: Tx beginnen: %w", initiativeID, err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT set_config('portfolio.actor', $1, true)`, actor); err != nil {
+		return false, "", fmt.Errorf("Stage-Update %s: actor setzen: %w", initiativeID, err)
+	}
+	if _, err := tx.Exec(ctx,
 		`UPDATE portfolio.initiative SET stage=$2 WHERE id=$1`, initiativeID, targetStage); err != nil {
 		return false, "", fmt.Errorf("Stage-Update %s → %s: %w", initiativeID, targetStage, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, "", fmt.Errorf("Stage-Update %s: Commit: %w", initiativeID, err)
 	}
 	return true, reason, nil
 }

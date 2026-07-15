@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -91,13 +89,11 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		initiatives = append(initiatives, init)
 	}
 
-	// 2. Fetch WIP counts per company in 'now'
-	wipCounts := make(map[string]int)
-	for _, init := range initiatives {
-		if init.Stage == "now" {
-			wipCounts[init.Firma]++
-		}
-	}
+	// 2. Evidenz gebatcht (WP1): EINE Link-Query + EINE Bead-Status-Query +
+	// EIN sqlite3-Lauf fuer alle Workspaces — statt per-Karte-Einzelqueries
+	// und ~190 sqlite-Spawns pro Sweep (werkstatt pids-Cap).
+	beadRefsByCard, beadStatusByRef := loadBeadEvidence(ctx, p)
+	allWorkspaces := loadAllWorkspaces()
 
 	// 2b. Echtes Stagnationsmaß: last_activity aus den relevanten Events, EINE
 	// Query (GROUP BY) statt N+1. init.updated_at ist unbrauchbar, weil
@@ -122,40 +118,13 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		laRows.Close()
 	}
 
-	var diagnosedCards []DiagnosedCard
+	diagnosedCount := 0
 
 	// 3. For each initiative, gather context and diagnose if flagged
 	for _, init := range initiatives {
-		// A. Get verlinked beads and their statuses
-		sp, err := solartownPool()
-		var beads []LinkedBead
-		if err == nil {
-			linkRows, err := p.Query(ctx, `
-				SELECT ref FROM portfolio.initiative_link 
-				WHERE initiative_id = $1 AND kind = 'bead'
-			`, init.ID)
-			if err == nil {
-				var refs []string
-				for linkRows.Next() {
-					var ref string
-					if err := linkRows.Scan(&ref); err == nil {
-						refs = append(refs, ref)
-					}
-				}
-				linkRows.Close()
-
-				for _, ref := range refs {
-					var status string
-					err := sp.QueryRow(ctx, "SELECT status FROM beads.issues WHERE id = $1 AND deleted_at IS NULL", ref).Scan(&status)
-					if err == nil {
-						beads = append(beads, LinkedBead{Ref: ref, Status: status})
-					} else {
-						// Fallback if not found or deleted
-						beads = append(beads, LinkedBead{Ref: ref, Status: "unknown"})
-					}
-				}
-			}
-		}
+		// A. Beads + Stati aus den Batch-Maps (Semantik wie vorher: nicht
+		// gefundener/geloeschter Bead = "unknown").
+		beads := beadsFor(init.ID, beadRefsByCard, beadStatusByRef)
 
 		// mk-pipeline-ampel WP2: Bead-Zaehler an der Karte spiegeln (Cache fuer
 		// die Summary-View — cross-DB geht dort nicht). Nur bei Delta schreiben.
@@ -172,31 +141,10 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				closed, len(beads), init.ID)
 		}
 
-		// B. Get active workspaces
-		var workspaces []LinkedWorkspace
-		vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
-		if _, err := os.Stat(vkDB); err == nil {
-			wsQuery := fmt.Sprintf(`
-				SELECT hex(w.id), COALESCE(ep.status, '')
-				FROM workspaces w
-				JOIN sessions s ON s.workspace_id = w.id
-				LEFT JOIN execution_processes ep ON ep.session_id = s.id
-				WHERE w.name LIKE '%%%s%%' AND w.archived = 0
-				ORDER BY ep.created_at DESC;
-			`, init.ID)
-			sqliteCmd := exec.Command("sqlite3", "-readonly", vkDB, wsQuery)
-			var wsOut bytes.Buffer
-			sqliteCmd.Stdout = &wsOut
-			if err := sqliteCmd.Run(); err == nil {
-				wsLines := strings.Split(strings.TrimSpace(wsOut.String()), "\n")
-				for _, line := range wsLines {
-					parts := strings.Split(line, "|")
-					if len(parts) >= 2 {
-						workspaces = append(workspaces, LinkedWorkspace{ID: parts[0], Status: parts[1]})
-					}
-				}
-			}
-		}
+		// B. Workspaces aus dem globalen Snapshot — Matching ueber Bead-Refs
+		// (Workspaces heissen sol-<bead-id>) + Karten-ID-Fallback. Der alte
+		// LIKE '%karten-id%'-Lookup traf praktisch nie (WP1: blindes Auge).
+		workspaces := workspacesFor(init.ID, beadRefsByCard[init.ID], allWorkspaces)
 
 		// idea/soon→now: Arbeits-Evidenz-Vollzug (ADR-0011 now-Eintritt:
 		// "Execution gestartet — erster Bead hooked/in_progress ODER Workspace
@@ -234,7 +182,6 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				}
 			}
 		}
-
 
 		// Check if lower layers (Reactor, vk-Sage) are engaged (MUST-FIX Nygard/Newman)
 		engaged, reason, err := isLowerLayerEngaged(ctx, p, init.ID, beads, workspaces)
@@ -281,12 +228,52 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			}
 		}
 
+		// now→watching: eigenstaendiger evidenzbasierter Vollzug (WP1: aus dem
+		// Flag-Zweig herausgezogen — er hing an der GLM-Diagnose-Schleife).
+		// idea/soon mit allen Beads closed ist bewusst KEIN Vollzugsfall:
+		// das meldet die Findings-Klasse promote-sackgasse (Verwalter-Urteil).
+		hasBeads := len(beads) > 0
+		allBeadsClosed := true
+		for _, b := range beads {
+			if b.Status != "closed" {
+				allBeadsClosed = false
+				break
+			}
+		}
+		if init.Stage == "now" && hasBeads && allBeadsClosed {
+			proposeOnly := init.Firma == "quantbot"
+			closedCount := 0
+			for _, b := range beads {
+				if b.Status == "closed" {
+					closedCount++
+				}
+			}
+			evidence := map[string]any{
+				"reason":       "promote-reif",
+				"beads_total":  len(beads),
+				"beads_closed": closedCount,
+			}
+			if dryRun {
+				verb := "vollziehen"
+				if proposeOnly {
+					verb = "vorschlagen (propose-only quantbot)"
+				}
+				fmt.Printf("[dry-run] würde %s (%s) now→watching %s (%d/%d beads closed)\n", init.ID, init.Title, verb, closedCount, len(beads))
+			} else if moved, reason, aerr := applyStageProposal(ctx, p, init.ID, "watching", evidence, "flow-manager", proposeOnly); aerr != nil {
+				fmt.Fprintf(os.Stderr, "  ❌ now→watching-Vollzug für %s: %v\n", init.ID, aerr)
+			} else if moved {
+				fmt.Printf("  ✓ %s (%s) now→watching vollzogen (%d/%d beads closed)\n", init.ID, init.Title, closedCount, len(beads))
+			} else if reason == "propose-only" {
+				fmt.Printf("  ⋯ %s (%s) now→watching VORGESCHLAGEN (propose-only quantbot, %d/%d beads closed)\n", init.ID, init.Title, closedCount, len(beads))
+			}
+		}
+
 		// C. Get recent events
 		eventRows, err := p.Query(ctx, `
-			SELECT kind, source_backend, COALESCE(from_stage, ''), COALESCE(to_stage, ''), COALESCE(payload::text, '{}'), COALESCE(actor, ''), at 
-			FROM portfolio.initiative_event 
-			WHERE initiative_id = $1 
-			ORDER BY at DESC 
+			SELECT kind, source_backend, COALESCE(from_stage, ''), COALESCE(to_stage, ''), COALESCE(payload::text, '{}'), COALESCE(actor, ''), at
+			FROM portfolio.initiative_event
+			WHERE initiative_id = $1
+			ORDER BY at DESC
 			LIMIT 5
 		`, init.ID)
 		var events []FlowEvent
@@ -300,30 +287,13 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			eventRows.Close()
 		}
 
-		// D. Evaluate flagging rules (L2)
+		// D. Evaluate flagging rules (L2). WIP-Ueberlauf ist KEIN Karten-Flag
+		// mehr (WP1): Ueberbuchung ist eine Firma-Bedingung, kein Karten-Defekt
+		// — das Cockpit zeigt sie (WIP-Pill + rote Spalte); frueher flaggte sie
+		// jede now-Karte der Firma einzeln und trieb ~50 GLM-Diagnosen pro
+		// Sweep. Promote-reif ist ebenfalls kein Flag mehr: now vollzieht oben,
+		// idea/soon meldet die View-Klasse promote-sackgasse.
 		var flaggedReasons []string
-
-		// WIP Limit Check — Limit aus der vereinheitlichten Quelle (getWIPLimits,
-		// inkl. code-factory=4 nach dem Rename; früher: Firma unbekannt ⇒ 0).
-		if init.Stage == "now" {
-			limit, _ := getWIPLimits(init.Firma)
-			if limit > 0 && wipCounts[init.Firma] > limit {
-				flaggedReasons = append(flaggedReasons, fmt.Sprintf("WIP-Überlauf: %d karten in NOW (limit %d)", wipCounts[init.Firma], limit))
-			}
-		}
-
-		// Promote-reif Check
-		hasBeads := len(beads) > 0
-		allBeadsClosed := true
-		for _, b := range beads {
-			if b.Status != "closed" {
-				allBeadsClosed = false
-				break
-			}
-		}
-		if init.Stage != "done" && hasBeads && allBeadsClosed {
-			flaggedReasons = append(flaggedReasons, "Promote-reif: alle verlinkten Beads sind closed")
-		}
 
 		// Stagnation Check
 		hasActiveWorkspace := false
@@ -359,83 +329,16 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			flaggedReasons = append(flaggedReasons, fmt.Sprintf("Backlog-Fäule: über %v tage unbewegt in IDEA", int(staleThreshold.Hours()/24)))
 		}
 
-		// If flagged, run GLM diagnosis!
+		// If flagged, run GLM diagnosis — aber NUR bei Flag-Delta (WP1):
+		// unveraenderte Flag-Saetze kosten weder einen GLM-Call noch ein Event.
+		// (Der Ist-Zustand diagnostizierte jede geflaggte Karte JEDE Runde neu
+		// — 1.038 GLM-Calls in 90 min, bis das Z.ai-Wochenlimit fiel. Der
+		// aeussere isLowerLayerEngaged-Skip oben hat engagierte Karten bereits
+		// per continue aussortiert — der fruehere Recheck hier war toter Code.)
 		if len(flaggedReasons) > 0 {
-			// Eskalations-Leiter: Reactor -> vk-Sage -> Manager
-			// Check if any of the lower layers are engaged for this initiative.
-
-			// 1. Check for active/waiting Workspace
-			hasActiveWorkspace := false
-			for _, ws := range workspaces {
-				if ws.Status == "running" || ws.Status == "waiting" {
-					hasActiveWorkspace = true
-					break
-				}
-			}
-
-			// 2. Check for open Reactor attempt
-			openReactor := hasOpenReactorAttempt(events)
-
-			// 3. Check if in vk-Sage's queue (active lease)
-			hasSageLease := false
-			for _, b := range beads {
-				var lockedUntil time.Time
-				err := p.QueryRow(ctx, `
-					SELECT locked_until FROM portfolio.sage_lease WHERE bead_id = $1
-				`, b.Ref).Scan(&lockedUntil)
-				if err == nil && lockedUntil.After(time.Now()) {
-					hasSageLease = true
-					break
-				}
-			}
-
-			if hasActiveWorkspace || openReactor || hasSageLease {
-				var engaged []string
-				if hasActiveWorkspace {
-					engaged = append(engaged, "active Workspace")
-				}
-				if openReactor {
-					engaged = append(engaged, "open Reactor attempt")
-				}
-				if hasSageLease {
-					engaged = append(engaged, "vk-Sage's queue/lease")
-				}
-				fmt.Printf("Skipping flagged card %s (%s) because lower layers are engaged: %s\n\n",
-					init.ID, init.Title, strings.Join(engaged, ", "))
-				continue
-			}
-
-			// now→watching: Promote-reif + stage=now + Beads>0 ⇒ evidenzbasierter
-			// Vollzug (WP1). Nur stage now (soon/idea bleiben Urteilsfall).
-			// quantbot: propose-only (Regel 3) — Vorschlag als Event, kein
-			// Auto-Move (WP1-Nachtrag). GLM/Digest laufen danach unverändert
-			// weiter.
-			if init.Stage == "now" && hasBeads && allBeadsClosed {
-				proposeOnly := init.Firma == "quantbot"
-				closedCount := 0
-				for _, b := range beads {
-					if b.Status == "closed" {
-						closedCount++
-					}
-				}
-				evidence := map[string]any{
-					"reason":       "promote-reif",
-					"beads_total":  len(beads),
-					"beads_closed": closedCount,
-				}
-				if dryRun {
-					verb := "vollziehen"
-					if proposeOnly {
-						verb = "vorschlagen (propose-only quantbot)"
-					}
-					fmt.Printf("[dry-run] würde %s (%s) now→watching %s (%d/%d beads closed)\n", init.ID, init.Title, verb, closedCount, len(beads))
-				} else if moved, reason, aerr := applyStageProposal(ctx, p, init.ID, "watching", evidence, "flow-manager", proposeOnly); aerr != nil {
-					fmt.Fprintf(os.Stderr, "  ❌ now→watching-Vollzug für %s: %v\n", init.ID, aerr)
-				} else if moved {
-					fmt.Printf("  ✓ %s (%s) now→watching vollzogen (%d/%d beads closed)\n", init.ID, init.Title, closedCount, len(beads))
-				} else if reason == "propose-only" {
-					fmt.Printf("  ⋯ %s (%s) now→watching VORGESCHLAGEN (propose-only quantbot, %d/%d beads closed)\n", init.ID, init.Title, closedCount, len(beads))
-				}
+			newHash := flagsHash(flaggedReasons)
+			if !flowActionChanged(lastFlowActionHash(ctx, p, init.ID), flaggedReasons) {
+				continue // Delta-Gate hält: bekannter Zustand, nichts zu tun
 			}
 
 			fmt.Printf("Diagnosing flagged card %s (%s, Stage: %s, Firma: %s)\n", init.ID, init.Title, init.Stage, init.Firma)
@@ -462,34 +365,29 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			}
 
 			if !dryRun {
-				// Event-Delta-Gate (WP1): flow_action nur schreiben, wenn sich der
-				// Flag-Satz seit dem jüngsten flow_action-Event geändert hat. Das
-				// killt den 30-s-Churn (413k Bestands-Events) an der Quelle;
-				// verworfene Alternative war ein reines Cron-Delete ohne Gate — das
-				// behebt die Quelle nicht und verwässert last_activity weiter.
-				newHash := flagsHash(flaggedReasons)
-				if flowActionChanged(lastFlowActionHash(ctx, p, init.ID), flaggedReasons) {
-					payloadMap := map[string]any{
-						"flagged_reasons": flaggedReasons,
-						"flags_hash":      newHash,
-						"category":        diagnosis.Category,
-						"confidence":      diagnosis.Confidence,
-						"reasoning":       diagnosis.Reasoning,
-						"proposed_action": diagnosis.ProposedAction,
-					}
-					payloadBytes, _ := json.Marshal(payloadMap)
+				// Flag-Delta ist oben bereits geprüft (ein Gate für Diagnose UND
+				// Event) — hier wird der neue Zustand nur noch persistiert. Das
+				// flow_action-Event speist auch die steward_findings-Klasse
+				// flow-diagnose (portfolio-029) — der Reflex/Verwalter-Kreislauf
+				// ist der Meldeweg (der tote gt-mail-Digest entfiel, WP1).
+				payloadMap := map[string]any{
+					"flagged_reasons": flaggedReasons,
+					"flags_hash":      newHash,
+					"category":        diagnosis.Category,
+					"confidence":      diagnosis.Confidence,
+					"reasoning":       diagnosis.Reasoning,
+					"proposed_action": diagnosis.ProposedAction,
+				}
+				payloadBytes, _ := json.Marshal(payloadMap)
 
-					_, err = p.Exec(ctx, `
-						INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
-						VALUES ($1, 'flow_action', 'flow_manager', $2, 'flow-manager', now())
-					`, init.ID, string(payloadBytes))
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "  ❌ Failed to write event for %s: %v\n", init.ID, err)
-					} else {
-						fmt.Printf("  ✓ Event 'flow_action' logged on %s\n", init.ID)
-					}
+				_, err = p.Exec(ctx, `
+					INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+					VALUES ($1, 'flow_action', 'flow_manager', $2, 'flow-manager', now())
+				`, init.ID, string(payloadBytes))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  ❌ Failed to write event for %s: %v\n", init.ID, err)
 				} else {
-					fmt.Printf("  · flow_action für %s unverändert — Delta-Gate hält\n", init.ID)
+					fmt.Printf("  ✓ Event 'flow_action' logged on %s\n", init.ID)
 				}
 
 				// If category is "Workspace-gescheitert" (Workspace-bedingte Stagnation),
@@ -518,10 +416,10 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 						}
 
 						handoverPayload := map[string]any{
-							"workspace_id":    targetWSID,
-							"action":          actionType,
-							"reason":          reasonMsg,
-							"source":          "manager",
+							"workspace_id": targetWSID,
+							"action":       actionType,
+							"reason":       reasonMsg,
+							"source":       "manager",
 						}
 						handoverBytes, err := json.Marshal(handoverPayload)
 						if err == nil {
@@ -543,12 +441,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 				}
 			}
 
-			// Accumulate for global digest report
-			diagnosedCards = append(diagnosedCards, DiagnosedCard{
-				Initiative:     init,
-				FlaggedReasons: flaggedReasons,
-				Diagnosis:      diagnosis,
-			})
+			diagnosedCount++
 			fmt.Println()
 		} else {
 			// Card is not flagged. Check if the previous flow_action event was flagged, and clear it.
@@ -590,170 +483,17 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		}
 	}
 
-	// 4. Generate and actively deliver Board-Review-Digest if we have diagnosed
-	// cards or Zuordnungs-Findings (Eingangs-Gate-PRD W5)
-	zuordnung := buildZuordnungSection(ctx, p)
-	if len(diagnosedCards) > 0 || zuordnung != "" {
-		digest := generateDigestReport(diagnosedCards) + zuordnung
-		fmt.Println("=== 📨 Delivering Board-Review-Digest ===")
-		if err := deliverDigest(digest, dryRun); err != nil {
-			fmt.Fprintf(os.Stderr, "  ❌ Failed to deliver digest: %v\n", err)
-		}
+	// 4. Kein Mail-Digest mehr (WP1): der gt-mail-Weg scheiterte im
+	// serve-Prozess IMMER ("not in a Gas Town workspace") und die
+	// Zuordnungs-Inhalte sind laengst eigene steward_findings-Klassen.
+	// Meldeweg der Diagnosen = flow_action-Events → View-Klasse
+	// flow-diagnose → board-pflege-Reflex → Verwalter.
+	if diagnosedCount > 0 {
+		fmt.Printf("=== %d Karte(n) neu/geaendert diagnostiziert (flow_action → steward_findings) ===\n", diagnosedCount)
 	} else {
-		fmt.Println("No flagged cards found. Board is in perfect shape. No digest to deliver.")
+		fmt.Println("Keine Flag-Deltas in dieser Runde.")
 	}
 
-	return nil
-}
-
-// buildZuordnungSection meldet Zuordnungs-Drift (ADR-0011): tier-lose Karten,
-// Karten mit triage:parent-check und echte Inbox-Reste. Leer = alles sauber.
-func buildZuordnungSection(ctx context.Context, p *pgxpool.Pool) string {
-	var sb strings.Builder
-
-	collect := func(header string, query string) int {
-		rows, err := p.Query(ctx, query)
-		if err != nil {
-			return 0
-		}
-		defer rows.Close()
-		var items []string
-		for rows.Next() {
-			var id, detail string
-			if rows.Scan(&id, &detail) == nil {
-				items = append(items, fmt.Sprintf("  - `%s` — %s", id, detail))
-			}
-		}
-		if len(items) == 0 {
-			return 0
-		}
-		sb.WriteString(fmt.Sprintf("%s (%d):\n", header, len(items)))
-		limit := len(items)
-		if limit > 10 {
-			limit = 10
-		}
-		for _, it := range items[:limit] {
-			sb.WriteString(it + "\n")
-		}
-		if len(items) > limit {
-			sb.WriteString(fmt.Sprintf("  - … %d weitere\n", len(items)-limit))
-		}
-		sb.WriteString("\n")
-		return len(items)
-	}
-
-	total := 0
-	total += collect("- **Karten ohne tier**",
-		`SELECT id, firma || ' / ' || stage FROM portfolio.initiative
-		  WHERE tier IS NULL AND archived_at IS NULL ORDER BY created_at DESC`)
-	total += collect("- **Karten ohne bewussten parent_plan** (`triage:parent-check`)",
-		`SELECT t.initiative_id, i.firma || ' / ' || i.stage
-		   FROM portfolio.initiative_tag t
-		   JOIN portfolio.initiative i ON i.id = t.initiative_id AND i.archived_at IS NULL
-		  WHERE t.kind='triage' AND t.value='parent-check' ORDER BY t.added_at DESC`)
-	total += collect("- **Karten ohne auflösbaren tier-Default** (`triage:tier-check`)",
-		`SELECT t.initiative_id, i.firma || ' / ' || i.stage
-		   FROM portfolio.initiative_tag t
-		   JOIN portfolio.initiative i ON i.id = t.initiative_id AND i.archived_at IS NULL
-		  WHERE t.kind='triage' AND t.value='tier-check' ORDER BY t.added_at DESC`)
-	total += collect("- **tier nur per Repo-Default gesetzt** (`tier-source=default` — Fehlklassifikations-Kandidaten)",
-		`SELECT t.initiative_id, i.firma || ' / ' || COALESCE(i.tier,'?')
-		   FROM portfolio.initiative_tag t
-		   JOIN portfolio.initiative i ON i.id = t.initiative_id AND i.archived_at IS NULL
-		  WHERE t.kind='tier-source' AND t.value='default' ORDER BY t.added_at DESC`)
-	total += collect("- **Inbox-Reste** (unlinked, nach Transienten-Filter)",
-		`SELECT id, COALESCE(firma,'?') || ' — ' || left(title, 80)
-		   FROM portfolio.unlinked_item ORDER BY discovered_at DESC`)
-
-	if total == 0 {
-		return ""
-	}
-	return "## 🧭 Zuordnung (ADR-0011)\n\n" + sb.String()
-}
-
-type DiagnosedCard struct {
-	Initiative     FlowInitiative
-	FlaggedReasons []string
-	Diagnosis      FlowDiagnosis
-}
-
-func generateDigestReport(cards []DiagnosedCard) string {
-	var sb strings.Builder
-	sb.WriteString("# 🩺 KANBAN FLOW-MANAGER BOARD REVIEW DIGEST\n\n")
-	sb.WriteString(fmt.Sprintf("Generated at: %s\n\n", time.Now().Format(time.RFC1123)))
-
-	// Aggregate metrics
-	stagnantCount := 0
-	promoteCount := 0
-	rotCount := 0
-	wipCount := 0
-
-	for _, c := range cards {
-		for _, r := range c.FlaggedReasons {
-			rLower := strings.ToLower(r)
-			if strings.Contains(rLower, "stagnation") {
-				stagnantCount++
-			} else if strings.Contains(rLower, "promote") {
-				promoteCount++
-			} else if strings.Contains(rLower, "fäule") || strings.Contains(rLower, "backlog") {
-				rotCount++
-			} else if strings.Contains(rLower, "wip") {
-				wipCount++
-			}
-		}
-	}
-
-	sb.WriteString("## 📊 Summary Metrics\n")
-	sb.WriteString(fmt.Sprintf("- **Total Flagged Cards:** %d\n", len(cards)))
-	sb.WriteString(fmt.Sprintf("- **Stagnant cards (Stagnation):** %d\n", stagnantCount))
-	sb.WriteString(fmt.Sprintf("- **Promotion-ready cards (Promote-reif):** %d\n", promoteCount))
-	sb.WriteString(fmt.Sprintf("- **Backlog Rot cards (Backlog-Fäule):** %d\n", rotCount))
-	sb.WriteString(fmt.Sprintf("- **WIP Overflows (WIP-Überlauf):** %d\n\n", wipCount))
-
-	sb.WriteString("## 🔍 Detailed Diagnoses\n\n")
-	for i, c := range cards {
-		sb.WriteString(fmt.Sprintf("### %d. %s (`%s`)\n", i+1, c.Initiative.Title, c.Initiative.ID))
-		sb.WriteString(fmt.Sprintf("- **Company:** %s\n", c.Initiative.Firma))
-		sb.WriteString(fmt.Sprintf("- **Current Stage:** %s\n", c.Initiative.Stage))
-		sb.WriteString("- **Flagged Reasons:**\n")
-		for _, r := range c.FlaggedReasons {
-			sb.WriteString(fmt.Sprintf("  - %s\n", r))
-		}
-		sb.WriteString(fmt.Sprintf("- **Diagnosis Category:** `%s` (Confidence: %s)\n", c.Diagnosis.Category, c.Diagnosis.Confidence))
-		sb.WriteString(fmt.Sprintf("- **Diagnostic Reasoning:** %s\n", c.Diagnosis.Reasoning))
-		if c.Diagnosis.ProposedAction != "" {
-			sb.WriteString(fmt.Sprintf("- **Proposed Action:** `%s`\n", c.Diagnosis.ProposedAction))
-		} else {
-			sb.WriteString("- **Proposed Action:** *(None - Low Confidence)*\n")
-		}
-		sb.WriteString("\n---\n\n")
-	}
-
-	return sb.String()
-}
-
-func deliverDigest(digest string, dryRun bool) error {
-	recipient := os.Getenv("PORTFOLIO_DIGEST_RECIPIENT")
-	if recipient == "" {
-		recipient = "mariobrain/"
-	}
-
-	subject := "🩺 Flow-Manager Board-Review Digest"
-	if dryRun {
-		subject = "[DRY-RUN] " + subject
-		fmt.Printf("Dry-run mode: would send digest mail to %s\n", recipient)
-		return nil
-	}
-
-	cmd := exec.Command("gt", "mail", "send", recipient, "-s", subject, "--stdin")
-	cmd.Stdin = strings.NewReader(digest)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to run gt mail send: %w, output: %s", err, out.String())
-	}
-	fmt.Printf("✓ Digest successfully sent to %s via gt mail\n", recipient)
 	return nil
 }
 

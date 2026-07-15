@@ -207,7 +207,7 @@ func TestCaptureAPIAndMCP(t *testing.T) {
 			return
 		}
 
-		matchedID, skipped, err := captureEvent(r.Context(), p, body.Text, body.Firma, "mcp-test")
+		matchedID, skipped, err := captureEvent(r.Context(), p, body.Text, body.Firma, "mcp-test", "")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
