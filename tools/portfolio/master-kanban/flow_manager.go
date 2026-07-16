@@ -94,6 +94,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 	// und ~190 sqlite-Spawns pro Sweep (werkstatt pids-Cap).
 	beadRefsByCard, beadStatusByRef := loadBeadEvidence(ctx, p)
 	allWorkspaces := loadAllWorkspaces()
+	eventsByCard := loadRecentEvents(ctx, p)
 
 	// 2b. Echtes Stagnationsmaß: last_activity aus den relevanten Events, EINE
 	// Query (GROUP BY) statt N+1. init.updated_at ist unbrauchbar, weil
@@ -188,8 +189,12 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			}
 		}
 
+		// Events aus dem Batch (WP3: eine LATERAL-Query pro Sweep statt einer
+		// Query pro Karte hier + einer zweiten in isLowerLayerEngaged).
+		events := eventsByCard[init.ID]
+
 		// Check if lower layers (Reactor, vk-Sage) are engaged (MUST-FIX Nygard/Newman)
-		engaged, reason, err := isLowerLayerEngaged(ctx, p, init.ID, beads, workspaces)
+		engaged, reason, err := isLowerLayerEngaged(ctx, p, init.ID, beads, workspaces, events)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  ❌ Error checking lower layer engagement for card %s: %v\n", init.ID, err)
 			continue
@@ -271,25 +276,6 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 			} else if reason == "propose-only" {
 				fmt.Printf("  ⋯ %s (%s) now→watching VORGESCHLAGEN (propose-only quantbot, %d/%d beads closed)\n", init.ID, init.Title, closedCount, len(beads))
 			}
-		}
-
-		// C. Get recent events
-		eventRows, err := p.Query(ctx, `
-			SELECT kind, source_backend, COALESCE(from_stage, ''), COALESCE(to_stage, ''), COALESCE(payload::text, '{}'), COALESCE(actor, ''), at
-			FROM portfolio.initiative_event
-			WHERE initiative_id = $1
-			ORDER BY at DESC
-			LIMIT 5
-		`, init.ID)
-		var events []FlowEvent
-		if err == nil {
-			for eventRows.Next() {
-				var ev FlowEvent
-				if err := eventRows.Scan(&ev.Kind, &ev.SourceBackend, &ev.FromStage, &ev.ToStage, &ev.Payload, &ev.Actor, &ev.At); err == nil {
-					events = append(events, ev)
-				}
-			}
-			eventRows.Close()
 		}
 
 		// D. Evaluate flagging rules (L2). WIP-Ueberlauf ist KEIN Karten-Flag
@@ -617,7 +603,9 @@ CRITICAL RULES:
 // - active/waiting workspaces (kein aktiver/wartender Workspace)
 // - open Reactor attempts or active/waiting beads in the queue (kein offener Reactor-Versuch, nicht in vk-Sages Queue)
 // - active vk-Sage lease/lock on any verlinked beads
-func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, beads []LinkedBead, workspaces []LinkedWorkspace) (bool, string, error) {
+// events kommen seit WP3 vom Aufrufer (Sweep-Batch loadRecentEvents) statt
+// aus einer eigenen per-Karte-Query.
+func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, beads []LinkedBead, workspaces []LinkedWorkspace, events []FlowEvent) (bool, string, error) {
 	// 1. Check for active or waiting workspaces (kein aktiver/wartender Workspace).
 	// A workspace is active or waiting if its status is running, queued, waiting, pending, or empty (freshly setup).
 	for _, ws := range workspaces {
@@ -651,26 +639,8 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 	}
 
 	// 4. Check for open Reactor attempt (kein offener Reactor-Versuch)
-	eventRows, err := p.Query(ctx, `
-		SELECT kind, source_backend, COALESCE(from_stage, ''), COALESCE(to_stage, ''), COALESCE(payload::text, '{}'), COALESCE(actor, ''), at 
-		FROM portfolio.initiative_event 
-		WHERE initiative_id = $1 
-		ORDER BY at DESC 
-		LIMIT 5
-	`, initID)
-	if err == nil {
-		var events []FlowEvent
-		for eventRows.Next() {
-			var ev FlowEvent
-			if err := eventRows.Scan(&ev.Kind, &ev.SourceBackend, &ev.FromStage, &ev.ToStage, &ev.Payload, &ev.Actor, &ev.At); err == nil {
-				events = append(events, ev)
-			}
-		}
-		eventRows.Close()
-
-		if hasOpenReactorAttempt(events) {
-			return true, "open Reactor attempt exists", nil
-		}
+	if hasOpenReactorAttempt(events) {
+		return true, "open Reactor attempt exists", nil
 	}
 
 	// 5. Check if in vk-Sage's queue (healing or retry in progress: heal_count > 0 and heal_count < 2)
@@ -681,7 +651,7 @@ func isLowerLayerEngaged(ctx context.Context, p *pgxpool.Pool, initID string, be
 		}
 
 		var hasActiveHeals bool
-		err = p.QueryRow(ctx, `
+		err := p.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM portfolio.sage_heal_count
 				WHERE bead_id = ANY($1) AND heal_count > 0 AND heal_count < 2

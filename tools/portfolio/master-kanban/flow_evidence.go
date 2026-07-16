@@ -121,6 +121,38 @@ func loadAllWorkspaces() []wsRow {
 	return all
 }
 
+// loadRecentEvents laedt die juengsten 5 Events JEDER unarchivierten Karte in
+// EINER LATERAL-Query (WP3) — vorher eine Query pro Karte im Sweep-Loop plus
+// eine zweite in isLowerLayerEngaged. Fehler ⇒ leere Map (Flags/Diagnose
+// arbeiten dann ohne Event-Kontext, wie bisher bei Query-Fehlern).
+func loadRecentEvents(ctx context.Context, p *pgxpool.Pool) map[string][]FlowEvent {
+	m := make(map[string][]FlowEvent)
+	rows, err := p.Query(ctx, `
+		SELECT i.id, e.kind, e.source_backend,
+		       COALESCE(e.from_stage,''), COALESCE(e.to_stage,''),
+		       COALESCE(e.payload::text,'{}'), COALESCE(e.actor,''), e.at
+		  FROM portfolio.initiative i
+		  JOIN LATERAL (
+		    SELECT ev.* FROM portfolio.initiative_event ev
+		     WHERE ev.initiative_id = i.id
+		     ORDER BY ev.at DESC LIMIT 5
+		  ) e ON true
+		 WHERE i.archived_at IS NULL
+	`)
+	if err != nil {
+		return m
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var ev FlowEvent
+		if rows.Scan(&id, &ev.Kind, &ev.SourceBackend, &ev.FromStage, &ev.ToStage, &ev.Payload, &ev.Actor, &ev.At) == nil {
+			m[id] = append(m[id], ev)
+		}
+	}
+	return m
+}
+
 // workspacesFor liefert die Workspaces einer Karte: Name enthaelt eine der
 // Bead-Refs der Karte ODER die Karten-ID (Fallback fuer slug-benannte
 // vk-delegate-Workspaces).

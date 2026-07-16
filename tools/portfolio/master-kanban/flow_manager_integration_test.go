@@ -55,7 +55,7 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 		{ID: "ws1", Status: "completed"},
 	}
 
-	engaged, reason, err := isLowerLayerEngaged(ctx, p, "init-1", beads, workspaces)
+	engaged, reason, err := isLowerLayerEngaged(ctx, p, "init-1", beads, workspaces, nil)
 	if err != nil {
 		t.Fatalf("unexpected error in Case 1: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 	workspacesActive := []LinkedWorkspace{
 		{ID: "ws1", Status: "running"},
 	}
-	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-1", beads, workspacesActive)
+	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-1", beads, workspacesActive, nil)
 	if err != nil {
 		t.Fatalf("unexpected error in Case 2: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 	beadsActive := []LinkedBead{
 		{Ref: testBeadID, Status: "open"},
 	}
-	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-1", beadsActive, workspaces)
+	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-1", beadsActive, workspaces, nil)
 	if err != nil {
 		t.Fatalf("unexpected error in Case 3: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 		t.Fatalf("failed to insert test lease for Case 4: %v", err)
 	}
 
-	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-1", beads, workspaces)
+	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-1", beads, workspaces, nil)
 	if err != nil {
 		t.Fatalf("unexpected error in Case 4: %v", err)
 	}
@@ -123,7 +123,8 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 		t.Fatalf("failed to insert test event for Case 5: %v", err)
 	}
 
-	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-fm-hierarchy-test", beads, workspaces)
+	recentEvents := []FlowEvent{{Kind: "dispatched", SourceBackend: "github", Payload: "{}", Actor: "test", At: time.Now().Add(-2 * time.Minute)}}
+	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-fm-hierarchy-test", beads, workspaces, recentEvents)
 	if err != nil {
 		t.Fatalf("unexpected error in Case 5: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestIsLowerLayerEngaged(t *testing.T) {
 		t.Fatalf("failed to insert into sage_heal_count for Case 6: %v", err)
 	}
 
-	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-fm-hierarchy-test", beads, workspaces)
+	engaged, reason, err = isLowerLayerEngaged(ctx, p, "init-fm-hierarchy-test", beads, workspaces, nil)
 	if err != nil {
 		t.Fatalf("unexpected error in Case 6: %v", err)
 	}

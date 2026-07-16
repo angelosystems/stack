@@ -127,6 +127,31 @@ func TestApplyStageProposal_Integration(t *testing.T) {
 	if movedEvents != 1 {
 		t.Errorf("moved-Events: got %d, want 1 (nur der vollzogene Move)", movedEvents)
 	}
+
+	// 5. WP2: Event trägt das ERGEBNIS (outcome) — und identische
+	// Vorschlags-Stände werden nicht wiederholt (Proposal-Delta-Gate):
+	// derselbe halt-Vorschlag nochmal ⇒ KEIN neues Event.
+	var lastOutcome string
+	if err := p.QueryRow(ctx, `SELECT COALESCE(payload->>'outcome','')
+		FROM portfolio.initiative_event
+		WHERE initiative_id=$1 AND kind='stage_proposed'
+		ORDER BY at DESC LIMIT 1`, id).Scan(&lastOutcome); err != nil {
+		t.Fatalf("outcome lesen: %v", err)
+	}
+	if lastOutcome != "halted" {
+		t.Errorf("outcome im Event: got %q, want halted", lastOutcome)
+	}
+	beforeRepeat := eventCount()
+	moved, reason, err = applyStageProposal(ctx, p, id, "done", nil, "flow-manager", false)
+	if err != nil {
+		t.Fatalf("apply halt repeat: %v", err)
+	}
+	if moved || reason != "halted" {
+		t.Errorf("halt repeat: moved=%v reason=%q, want false/halted", moved, reason)
+	}
+	if eventCount() != beforeRepeat {
+		t.Errorf("Proposal-Delta-Gate: Wiederholung schrieb ein Event (got %d, want %d)", eventCount(), beforeRepeat)
+	}
 }
 
 // TestApplyStageProposal_ProposeOnly_Integration beweist den WP1-Nachtrag:

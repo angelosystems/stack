@@ -41,9 +41,10 @@
         <span class="text-[11px] font-medium" :class="apiOk ? 'text-emerald-600' : 'text-slate-400'" x-text="apiOk ? '● live' : '○ offline'"></span>
       </h1>
 
-      <!-- View-Umschalter: Board | Pipeline | Backlog | Releases -->
+      <!-- View-Umschalter: Board | Pipeline | Backlog | Releases
+           (Mitarbeiter sehen nur Board — die anderen Views sind Admin-Flaeche) -->
       <nav class="flex gap-0.5 bg-slate-100 rounded-lg p-0.5 shrink-0">
-        <template x-for="v in views" :key="v.id">
+        <template x-for="v in visibleViews" :key="v.id">
           <button @click="switchView(v.id)"
             :class="view === v.id ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'"
             class="px-3 py-1 rounded-md text-sm font-medium transition-colors">
@@ -63,7 +64,7 @@
 
       <!-- Werkzeuge rechts -->
       <div class="ml-auto flex items-center gap-2 shrink-0 relative">
-        <button @click="toggleChat()" class="px-2.5 py-1 rounded-md text-sm font-medium whitespace-nowrap transition-colors"
+        <button x-show="!isMitarbeiter" @click="toggleChat()" class="px-2.5 py-1 rounded-md text-sm font-medium whitespace-nowrap transition-colors"
           :class="chatOpen ? 'bg-violet-100 text-violet-800' : 'text-violet-700 hover:bg-violet-50'"
           title="Chat mit dem Master-Kanban-Verwalter (Antwort = ein Agent-Run)">💬 Verwalter</button>
         <button x-show="me && me.is_admin" @click="openRoster()"
@@ -1055,6 +1056,7 @@ function liveKanban() {
       this.loadRollup();
       this.loadCapacity();
       this.loadDrift();
+      this.loadWipLimits();
       setInterval(() => { this.refresh(true); this.loadCapacity(); }, 30000);
       // Deep-Link: #<initiative-id> öffnet Karte + Baum
       const h = location.hash.slice(1);
@@ -1063,6 +1065,17 @@ function liveKanban() {
         if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-sky-400'); }
         await this.openDetail(h);
       });
+    },
+
+    // WIP-Limits vom Server (mk-flow-manager-haertung WP3): getWIPLimits ist
+    // die EINE Quelle (inkl. PORTFOLIO_WIP_NOW_*-Overrides) — die statischen
+    // wip-Werte in firmas sind nur noch Fallback, falls der Call scheitert.
+    async loadWipLimits() {
+      try {
+        const r = this.authGuard(await fetch(this.apiBase + '/api/wip-limits'));
+        const lim = await r.json();
+        this.firmas.forEach(f => { if (lim[f.id] && lim[f.id].now > 0) f.wip = lim[f.id].now; });
+      } catch (e) { /* Fallback: statische Werte bleiben */ }
     },
 
     // SSO-Ablauf erkennen. Authentik-Stack (seit 2026-07-12): API-Locations
@@ -1603,7 +1616,16 @@ function liveKanban() {
     firmaOrder: [],
     get orderedFirmas() {
       const idx = id => { const i = this.firmaOrder.indexOf(id); return i === -1 ? 100 : i; };
-      return [...this.firmas].sort((a, b) => idx(a.id) - idx(b.id));
+      const sorted = [...this.firmas].sort((a, b) => idx(a.id) - idx(b.id));
+      // Mitarbeiter: leere Fremd-Firmen-Lanes/Pills ausblenden — der Scope
+      // liefert ohnehin nur eigene + zugewiesene Karten, leere Pills verwirren.
+      if (this.isMitarbeiter) return sorted.filter(f => (this.counts[f.id] || 0) > 0);
+      return sorted;
+    },
+    // Rolle aus /api/whoami — steuert, welche Flaechen die UI zeigt.
+    get isMitarbeiter() { return !!(this.me && this.me.role === 'mitarbeiter'); },
+    get visibleViews() {
+      return this.isMitarbeiter ? this.views.filter(v => v.id === 'board') : this.views;
     },
     loadFirmaOrder() {
       try { const s = JSON.parse(localStorage.getItem('mk-firma-order') || '[]'); if (Array.isArray(s) && s.length) this.firmaOrder = s; } catch (e) {}

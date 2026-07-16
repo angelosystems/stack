@@ -48,10 +48,14 @@ func stageProposalDecision(halt, locked bool, currentStage, targetStage string) 
 }
 
 // applyStageProposal ist die gemeinsame Vollzugs-Funktion für evidenzbasierte
-// Stage-Übergänge. Sie schreibt IMMER ein stage_proposed-Event (Audit-Spur,
-// auch wenn nichts bewegt wird), prüft dann Not-Aus/Lock/Vorwärts-Regel und
-// führt bei Erlaubnis das UPDATE aus. Not-Aus (PORTFOLIO_STEWARD_HALT=1):
-// nur das Event, reason=halted, keine Bewegung.
+// Stage-Übergänge. Seit WP2 (mk-flow-manager-haertung) gilt: erst entscheiden
+// (und ggf. vollziehen), DANN das stage_proposed-Event mit dem ERGEBNIS
+// (outcome: moved/locked/halted/not-forward/propose-only) schreiben — die
+// alte Reihenfolge protokollierte nur "wollte", nie "durfte nicht".
+// Identische Vorschlags-Stände (ziel+outcome+evidenz) werden NICHT wiederholt
+// (Proposal-Delta-Gate): eine gepinnte Karte sammelte vorher ~326 identische
+// Events/Tag. Ändert sich irgendetwas (Lock gelöst, neue Evidenz), schreibt
+// der nächste Sweep wieder.
 //
 // proposeOnly=true (Regel 3, quantbot: Live-Geld-Nähe) macht den Vorschlag
 // sichtbar (Event mit propose_only:true + reason='propose-only (quantbot)'),
@@ -63,63 +67,93 @@ func stageProposalDecision(halt, locked bool, currentStage, targetStage string) 
 // teilt sich stageProposalDecision, schreibt das Event aber selbst über die
 // generische Ingest-Route (kein Doppel-Event).
 func applyStageProposal(ctx context.Context, p *pgxpool.Pool, initiativeID, targetStage string, evidence map[string]any, actor string, proposeOnly bool) (bool, string, error) {
-	// 1. stage_proposed-Event schreiben — die Audit-Spur entsteht auch dann,
-	//    wenn der Vollzug (Lock/Not-Aus/propose-only) unterbleibt.
-	payload := map[string]any{"stage": targetStage, "evidence": evidence, "actor": actor}
-	if proposeOnly {
-		payload["propose_only"] = true
-		payload["reason"] = "propose-only (quantbot)"
-	}
-	payloadBytes, _ := json.Marshal(payload)
-	if _, err := p.Exec(ctx, `
-		INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
-		VALUES ($1, 'stage_proposed', 'flow_manager', $2, $3, now())
-	`, initiativeID, string(payloadBytes), actor); err != nil {
-		return false, "", fmt.Errorf("stage_proposed-Event für %s schreiben: %w", initiativeID, err)
+	// 1. Entscheidung + ggf. Vollzug — das Ergebnis gehoert ins Event.
+	moved := false
+	outcome := "propose-only"
+	if !proposeOnly {
+		halt := os.Getenv("PORTFOLIO_STEWARD_HALT") == "1"
+		var currentStage string
+		var locked bool
+		if err := p.QueryRow(ctx,
+			`SELECT stage, COALESCE(stage_locked_by_human, false) FROM portfolio.initiative WHERE id=$1`,
+			initiativeID).Scan(&currentStage, &locked); err != nil {
+			return false, "", fmt.Errorf("Karte %s lesen: %w", initiativeID, err)
+		}
+		var move bool
+		move, outcome = stageProposalDecision(halt, locked, currentStage, targetStage)
+		if move {
+			// Das moved-Event schreibt der DB-Trigger (notify_stage_change) beim
+			// Stage-UPDATE — ein direkter INSERT hier waere ein Doppel-Event. Was
+			// dem Trigger fehlte, war die Attribution (actor=current_user, also
+			// immer der DB-User): der transaktionslokale GUC portfolio.actor
+			// (portfolio-030) stempelt den echten Verursacher in die Historie.
+			tx, err := p.Begin(ctx)
+			if err != nil {
+				return false, "", fmt.Errorf("Stage-Update %s: Tx beginnen: %w", initiativeID, err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, `SELECT set_config('portfolio.actor', $1, true)`, actor); err != nil {
+				return false, "", fmt.Errorf("Stage-Update %s: actor setzen: %w", initiativeID, err)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE portfolio.initiative SET stage=$2 WHERE id=$1`, initiativeID, targetStage); err != nil {
+				return false, "", fmt.Errorf("Stage-Update %s → %s: %w", initiativeID, targetStage, err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return false, "", fmt.Errorf("Stage-Update %s: Commit: %w", initiativeID, err)
+			}
+			moved = true
+		}
 	}
 
-	// propose-only (Regel 3): Vorschlag steht, kein Vollzug — nie ein UPDATE.
-	if proposeOnly {
-		return false, "propose-only", nil
+	// 2. stage_proposed mit Outcome schreiben — delta-gated ueber den
+	//    proposal_hash (Legacy-Events ohne Hash zaehlen als Aenderung).
+	hash := proposalHash(targetStage, outcome, evidence, proposeOnly)
+	if lastProposalHash(ctx, p, initiativeID) != hash {
+		payload := map[string]any{
+			"stage": targetStage, "evidence": evidence, "actor": actor,
+			"outcome": outcome, "proposal_hash": hash,
+		}
+		if proposeOnly {
+			payload["propose_only"] = true
+			payload["reason"] = "propose-only (quantbot)"
+		}
+		payloadBytes, _ := json.Marshal(payload)
+		if _, err := p.Exec(ctx, `
+			INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor, at)
+			VALUES ($1, 'stage_proposed', 'flow_manager', $2, $3, now())
+		`, initiativeID, string(payloadBytes), actor); err != nil {
+			if moved {
+				// Der Move IST vollzogen (Trigger-Event existiert) — nur loggen.
+				fmt.Fprintf(os.Stderr, "  ⚠ stage_proposed-Event für %s nicht geschrieben: %v\n", initiativeID, err)
+			} else {
+				return false, "", fmt.Errorf("stage_proposed-Event für %s schreiben: %w", initiativeID, err)
+			}
+		}
 	}
+	return moved, outcome, nil
+}
 
-	halt := os.Getenv("PORTFOLIO_STEWARD_HALT") == "1"
+// proposalHash bildet den Delta-Gate-Hash eines Vorschlags-Stands: gleiche
+// (ziel, outcome, evidenz, propose_only) ⇒ gleicher Hash ⇒ kein neues Event.
+// json.Marshal sortiert Map-Keys — die Evidenz-Kodierung ist deterministisch.
+func proposalHash(targetStage, outcome string, evidence map[string]any, proposeOnly bool) string {
+	evBytes, _ := json.Marshal(evidence)
+	sum := sha256.Sum256([]byte(targetStage + "\x00" + outcome + "\x00" + string(evBytes) + "\x00" + fmt.Sprintf("%v", proposeOnly)))
+	return hex.EncodeToString(sum[:])
+}
 
-	// 2. Aktuellen Stand + Lock lesen.
-	var currentStage string
-	var locked bool
-	if err := p.QueryRow(ctx,
-		`SELECT stage, COALESCE(stage_locked_by_human, false) FROM portfolio.initiative WHERE id=$1`,
-		initiativeID).Scan(&currentStage, &locked); err != nil {
-		return false, "", fmt.Errorf("Karte %s lesen: %w", initiativeID, err)
-	}
-
-	// 3. Entscheidung (reine Funktion) + ggf. Vollzug.
-	move, reason := stageProposalDecision(halt, locked, currentStage, targetStage)
-	if !move {
-		return false, reason, nil
-	}
-	// Das moved-Event schreibt der DB-Trigger (notify_stage_change) beim
-	// Stage-UPDATE — ein direkter INSERT hier waere ein Doppel-Event. Was dem
-	// Trigger fehlte, war die Attribution (actor=current_user, also immer der
-	// DB-User): der transaktionslokale GUC portfolio.actor (portfolio-030)
-	// stempelt den echten Verursacher in die Drawer-Historie.
-	tx, err := p.Begin(ctx)
-	if err != nil {
-		return false, "", fmt.Errorf("Stage-Update %s: Tx beginnen: %w", initiativeID, err)
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT set_config('portfolio.actor', $1, true)`, actor); err != nil {
-		return false, "", fmt.Errorf("Stage-Update %s: actor setzen: %w", initiativeID, err)
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE portfolio.initiative SET stage=$2 WHERE id=$1`, initiativeID, targetStage); err != nil {
-		return false, "", fmt.Errorf("Stage-Update %s → %s: %w", initiativeID, targetStage, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, "", fmt.Errorf("Stage-Update %s: Commit: %w", initiativeID, err)
-	}
-	return true, reason, nil
+// lastProposalHash liest den proposal_hash des juengsten stage_proposed-Events
+// einer Karte (leer bei Legacy-Events ohne Hash oder ohne Vorgaenger).
+func lastProposalHash(ctx context.Context, p *pgxpool.Pool, initiativeID string) string {
+	var h string
+	_ = p.QueryRow(ctx, `
+		SELECT COALESCE(payload->>'proposal_hash','')
+		  FROM portfolio.initiative_event
+		 WHERE initiative_id=$1 AND kind='stage_proposed'
+		 ORDER BY at DESC LIMIT 1
+	`, initiativeID).Scan(&h)
+	return h
 }
 
 // listenerShouldMove entscheidet OHNE DB, ob der /api/events-Listener (main.go)
