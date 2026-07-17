@@ -994,6 +994,9 @@ func cmdServe() *cobra.Command {
 					promoteReadyMap = make(map[string]bool)
 				}
 
+				// Spalten-Alter (KPI-Ask): Eintritt in die aktuelle Stage je Karte.
+				stageSince := loadStageSince(r.Context(), p)
+
 				var items []map[string]any
 				for rows.Next() {
 					var j []byte
@@ -1006,6 +1009,9 @@ func cmdServe() *cobra.Command {
 						pr := promoteReadyMap[initID]
 						item["promote_ready"] = pr
 						item["linkage_confidence_percentage"] = completenessPct
+						if t, ok := stageSince[initID]; ok {
+							item["stage_since"] = t.Format(time.RFC3339)
+						}
 
 						if pr && completenessPct < threshold {
 							item["confidence_caveat"] = fmt.Sprintf("Confidence-Vorbehalt: Niedrige Linkage-Abdeckung (%.1f%%).", completenessPct)
@@ -2785,6 +2791,9 @@ func cmdServe() *cobra.Command {
 			http.HandleFunc("/api/session/ask", handleSessionAsk(p))
 
 			// Expose WIP limits to cockpit UI (P2.3)
+			// Prozess-Gesundheit fuers Cockpit (KPI-Leiste, kpis.go).
+			http.HandleFunc("/api/kpis", handleKPIs(p))
+
 			http.HandleFunc("/api/wip-limits", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Access-Control-Allow-Origin", "*")

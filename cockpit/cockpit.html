@@ -140,6 +140,72 @@
 
   <main class="p-6 space-y-6">
 
+    <!-- ════ KPI-Leiste: ist der Fluss gesund? (nur Board-View) ════ -->
+    <template x-if="view==='board' && kpis">
+      <section class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2">
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Karten, die in den letzten 7 Tagen nach Fertig gewandert sind (moved→done); Balken = pro Tag, rechts = heute">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Durchsatz 7T</div>
+          <div class="flex items-end justify-between gap-2">
+            <span class="text-xl font-semibold leading-tight text-slate-900" x-text="kpis.durchsatz_7d"></span>
+            <div class="flex items-end gap-px h-6 mb-0.5 w-16">
+              <template x-for="(v,i) in kpis.durchsatz_spark" :key="i">
+                <div class="flex-1 rounded-sm" :class="i===6 ? 'bg-sky-500' : 'bg-sky-300'"
+                  :style="'height:' + Math.max(10, v / sparkMax() * 100) + '%'"
+                  :title="v + (i===6 ? ' heute' : ' vor ' + (6-i) + ' Tagen')"></div>
+              </template>
+            </div>
+          </div>
+          <div class="text-[10px] text-slate-400">Karten → Fertig</div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Karten in 'In Arbeit' und wie lange sie dort schon stehen — hohes Alter = der Fluss stockt">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">In Arbeit</div>
+          <div class="text-xl font-semibold leading-tight text-slate-900" x-text="kpis.now_count"></div>
+          <div class="text-[10px]" :class="kpis.now_alter_median_tage >= 14 ? 'text-red-600 font-medium' : (kpis.now_alter_median_tage >= 7 ? 'text-amber-700' : 'text-slate-400')"
+            x-text="'Ø ' + kpis.now_alter_median_tage + 'T · älteste ' + kpis.now_alter_max_tage + 'T'"></div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Anteil der Spalten-Moves (7 Tage), die der Flow-Manager evidenzbasiert vollzogen hat — misst, ob die Automation trägt">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Automatik</div>
+          <div class="text-xl font-semibold leading-tight text-slate-900"><span x-text="kpis.auto_moves_7d"></span><span class="text-sm text-slate-400 font-normal" x-text="'/' + kpis.moves_7d"></span></div>
+          <div class="text-[10px] text-slate-400">Moves 7T durch Flow-Manager</div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Nachweis-Karten ohne Delivery-Beleg — die kommen nie automatisch nach Fertig (Endlager-Gefahr)">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Nachweis-Stau</div>
+          <div class="text-xl font-semibold leading-tight" :class="kpis.nachweis_ohne_beleg >= 20 ? 'text-red-600' : (kpis.nachweis_ohne_beleg >= 10 ? 'text-amber-700' : 'text-slate-900')" x-text="kpis.nachweis_ohne_beleg"></div>
+          <div class="text-[10px] text-slate-400" x-text="'von ' + kpis.nachweis_gesamt + ' ohne Beleg'"></div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Approved PRDs ohne Lane — das Gate hält, bis du dispatchst (⏳-Chips auf den Karten)">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Lane wartet</div>
+          <div class="text-xl font-semibold leading-tight" :class="kpis.lane_pending >= 10 ? 'text-amber-700' : 'text-slate-900'" x-text="kpis.lane_pending"></div>
+          <div class="text-[10px] text-slate-400">auf deinen Dispatch</div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Offene steward_findings (Dubletten, tier-los, Sackgassen, Diagnosen …) — der Verwalter-Kreislauf arbeitet sie ab">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Befunde</div>
+          <div class="text-xl font-semibold leading-tight text-slate-900" x-text="kpis.findings"></div>
+          <div class="text-[10px] text-slate-400" x-text="kpis.gepinnt + ' Karten gepinnt'"></div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Firmen, deren 'In Arbeit'-Spalte über dem WIP-Limit liegt (Limits = /api/wip-limits)">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">WIP-Überlauf</div>
+          <div class="text-xl font-semibold leading-tight" :class="kpis.wip_ueber_limit_firmen > 0 ? 'text-amber-700' : 'text-slate-900'" x-text="kpis.wip_ueber_limit_firmen"></div>
+          <div class="text-[10px] text-slate-400">Firmen über Limit</div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Letzter Flow-Manager-Sweep — rot, wenn er länger als 5 Minuten schweigt oder Alarm meldet">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Puls</div>
+          <div class="text-xl font-semibold leading-tight flex items-center gap-1.5">
+            <span :class="(kpis.puls_status === 'healthy' && kpis.puls_alter_sekunden < 300) ? 'text-emerald-500' : 'text-red-500'">●</span>
+            <span class="text-sm font-medium text-slate-700" x-text="kpis.puls_alter_sekunden < 90 ? 'vor ' + kpis.puls_alter_sekunden + 's' : 'vor ' + Math.round(kpis.puls_alter_sekunden/60) + 'min'"></span>
+          </div>
+          <div class="text-[10px] text-slate-400">Flow-Manager-Sweep</div>
+        </div>
+      </section>
+    </template>
+
     <!-- ════ BOARD-VIEW (Portfolio, wie gehabt + Plan-Baum pro Karte) ════ -->
     <template x-if="view==='board'">
       <div class="space-y-6" x-init="$nextTick(() => initFirmaSort($el))">
@@ -216,6 +282,10 @@
                           📄<span class="ml-0.5" x-text="c.plan_count"></span>
                           <span x-text="expanded[c.id] ? '▾' : '▸'"></span>
                         </button>
+                        <!-- Spalten-Alter (KPI-Ask): Tage in der aktuellen Stage, faerbt sich bei Stau -->
+                        <span x-show="stageAgeDays(c) !== null && c.stage !== 'done'" class="text-[10px] px-1 rounded" :class="stageAgeCls(c)"
+                          :title="stageAgeDays(c) + ' Tage in dieser Spalte (amber/rot = länger als für diese Spalte gesund)'"
+                          x-text="stageAgeDays(c) + 'T'"></span>
                         <span class="activity-spark" :class="freshClass(c.last_activity)" :title="'last activity: ' + (c.last_activity || '—')"></span>
                       </div>
                       <!-- Plan-Hierarchie: Vision ▸ Phasen ▸ PRDs (P4.1/P4.2) -->
@@ -948,6 +1018,7 @@ function liveKanban() {
       { id: 'product',     label: 'Product', icon: '◆ ' },
     ],
     cards: [],
+    kpis: null,
     allPlans: [],
     plansCache: {},
     expanded: {},
@@ -1057,7 +1128,8 @@ function liveKanban() {
       this.loadCapacity();
       this.loadDrift();
       this.loadWipLimits();
-      setInterval(() => { this.refresh(true); this.loadCapacity(); }, 30000);
+      this.loadKpis();
+      setInterval(() => { this.refresh(true); this.loadCapacity(); this.loadKpis(); }, 30000);
       // Deep-Link: #<initiative-id> öffnet Karte + Baum
       const h = location.hash.slice(1);
       if (h) this.$nextTick(async () => {
@@ -1065,6 +1137,31 @@ function liveKanban() {
         if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-sky-400'); }
         await this.openDetail(h);
       });
+    },
+
+    // Prozess-Gesundheits-KPIs (Leiste ueberm Board + Spalten-Alter je Karte).
+    async loadKpis() {
+      try {
+        const r = this.authGuard(await fetch(this.apiBase + '/api/kpis'));
+        this.kpis = await r.json();
+      } catch (e) { /* Leiste bleibt einfach aus */ }
+    },
+    sparkMax() {
+      return Math.max(1, ...((this.kpis && this.kpis.durchsatz_spark) || [1]));
+    },
+    // Spalten-Alter: Tage seit Eintritt in die aktuelle Stage (stage_since).
+    stageAgeDays(c) {
+      if (!c.stage_since) return null;
+      return Math.floor((Date.now() - new Date(c.stage_since).getTime()) / 86400000);
+    },
+    // Gesundheits-Schwellen je Stage (amber/rot) — done altert nicht.
+    stageAgeCls(c) {
+      const d = this.stageAgeDays(c);
+      if (d === null) return 'text-slate-400';
+      const th = { idea: [30, 90], soon: [14, 30], now: [7, 14], watching: [7, 21] }[c.stage] || [14, 30];
+      if (d >= th[1]) return 'bg-red-50 text-red-600 font-semibold';
+      if (d >= th[0]) return 'bg-amber-50 text-amber-700 font-medium';
+      return 'text-slate-400';
     },
 
     // WIP-Limits vom Server (mk-flow-manager-haertung WP3): getWIPLimits ist
