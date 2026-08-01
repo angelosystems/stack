@@ -485,9 +485,12 @@ func (r *reactor) processOne(ctx context.Context, o outboxRow) bool {
 			r.logf("ok %s@%s: Smoke grün → live", o.Service, tag)
 		}
 		red = false
+		// WP-4c: terminaler Erfolgs-Emit nach town.events (best-effort).
+		r.emitDeployVerdikt(o.Service, o.GitSha, o.Environment, "live", "green", "")
 	} else {
 		r.logf("! %s@%s: Smoke rot → Rollback", o.Service, tag)
 		red = r.rollback(ctx, o, rec, prevSha, "Smoke rot")
+		r.emitDeployVerdikt(o.Service, o.GitSha, o.Environment, "rolled_back", "red", "Smoke rot")
 	}
 
 	// Journey-Shadow (WP3/D14): report-only, NACH dem Terminal-Übergang. Strukturell
