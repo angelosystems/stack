@@ -27,7 +27,7 @@
 
     <div class="text-xs text-slate-500 flex gap-3 items-center">
       <span id="ts">lade…</span>
-      <button onclick="load()" class="px-2 py-1 border border-slate-300 rounded hover:bg-slate-100">↻</button>
+      <button onclick="load();loadAbos(true)" class="px-2 py-1 border border-slate-300 rounded hover:bg-slate-100">↻</button>
     </div>
   </header>
 
@@ -84,15 +84,27 @@ function agentRow(name, n, hint){
 const ampelCls = a => a==='crit' ? 'text-red-600' : a==='warn' ? 'text-amber-600' : a==='ok' ? 'text-emerald-600' : 'text-slate-400';
 const ampelLbl = a => a==='crit' ? 'Limit' : a==='warn' ? 'warnung' : a==='ok' ? 'ok' : '—';
 const fmtReset = e => new Date(e*1000).toLocaleString('de',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+// Fenster-Labels wie in der Claude-Account-UI: Session (5h) · Woche (7d) · Woche <Modell>
+const winLbl = w => w==='5h' ? 'Session (5h)' : w==='7d' ? 'Woche (7d)' : w.startsWith('7d-') ? 'Woche '+w.slice(3) : w;
+const fmtIn = e => {
+  const min = Math.round((e*1000 - Date.now())/60000);
+  if (min <= 0) return 'jetzt';
+  if (min < 60) return `in ${min} min`;
+  const h = Math.floor(min/60);
+  return h >= 48 ? `in ${Math.round(h/24)} Tagen` : `in ${h}h ${min%60}m`;
+};
 
 function limitRow(l){
   const pct = Math.max(0, Math.min(100, l.percent));
-  return `<div class="flex items-center gap-2" title="Reset ${fmtReset(l.resets_at)}">
-    <span class="text-xs text-slate-500 w-16 shrink-0 truncate">${l.window}</span>
-    <div class="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
+  return `<div class="mb-2">
+    <div class="flex items-baseline justify-between">
+      <span class="text-xs text-slate-500">${winLbl(l.window)}</span>
+      <span class="text-xs tabular-nums ${txtColor(pct)}">${l.percent}%</span>
+    </div>
+    <div class="h-2 bg-slate-200 rounded-full overflow-hidden my-1">
       <div class="h-full ${barColor(pct)} rounded-full transition-all" style="width:${pct}%"></div>
     </div>
-    <span class="text-xs tabular-nums w-10 text-right ${txtColor(pct)}">${l.percent}%</span>
+    <div class="text-[11px] text-slate-400">Reset ${fmtIn(l.resets_at)} · ${fmtReset(l.resets_at)}</div>
   </div>`;
 }
 
@@ -119,8 +131,8 @@ function abosCard(r){
   </div>`;
   let body = '';
   if (r.limits && r.limits.length){
-    body = r.limits.map(limitRow).join('')
-      + `<div class="text-[11px] text-slate-400 mt-1">${r.limits.map(l=>l.window+' → '+fmtReset(l.resets_at)).join(' · ')}</div>`;
+    const winRank = w => w==='5h' ? 0 : w==='7d' ? 1 : 2;
+    body = [...r.limits].sort((a,b)=>winRank(a.window)-winRank(b.window)).map(limitRow).join('');
   } else if (r.spend){
     body = spendRows(r.spend);
   } else {
@@ -157,22 +169,28 @@ function svcTable(resources){
   return rows + '</tbody></table>';
 }
 
-async function load(){
-  let h={}, c={}, ab=null;
-  try { h = await (await fetch('host.json?'+Date.now())).json(); } catch(e){}
-  try { c = await (await fetch('/api/capacity?'+Date.now())).json(); } catch(e){}
-  try { ab = await (await fetch('/api/abos?'+Date.now())).json(); } catch(e){}
-
+// Abos separat laden: der Erstaufruf mit fresh=1 stößt eine On-Demand-Messung
+// an (kann ein paar Sekunden dauern) und darf RAM/CPU/Flotte nicht blockieren.
+async function loadAbos(fresh){
+  let ab=null;
+  if (fresh) document.getElementById('abos-age').textContent = 'messe Abo-Stand frisch…';
+  try { ab = await (await fetch('/api/abos?'+(fresh?'fresh=1&':'')+Date.now())).json(); } catch(e){}
   if (ab && ab.resources && ab.resources.length){
     document.getElementById('abos').innerHTML = ab.resources.map(abosCard).join('');
     document.getElementById('svc').innerHTML = svcTable(ab.resources);
     const claude = ab.resources.find(r => r.feed_age_s > 0);
     document.getElementById('abos-age').textContent = claude
-      ? `Abo-Stand: vor ${Math.max(0, Math.round(claude.feed_age_s/60))} min (claude-abo-watch, Timer 20 min)` : '';
+      ? `Abo-Stand: vor ${Math.max(0, Math.round(claude.feed_age_s/60))} min (Reload misst frisch, Timer alle 20 min)` : '';
   } else {
     document.getElementById('abos').innerHTML = '<span class="text-sm text-amber-600">/api/abos nicht erreichbar</span>';
     document.getElementById('svc').innerHTML = '<span class="text-sm text-amber-600">/api/abos nicht erreichbar</span>';
   }
+}
+
+async function load(){
+  let h={}, c={};
+  try { h = await (await fetch('host.json?'+Date.now())).json(); } catch(e){}
+  try { c = await (await fetch('/api/capacity?'+Date.now())).json(); } catch(e){}
 
   const dot = document.getElementById('livedot');
   if(h.ts){
@@ -227,7 +245,9 @@ async function load(){
   }
 }
 load();
+loadAbos(true);
 setInterval(load, 20000);
+setInterval(() => loadAbos(false), 60000);
 </script>
 </body>
 </html>

@@ -3,17 +3,24 @@
 # Pflege-Konvention: dieselbe Hand, die einen Token verdrahtet, trägt die Zeile nach
 # (analog Vault-Regel „neue Credentials in den Bucket“).
 #
-# kind: claude-abo (Feed = claude-abo-watch) | api-budget (Feed = oneapi-spend-guard)
-#       | plan-ohne-feed (nur Registry-Sicht)
+# kind: claude-abo | glm-abo (Feed = claude-abo-watch) | api-budget (Feed =
+#       oneapi-spend-guard) | plan-ohne-feed (nur Registry-Sicht)
 # feed: Account-Name im jeweiligen Collector; none = bewusst ohne Feed
 # verified: false = Binding aus Indizien, noch nicht bewiesen (Panel markiert das)
 resources:
   - id: claude1
     kind: claude-abo
     plan: max
-    feed: claude1
+    feed: claude1   # setup-token 1J, gemintet 2026-07-15 (claude1-token.env)
     bindings:
-      - {service: werkstatt CLI-Sessions, box: werkstatt}
+      - {service: VK-Fabrik temporär, box: werkstatt}
+  - id: claude3
+    kind: claude-abo
+    plan: max
+    feed: claude3
+    bindings:
+      - {service: werkstatt CLI-Sessions (interaktiv), box: werkstatt}
+      - {service: claude-rotate-Pool, box: werkstatt}
   - id: claude2
     kind: claude-abo
     plan: max
@@ -35,7 +42,7 @@ resources:
   - id: mario
     kind: claude-abo
     plan: max
-    feed: none   # Token fehlt — setup-token-Tanz nötig (accounts.conf hat die Anleitung)
+    feed: mario   # env-File liegt bereit, wartet auf setup-token vom Mac (Anleitung im File)
     bindings:
       - {service: Mario Desktop, box: mac}
   - id: gemini-ultra
@@ -44,10 +51,13 @@ resources:
     bindings:
       - {service: Solartown-Polecats via one-api, box: werkstatt}
   - id: glm-zai
-    kind: plan-ohne-feed
+    kind: glm-abo
+    plan: max   # level laut Z.ai-Quota-API (Upgrade von Pro), Account mario.gemuenden@
+    feed: glm
     bindings:
       - {service: Vibe Kanban (Standard-Executor), box: werkstatt}
       - {service: Solartown plan-reviewer + sage-advisor, box: werkstatt}
+      - {service: master-kanban Quick-Reviewer (ZAI_KEY), box: werkstatt}
   - id: deepseek
     kind: plan-ohne-feed
     bindings:

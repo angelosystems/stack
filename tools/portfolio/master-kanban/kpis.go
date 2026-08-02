@@ -153,6 +153,28 @@ func handleKPIs(p *pgxpool.Pool) http.HandlerFunc {
 			WHERE archived_at IS NULL AND stage_locked_by_human`).Scan(&locked)
 		out["gepinnt"] = locked
 
+		// 8b. Autopilot-Quote (Nordstern, mk-autopilot-stufe1 SC4): Anteil der
+		// in 28 Tagen abgeschlossenen Karten (archiviert ODER done), deren
+		// Weg OHNE menschlichen Move/Dispatch auskam. Menschlich = jeder
+		// moved/dispatched-Actor ausser flow-manager.
+		var abschluesse, autopilot int
+		_ = p.QueryRow(ctx, `
+			WITH fertig AS (
+			  SELECT id FROM portfolio.initiative
+			   WHERE (archived_at > now()-interval '28 days')
+			      OR (stage='done' AND archived_at IS NULL)
+			)
+			SELECT count(*),
+			       count(*) FILTER (WHERE NOT EXISTS (
+			         SELECT 1 FROM portfolio.initiative_event e
+			          WHERE e.initiative_id = fertig.id
+			            AND e.kind IN ('moved','dispatched')
+			            AND e.actor <> 'flow-manager'))
+			  FROM fertig
+		`).Scan(&abschluesse, &autopilot)
+		out["abschluesse_28d"] = abschluesse
+		out["autopilot_28d"] = autopilot
+
 		// 8. Puls: lebt der Flow-Manager-Sweep?
 		var pulsStatus string
 		var pulsAgeSec float64

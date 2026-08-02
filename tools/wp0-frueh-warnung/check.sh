@@ -15,11 +15,17 @@ MEM_AVAIL_GB=$((MEM_AVAIL_KB/1024/1024))
 SWAP_USED_KB=$(awk '/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print t-f}' /proc/meminfo)
 PSI_SOME=$(awk -F'avg10=' '/some/{split($2,a," ");print a[1]}' /proc/pressure/memory | cut -d. -f1)
 
-# NRestarts-Sturm: Summe über alle Services, Delta seit letztem Lauf
-RESTART_SUM=$(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}' | xargs -r -n1 systemctl show -p NRestarts --value 2>/dev/null | awk '{s+=$1}END{print s+0}')
+# NRestarts-Sturm: Summe über alle GELADENEN Services (nicht nur running),
+# Delta seit letztem Lauf. --all, weil ein Service, der zur Tick-Zeit gerade
+# in der RestartSec-Lücke steckt, sonst mit seinem ganzen aufgelaufenen
+# Zähler aus der Summe fällt und beim nächsten Tick als Phantom-Sturm
+# zurückkommt (07-20: vk-overseer ±3841, 07-22: session-sync ±66).
+RESTART_SUM=$(systemctl list-units --type=service --all --no-legend --plain 2>/dev/null | awk '{print $1}' | xargs -r -n1 systemctl show -p NRestarts --value 2>/dev/null | awk '{s+=$1}END{print s+0}')
 PREV_SUM=$(cat "$STATE_DIR/restart_sum" 2>/dev/null || echo "$RESTART_SUM")
 echo "$RESTART_SUM" > "$STATE_DIR/restart_sum"
 RESTART_DELTA=$((RESTART_SUM-PREV_SUM))
+# Zähler-Reset (Reboot, daemon-reexec, Unit entladen) ist kein Sturm
+[ "$RESTART_DELTA" -lt 0 ] && RESTART_DELTA=0
 
 # Slice-Druck: MemoryCurrent/MemoryHigh je überwachter Slice
 slice_pct() {

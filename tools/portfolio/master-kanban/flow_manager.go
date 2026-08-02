@@ -491,6 +491,10 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 		}
 	}
 
+	// 4a. Abfluss-Automatik (mk-abfluss-automatik WP1+WP2): die Archiv-Seite
+	// vollzieht autonom (Politik-Go Mario 2026-08-02).
+	runAbfluss(ctx, p, dryRun)
+
 	// 4. Kein Mail-Digest mehr (WP1): der gt-mail-Weg scheiterte im
 	// serve-Prozess IMMER ("not in a Gas Town workspace") und die
 	// Zuordnungs-Inhalte sind laengst eigene steward_findings-Klassen.

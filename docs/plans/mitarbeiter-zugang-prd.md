@@ -638,3 +638,98 @@ Modell (W3 Abo / GLM-Bugfix) + stack-Installations-Frage.
 
 Modelle im Cockpit-Picker: Claude→Fable/Opus/Sonnet · OpenCode→GLM-5.2/4.6/
 4.5 + DeepSeek. Keys/Token host-/container-seitig (bewusst, wie GLM/DeepSeek).
+
+## Bahn 3 — Direkter SSH-Zugang auf die Boxen (2026-07-30, Mario-Entscheid)
+
+Mario hat den Zuschnitt vom 07-14 bewusst geweitet: Angelo arbeitet **direkt
+per SSH von seinem Laptop** auf staging und prod, nicht nur im Browser-Cockpit.
+Der Session-Vorschlag (SSH nur in den crew-Container, damit Git-/MK-Broker und
+nft-Isolation greifen) wurde verworfen. Prod-Rechte ausdrücklich **inklusive
+Restart** der SA-App-Units. Modell bleibt der geteilte claude3-Token.
+
+**Key-Ausgabe:** wir erzeugen das Paar selbst (Mario-Entscheid), Angelo bekommt
+den privaten Teil per Bitwarden-Send. Vault:
+`/root/.secrets/stayawesome/angelo-calcagno-laptop{,.pub}`, Fingerprint
+`SHA256:F9xFncmgRTh5iaL8vk/C7mINGpe2az6QXm0LAusEdBU`.
+
+**Login-Name `calcagno`, NICHT `angelo`** — auf den transformierten Boxen ist
+`angelo` der uid-1-System-User (AngeloOS-Transform, siehe word-hygiene). Ein
+`useradd angelo` hätte dort kollidiert.
+
+### Prod LIVE + E2E bewiesen (stayawesome-prod, 178.105.36.33)
+
+- **User** `calcagno` (uid 1000) in **keiner** Zusatz-Gruppe — bewusst nicht
+  `sudo`, nicht `safin` (Secrets), **nicht `docker`** (dort läuft
+  `sa-pg-postgres-1`; docker-Gruppe wäre root-äquivalent).
+- **Wrapper** `/usr/local/bin/crew-ops-ctl` (root, 755) — list/status/start/
+  stop/restart/logs/follow. Neu gegenüber der Staging-Fassung: die Unit-
+  Allow-Liste steht **nicht im Script**, sondern in `/etc/crew-ops-units`
+  (root, 444) → identischer Wrapper auf jeder Box, Freigabe pro Box sichtbar.
+  Zustands-Ausgabe über `is-active`/`is-enabled` statt `list-units` (Patterns
+  ohne `.service`-Suffix liefern still nichts — erster Bau war deshalb leer).
+- **sudoers** `/etc/sudoers.d/50-crew-ops`: `NOPASSWD` nur auf den Wrapper.
+- **Freigegebene Units:** sa-fin, documenso, inbox-zero-web, inbox-zero-worker,
+  sa-local-sales, sa-f5-reply, sa-canary.
+- **E2E (mit Angelos Key von außen):** list/status/logs/restart der Units ok
+  (Restart-Beweis auf `sa-canary`, Prod-Vhost unangetastet) · `restart nginx`
+  und `status redis-activepieces` → verweigert + Audit-Zeile · rohes
+  `sudo systemctl` → „a password is required" · `/etc/stayawesome/fin.env`,
+  `/root`, `docker ps` → Permission denied · Journal-Tag `crew-ops` zeigt
+  jede Aktion **und** jede Verweigerung mit `actor=calcagno`.
+- **Nebenbefund gefixt:** vier reale `.env` lagen welt-lesbar
+  (`/opt/captable-native/.env`, `…/.next/standalone/.env`,
+  `/opt/activepieces-0862/.env.dev`, `…/.env.bak-pre-staging-20260710`) → 600.
+  Alle betroffenen Units laufen als root, danach weiter `active`.
+  `/etc/stayawesome/` war schon dicht.
+- **Kein claude-Token auf prod hinterlegt** (bewusst): auf prod liegt kein
+  Checkout, Prod-Zugang ist Ops-only. Ein Token in seinem Home wäre für ihn
+  lesbar — und es ist Marios geteiltes claude3-Konto.
+
+### Staging LIVE + E2E bewiesen (167.233.82.201) — Lockout aufgelöst
+
+**Recovery war KEINE libc-Operation.** Rescue wurde aktiviert, aber der Reboot
+(Mario, `hcloud server reboot|reset` bleibt classifier-geblockt) brachte die
+Box von Platte zurück und SSH lief sofort. Diagnose danach: libc ist
+**2.39-0ubuntu8.8** (neuer als das ubuntu8.7 des sa-prod-Incidents),
+`daemon`-Symbol vorhanden, `sshd -t` grün, `dpkg --verify libc6` clean. Heißt:
+ein apt-Lauf hatte die kanonische libc längst nachgelegt; tot war nur noch die
+`ssh`-Unit im `start-limit-hit`, und den räumt erst ein Reboot ab. **Lehre für
+WP-2/WP-4: bei „Port 22 refused" auf einer transformierten Box zuerst Reboot
+probieren — Rescue+chroot ist die zweite Stufe, nicht die erste.**
+**⚠ Diagnose-Falle:** `nm` ist auf staging nicht installiert; `nm -D … | grep
+daemon` mit unterdrücktem stderr sah wie „Symbol fehlt" aus. Symbol-Check ohne
+binutils: `python3 -c 'import ctypes; print(hasattr(ctypes.CDLL("libc.so.6"),
+"daemon"))'`.
+
+- **Auto-Updates hart aus** (WP-2-Done-Kriterium, sa-prod-Vorbild 1:1):
+  `20auto-upgrades` beide Werte `"0"`, `apt-daily.timer` +
+  `apt-daily-upgrade.timer` disabled+stopped. **Trade-off benannt:** auf dieser
+  Box hat genau der Auto-Update die heilende libc gebracht — Patches sind ab
+  jetzt Handarbeit.
+- **SSH-Alias** `staging`/`sa-staging` auf werkstatt nachgetragen (fehlte).
+- **User** `calcagno` (uid 1001, keine Zusatz-Gruppen), Wrapper + Allow-Liste
+  identisch zu prod; Units: sa-fin, documenso, inbox-zero-web,
+  inbox-zero-worker, sa-staging-canary, sa-staging-node-canary.
+- **`crew-ops` bleibt** (Container-Pfad, bewiesen weiter funktionsfähig nach
+  dem Wrapper-Tausch) — beide Identitäten in einem `50-crew-ops`, das alte
+  `sudoers.d/crew-ops` entfernt. calcagno = Laptop, crew-ops = Cockpit.
+- **E2E mit Angelos Key:** list/restart der Canary ok; nginx verweigert; rohes
+  `sudo systemctl` ohne Recht; `/opt/inbox-zero/.env`, `/root`, `docker ps`
+  (sa-pg + authentik-outpost!) alle denied. Keine welt-lesbare `.env` auf
+  staging.
+
+### Git auf den Boxen — entschieden: NICHT nötig
+
+Nach dem Recovery nachgesehen: auf staging existiert **kein einziger
+Git-Checkout** (`find /opt /root -name .git` leer), es ist wie prod ein
+Runtime-Server (Apps als Bundle, Docker für sa-pg + authentik-outpost). Damit
+entfällt der Grund für Git auf den Boxen — Angelo codet im crew-Container, wo
+der Token-Broker (`10.230.0.1:7791`) schon läuft. Der Minter-Entwurf (Konto
+`crew-mint` + `authorized_keys`-Forced-Command auf `crew-gh-mint-remote` +
+`git-credential-crew`) liegt versioniert unter `/opt/stack/tools/crew/`, falls
+je eine Box außerhalb der crew-Zone Git braucht. **Nicht gebaut** — damit auch
+kein `chattr -i /etc/shadow` auf werkstatt nötig (dort blockt das
+Immutable-Flag jedes `useradd`, notiert für den Fall).
+
+**Modell-Risiko benannt (Mario akzeptiert):** claude3 ist Marios interaktives
+CLI-Konto und Teil des claude-rotate-Pools → gemeinsames 5h-Limit.

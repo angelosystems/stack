@@ -552,19 +552,29 @@ func cmdList() *cobra.Command {
 }
 
 func cmdAdd() *cobra.Command {
-	var firma, stage, title, primary string
+	var firma, stage, title, primary, tier string
 	c := &cobra.Command{
 		Use:   "add <id>",
-		Short: "Initiative anlegen",
+		Short: "Initiative anlegen (tier-Pflicht ADR-0011: ohne --tier greift der Firma-Default + Tag tier-source=default)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
+			// mk-abfluss-automatik WP5: kein Anlegen ohne tier — 85% des
+			// Juli-Zustroms kam tier-los rein und verdoppelte die Findings.
+			tierSource := "explizit"
+			if tier == "" {
+				tier = firmaDefaultTier(firma)
+				tierSource = "default"
+			}
 			_, err := p.Exec(context.Background(),
-				`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend) VALUES ($1,$2,$3,$4,$5)`,
-				args[0], firma, stage, title, primary)
+				`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend, tier) VALUES ($1,$2,$3,$4,$5,$6)`,
+				args[0], firma, stage, title, primary, tier)
 			if err == nil {
+				_, _ = p.Exec(context.Background(),
+					`INSERT INTO portfolio.initiative_tag (initiative_id, kind, value) VALUES ($1,'tier-source',$2) ON CONFLICT DO NOTHING`,
+					args[0], tierSource)
 				logEvent(p, args[0], "created", "master", "", stage, fmt.Sprintf(`{"title":"%s"}`, escape(title)))
-				fmt.Println("✓ created", args[0])
+				fmt.Printf("✓ created %s (tier=%s, %s)\n", args[0], tier, tierSource)
 			}
 			return err
 		},
@@ -573,9 +583,19 @@ func cmdAdd() *cobra.Command {
 	c.Flags().StringVar(&stage, "stage", "idea", "initial stage")
 	c.Flags().StringVar(&title, "title", "", "title (required)")
 	c.Flags().StringVar(&primary, "primary-backend", "plan_file", "primary backend")
+	c.Flags().StringVar(&tier, "tier", "", "tier (code-fabrik|library|product); leer = Firma-Default")
 	c.MarkFlagRequired("firma")
 	c.MarkFlagRequired("title")
 	return c
+}
+
+// firmaDefaultTier — dieselbe Konvention wie planfile-adapter + tier-los-
+// Detektor (portfolio-025): code-factory baut Fabrik, alles andere Produkt.
+func firmaDefaultTier(firma string) string {
+	if firma == "code-factory" {
+		return "code-fabrik"
+	}
+	return "product"
 }
 
 func cmdMove() *cobra.Command {
@@ -585,7 +605,7 @@ func cmdMove() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p := connect()
-			tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, args[0], args[1])
+			tag, err := p.Exec(context.Background(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = ($2 <> 'done') WHERE id = $1`, args[0], args[1])
 			if err != nil {
 				return err
 			}
@@ -1617,7 +1637,7 @@ func cmdServe() *cobra.Command {
 					http.Error(w, "POST only", 405)
 					return
 				}
-				var body struct{ Id string }
+				var body struct{ Id, Note string }
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, err.Error(), 400)
 					return
@@ -1636,9 +1656,12 @@ func cmdServe() *cobra.Command {
 					http.Error(w, "initiative nicht gefunden (oder schon archiviert): "+body.Id, 404)
 					return
 				}
+				// note wandert ins Event-Payload (vorher still verworfen —
+				// Kehraus-Befund 2026-08-02).
+				notePayload, _ := json.Marshal(map[string]any{"note": body.Note})
 				_, _ = p.Exec(r.Context(),
-					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, actor)
-					 VALUES ($1,'archived','master',$2)`, body.Id, actorFrom(r))
+					`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+					 VALUES ($1,'archived','master',$2,$3)`, body.Id, notePayload, actorFrom(r))
 				fmt.Fprintln(w, `{"ok":true}`)
 			})
 			http.HandleFunc("/api/move", func(w http.ResponseWriter, r *http.Request) {
@@ -1668,7 +1691,7 @@ func cmdServe() *cobra.Command {
 					return
 				}
 
-				_, err = p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = true WHERE id = $1`, body.Id, body.Stage)
+				_, err = p.Exec(r.Context(), `UPDATE portfolio.initiative SET stage = $2, stage_locked_by_human = ($2 <> 'done') WHERE id = $1`, body.Id, body.Stage)
 				if err != nil {
 					http.Error(w, err.Error(), 500)
 					return

@@ -165,10 +165,10 @@
             x-text="'Ø ' + kpis.now_alter_median_tage + 'T · älteste ' + kpis.now_alter_max_tage + 'T'"></div>
         </div>
 
-        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Anteil der Spalten-Moves (7 Tage), die der Flow-Manager evidenzbasiert vollzogen hat — misst, ob die Automation trägt">
-          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Automatik</div>
-          <div class="text-xl font-semibold leading-tight text-slate-900"><span x-text="kpis.auto_moves_7d"></span><span class="text-sm text-slate-400 font-normal" x-text="'/' + kpis.moves_7d"></span></div>
-          <div class="text-[10px] text-slate-400">Moves 7T durch Flow-Manager</div>
+        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="NORDSTERN: Anteil der in 28 Tagen abgeschlossenen Karten, die OHNE menschlichen Move/Dispatch durchliefen — jede Automatik-Stufe muss diese Zahl heben. Klein: Flow-Manager-Moves der letzten 7 Tage.">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Autopilot</div>
+          <div class="text-xl font-semibold leading-tight text-slate-900"><span x-text="kpis.abschluesse_28d ? Math.round(kpis.autopilot_28d / kpis.abschluesse_28d * 100) + '%' : '—'"></span></div>
+          <div class="text-[10px] text-slate-400" x-text="kpis.autopilot_28d + '/' + kpis.abschluesse_28d + ' Abschlüsse · ' + kpis.auto_moves_7d + ' Auto-Moves 7T'"></div>
         </div>
 
         <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Nachweis-Karten ohne Delivery-Beleg — die kommen nie automatisch nach Fertig (Endlager-Gefahr)">
