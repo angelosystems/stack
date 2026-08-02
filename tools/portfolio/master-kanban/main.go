@@ -332,7 +332,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", os.Getenv("PORTFOLIO_DSN"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings(), cmdParent(), cmdSessionClaim(), cmdBeadAttribute(), cmdMorgenbrief())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings(), cmdParent(), cmdSessionClaim(), cmdBeadAttribute(), cmdMorgenbrief(), cmdPortfolioBericht())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

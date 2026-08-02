@@ -99,8 +99,20 @@ func buildMorgenbrief(ctx context.Context, p *pgxpool.Pool) (string, bool) {
 	if aeltesteTage >= 14 {
 		fmt.Fprintf(&sb, "🐌 Älteste In-Arbeit: %s (%dT) — weiter/parken/kippen?\n", aeltesteTitel, aeltesteTage)
 	}
+	// W4: an den ersten drei Monats-Tagen den frischen Portfolio-Bericht
+	// verlinken (Datei entsteht via mk-portfolio-bericht.timer am 1.).
+	if time.Now().Day() <= 3 {
+		if bp := berichtPath(time.Now()); fileExists(bp) {
+			fmt.Fprintf(&sb, "📊 Portfolio-Bericht %s liegt im Vault: %s\n", time.Now().Format("2006-01"), bp)
+		}
+	}
 	fmt.Fprintf(&sb, "\n🩺 %d offene Befunde gesamt · Board: master.stayawesome.app", marioFindings)
 	return sb.String(), false
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // sendeWhatsApp schickt an die lokale Bridge (wp0-Konvention). Fehler sind
