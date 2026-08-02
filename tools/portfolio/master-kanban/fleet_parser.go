@@ -53,56 +53,74 @@ func (r DiscoveryRule) Matches(process, executor, model string) bool {
 	return true
 }
 
-// ExtractPEM extracts process, executor, and model from a file's first few lines and its path
-func ExtractPEM(filePath string, lines []string) (process, executor, model string) {
+// ExtractPEM classifies process + executor from the file PATH only.
+// Content-substring matching was removed (PRD fabrik-token-usage-tracking WP-1 #5):
+// first-20-lines content scan caused transcripts that mention "flows"/"gemini"/
+// "opencode" in their text to be mis-bucketed. The model is supplied separately
+// by FirstModel (which scans the whole file, not just the head).
+func ExtractPEM(filePath string) (process, executor string) {
 	process = "claude"
 	executor = ""
-	model = ""
 
 	pathLower := strings.ToLower(filePath)
-	contentConcat := strings.ToLower(strings.Join(lines, " "))
 
-	// Scan lines for model name
-	for _, line := range lines {
-		if strings.Contains(line, `"model":`) {
-			idx := strings.Index(line, `"model":`)
-			if idx != -1 {
-				sub := line[idx:]
-				quoteIdx := strings.Index(sub, `"model"`)
-				if quoteIdx != -1 {
-					sub2 := sub[quoteIdx+7:]
-					colonIdx := strings.Index(sub2, ":")
-					if colonIdx != -1 {
-						sub3 := sub2[colonIdx+1:]
-						firstQuote := strings.Index(sub3, `"`)
-						if firstQuote != -1 {
-							secondQuote := strings.Index(sub3[firstQuote+1:], `"`)
-							if secondQuote != -1 {
-								model = strings.ToLower(sub3[firstQuote+1 : firstQuote+1+secondQuote])
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if strings.Contains(pathLower, "paperclip-worker") || strings.Contains(contentConcat, "paperclip-worker") {
+	if strings.Contains(pathLower, "paperclip-worker") {
 		process = "paperclip-worker"
-	} else if strings.Contains(pathLower, "gemini") || strings.Contains(contentConcat, "gemini") {
+	} else if strings.Contains(pathLower, "gemini") {
 		process = "gemini"
-	} else if strings.Contains(pathLower, "opencode") || strings.Contains(contentConcat, "opencode") {
+	} else if strings.Contains(pathLower, "opencode") {
 		process = "opencode"
-	} else if strings.Contains(pathLower, "claude") || strings.Contains(contentConcat, "claude") {
+	} else if strings.Contains(pathLower, "claude") {
 		process = "claude"
 	}
 
-	if strings.Contains(pathLower, "flows") || strings.Contains(contentConcat, "flows") {
+	if strings.Contains(pathLower, "flows") {
 		executor = "flows"
 	}
 
-	return process, executor, model
+	return process, executor
+}
+
+// FirstModel returns the first `message.model` value found in the transcript
+// file, lowercased. Falls back to the first top-level `model` field (rare —
+// init/system lines) if no message.model exists. Scans the whole file — the
+// model field can appear after line 20 in GLM transcripts (PRD WP-1 #5).
+// Empty string if no model field at all.
+func FirstModel(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024*10)
+
+	topLevelFallback := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, `"model"`) {
+			continue
+		}
+		var probe struct {
+			Model   *string `json:"model"`
+			Message *struct {
+				Model *string `json:"model"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &probe); err != nil {
+			continue
+		}
+		// message.model is authoritative — it's the model the API was called with.
+		if probe.Message != nil && probe.Message.Model != nil && *probe.Message.Model != "" {
+			return strings.ToLower(*probe.Message.Model)
+		}
+		if topLevelFallback == "" && probe.Model != nil && *probe.Model != "" {
+			topLevelFallback = strings.ToLower(*probe.Model)
+		}
+	}
+	return topLevelFallback
 }
 
 // ParseTranscriptFile reads a transcript file from storedOffset, parses its lines, and extracts metrics
@@ -110,30 +128,21 @@ func ParseTranscriptFile(path string, storedOffset int64, rules []DiscoveryRule)
 	matchedBucket = "other"
 	newOffset = storedOffset
 
-	f, err := os.Open(path)
-	if err != nil {
-		return usage, storedOffset, matchedBucket, err
-	}
-	defer f.Close()
-
-	// Read first 20 lines for classification
-	var firstLines []string
-	scannerClassify := bufio.NewScanner(f)
-	for scannerClassify.Scan() {
-		firstLines = append(firstLines, scannerClassify.Text())
-		if len(firstLines) >= 20 {
-			break
-		}
-	}
-
-	// Classify
-	proc, exec, md := ExtractPEM(path, firstLines)
+	// Classify from path + first model occurrence (whole-file scan, not just head).
+	proc, exec := ExtractPEM(path)
+	md := FirstModel(path)
 	for _, rule := range rules {
 		if rule.Matches(proc, exec, md) {
 			matchedBucket = rule.ProviderBucket
 			break
 		}
 	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return usage, storedOffset, matchedBucket, err
+	}
+	defer f.Close()
 
 	// Seek back to storedOffset to parse increment
 	_, err = f.Seek(storedOffset, io.SeekStart)
@@ -145,10 +154,17 @@ func ParseTranscriptFile(path string, storedOffset int64, rules []DiscoveryRule)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024*10) // up to 10MB line buffer
 
-	bytesRead := int64(0)
+	// Track bytes consumed via the actual file position, not a +1-per-line
+	// heuristic — files without a trailing newline would otherwise cause
+	// newOffset to overshoot info.Size() by 1 byte, which then triggers the
+	// `info.Size() < storedOffset` reset on every subsequent run and re-parses
+	// the whole file (idempotency leak).
+	startOffset, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return usage, storedOffset, matchedBucket, err
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
-		bytesRead += int64(len(scanner.Bytes())) + 1
 
 		// 1. Tokens usage
 		if strings.Contains(line, `"usage":`) {
@@ -223,7 +239,14 @@ func ParseTranscriptFile(path string, storedOffset int64, rules []DiscoveryRule)
 		}
 	}
 
-	newOffset = storedOffset + bytesRead
+	newOffset = storedOffset
+	if pos, err := f.Seek(0, io.SeekCurrent); err == nil {
+		newOffset = pos
+	} else {
+		// Fallback: should not happen for a regular file, but keep the parser
+		// forward-only rather than failing the whole walk.
+		newOffset = startOffset + int64(len(scanner.Bytes()))
+	}
 	return usage, newOffset, matchedBucket, nil
 }
 
@@ -275,96 +298,129 @@ func cmdFleetParse() *cobra.Command {
 			}
 			oRows.Close()
 
-			// 3. Walk through all .jsonl files in /root/.claude/projects/
-			baseDir := "/root/.claude/projects"
-			if _, err := os.Stat(baseDir); os.IsNotExist(err) {
-				fmt.Printf("Base directory %s does not exist. Skipping parsing.\n", baseDir)
-				return nil
-			}
+			// 3. Walk roots. Env-configurable: FLEET_PARSE_ROOTS is a
+			// colon-separated list of dirs to walk for *.jsonl. Defaults to
+			// /root/.claude/projects (Claude-CLI transcripts of all
+			// dispatchers — VK polecats, refinery, etc.). The Review-Hot-Pool
+			// root (/opt/quantbot/.claude-workbench/.claude/projects) is
+			// included in the default list when present. Subagent transcripts
+			// (…/subagents/*.jsonl) are picked up by the recursive walk.
+			roots := parseWalkRoots()
 
-			err = filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return nil // Skip inaccessible files or folders
-				}
-				if info.IsDir() || filepath.Ext(path) != ".jsonl" {
-					return nil
-				}
-
-				storedOffset := offsets[path]
-				if info.Size() < storedOffset {
-					storedOffset = 0 // Reset offset if file shrunk
+			for _, baseDir := range roots {
+				if _, err := os.Stat(baseDir); err != nil {
+					fmt.Fprintf(os.Stderr, "Walk root %s inaccessible: %v — skipping.\n", baseDir, err)
+					continue
 				}
 
-				usage, newOffset, bucket, err := ParseTranscriptFile(path, storedOffset, rules)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error parsing file %s: %v\n", path, err)
-					return nil
-				}
+				walkErr := filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
+					if err != nil {
+						return nil // Skip inaccessible files or folders
+					}
+					if info.IsDir() || filepath.Ext(path) != ".jsonl" {
+						return nil
+					}
 
-				// Only update database if we actually read any new content
-				if newOffset > storedOffset {
-					// 1. If any new metrics were parsed, update provider_usage and agent_usage
-					if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheReadTokens > 0 || usage.OverloadEvents > 0 || usage.RequestCount > 0 {
-						_, err = p.Exec(ctx, `
-							INSERT INTO portfolio.provider_usage (provider_bucket, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, overload_events, request_count, updated_at)
-							VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-							ON CONFLICT (provider_bucket) DO UPDATE SET
-								input_tokens = portfolio.provider_usage.input_tokens + EXCLUDED.input_tokens,
-								output_tokens = portfolio.provider_usage.output_tokens + EXCLUDED.output_tokens,
-								cache_creation_tokens = portfolio.provider_usage.cache_creation_tokens + EXCLUDED.cache_creation_tokens,
-								cache_read_tokens = portfolio.provider_usage.cache_read_tokens + EXCLUDED.cache_read_tokens,
-								overload_events = portfolio.provider_usage.overload_events + EXCLUDED.overload_events,
-								request_count = portfolio.provider_usage.request_count + EXCLUDED.request_count,
-								updated_at = now()
-						`, bucket, usage.InputTokens, usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, usage.OverloadEvents, usage.RequestCount)
-						if err != nil {
-							fmt.Fprintf(os.Stderr, "Error updating provider_usage for bucket %s: %v\n", bucket, err)
-						}
+					storedOffset := offsets[path]
+					if info.Size() < storedOffset {
+						storedOffset = 0 // Reset offset if file shrunk
+					}
 
-						agentName := ExtractAgentName(path)
-						if agentName != "" {
+					usage, newOffset, bucket, err := ParseTranscriptFile(path, storedOffset, rules)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error parsing file %s: %v\n", path, err)
+						return nil
+					}
+
+					// Only update database if we actually read any new content
+					if newOffset > storedOffset {
+						// 1. If any new metrics were parsed, update provider_usage and agent_usage
+						if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheReadTokens > 0 || usage.OverloadEvents > 0 || usage.RequestCount > 0 {
 							_, err = p.Exec(ctx, `
-								INSERT INTO portfolio.agent_usage (agent_name, provider_bucket, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, overload_events, request_count, updated_at)
-								VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
-								ON CONFLICT (agent_name, provider_bucket) DO UPDATE SET
-									input_tokens = portfolio.agent_usage.input_tokens + EXCLUDED.input_tokens,
-									output_tokens = portfolio.agent_usage.output_tokens + EXCLUDED.output_tokens,
-									cache_creation_tokens = portfolio.agent_usage.cache_creation_tokens + EXCLUDED.cache_creation_tokens,
-									cache_read_tokens = portfolio.agent_usage.cache_read_tokens + EXCLUDED.cache_read_tokens,
-									overload_events = portfolio.agent_usage.overload_events + EXCLUDED.overload_events,
-									request_count = portfolio.agent_usage.request_count + EXCLUDED.request_count,
+								INSERT INTO portfolio.provider_usage (provider_bucket, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, overload_events, request_count, updated_at)
+								VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+								ON CONFLICT (provider_bucket) DO UPDATE SET
+									input_tokens = portfolio.provider_usage.input_tokens + EXCLUDED.input_tokens,
+									output_tokens = portfolio.provider_usage.output_tokens + EXCLUDED.output_tokens,
+									cache_creation_tokens = portfolio.provider_usage.cache_creation_tokens + EXCLUDED.cache_creation_tokens,
+									cache_read_tokens = portfolio.provider_usage.cache_read_tokens + EXCLUDED.cache_read_tokens,
+									overload_events = portfolio.provider_usage.overload_events + EXCLUDED.overload_events,
+									request_count = portfolio.provider_usage.request_count + EXCLUDED.request_count,
 									updated_at = now()
-							`, agentName, bucket, usage.InputTokens, usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, usage.OverloadEvents, usage.RequestCount)
+							`, bucket, usage.InputTokens, usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, usage.OverloadEvents, usage.RequestCount)
 							if err != nil {
-								fmt.Fprintf(os.Stderr, "Error updating agent_usage for agent %s, bucket %s: %v\n", agentName, bucket, err)
+								fmt.Fprintf(os.Stderr, "Error updating provider_usage for bucket %s: %v\n", bucket, err)
+							}
+
+							agentName := ExtractAgentName(path)
+							if agentName != "" {
+								_, err = p.Exec(ctx, `
+									INSERT INTO portfolio.agent_usage (agent_name, provider_bucket, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, overload_events, request_count, updated_at)
+									VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+									ON CONFLICT (agent_name, provider_bucket) DO UPDATE SET
+										input_tokens = portfolio.agent_usage.input_tokens + EXCLUDED.input_tokens,
+										output_tokens = portfolio.agent_usage.output_tokens + EXCLUDED.output_tokens,
+										cache_creation_tokens = portfolio.agent_usage.cache_creation_tokens + EXCLUDED.cache_creation_tokens,
+										cache_read_tokens = portfolio.agent_usage.cache_read_tokens + EXCLUDED.cache_read_tokens,
+										overload_events = portfolio.agent_usage.overload_events + EXCLUDED.overload_events,
+										request_count = portfolio.agent_usage.request_count + EXCLUDED.request_count,
+										updated_at = now()
+								`, agentName, bucket, usage.InputTokens, usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, usage.OverloadEvents, usage.RequestCount)
+								if err != nil {
+									fmt.Fprintf(os.Stderr, "Error updating agent_usage for agent %s, bucket %s: %v\n", agentName, bucket, err)
+								}
 							}
 						}
+
+						// 2. Update offset
+						_, err = p.Exec(ctx, `
+							INSERT INTO portfolio.transcript_offset (file_path, last_offset, updated_at)
+							VALUES ($1, $2, now())
+							ON CONFLICT (file_path) DO UPDATE SET
+								last_offset = EXCLUDED.last_offset,
+								updated_at = now()
+						`, path, newOffset)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "Error updating offset for %s: %v\n", path, err)
+						}
 					}
 
-					// 2. Update offset
-					_, err = p.Exec(ctx, `
-						INSERT INTO portfolio.transcript_offset (file_path, last_offset, updated_at)
-						VALUES ($1, $2, now())
-						ON CONFLICT (file_path) DO UPDATE SET
-							last_offset = EXCLUDED.last_offset,
-							updated_at = now()
-					`, path, newOffset)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error updating offset for %s: %v\n", path, err)
-					}
+					return nil
+				})
+				if walkErr != nil {
+					return fmt.Errorf("failed to process transcript files under %s: %w", baseDir, walkErr)
 				}
-
-				return nil
-			})
-
-			if err != nil {
-				return fmt.Errorf("failed to process transcript files: %w", err)
 			}
 
 			fmt.Println("Incremental transcript parsing completed successfully.")
 			return nil
 		},
 	}
+}
+
+// parseWalkRoots resolves the list of directories to walk for *.jsonl
+// transcripts. Priority: $FLEET_PARSE_ROOTS (colon-separated), else the default
+// list — /root/.claude/projects always, plus the Review-Hot-Pool
+// /opt/quantbot/.claude-workbench/.claude/projects when it exists.
+func parseWalkRoots() []string {
+	if env := strings.TrimSpace(os.Getenv("FLEET_PARSE_ROOTS")); env != "" {
+		roots := []string{}
+		for _, r := range strings.Split(env, ":") {
+			if r = strings.TrimSpace(r); r != "" {
+				roots = append(roots, r)
+			}
+		}
+		if len(roots) > 0 {
+			return roots
+		}
+	}
+
+	roots := []string{"/root/.claude/projects"}
+	reviewHotPool := "/opt/quantbot/.claude-workbench/.claude/projects"
+	if _, err := os.Stat(reviewHotPool); err == nil {
+		roots = append(roots, reviewHotPool)
+	}
+	return roots
 }
 
 // ExtractAgentName extracts the agent/workspace name from the file path

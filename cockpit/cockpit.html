@@ -177,11 +177,13 @@
           <div class="text-[10px] text-slate-400" x-text="'von ' + kpis.nachweis_gesamt + ' ohne Beleg'"></div>
         </div>
 
-        <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Approved PRDs ohne Lane — das Gate hält, bis du dispatchst (⏳-Chips auf den Karten)">
-          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Lane wartet</div>
+        <button @click="toggleLaneInbox()" class="bg-white rounded-lg shadow-sm px-3 py-2 text-left hover:ring-2 hover:ring-amber-300 transition-shadow"
+          :class="laneInboxOpen ? 'ring-2 ring-amber-400' : ''"
+          title="Approved PRDs ohne Lane — klick öffnet die Lane-Inbox mit Empfehlungen und Batch-Approve">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Lane wartet <span class="text-amber-600">▾</span></div>
           <div class="text-xl font-semibold leading-tight" :class="kpis.lane_pending >= 10 ? 'text-amber-700' : 'text-slate-900'" x-text="kpis.lane_pending"></div>
           <div class="text-[10px] text-slate-400">auf deinen Dispatch</div>
-        </div>
+        </button>
 
         <div class="bg-white rounded-lg shadow-sm px-3 py-2" title="Offene steward_findings (Dubletten, tier-los, Sackgassen, Diagnosen …) — der Verwalter-Kreislauf arbeitet sie ab">
           <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Befunde</div>
@@ -203,6 +205,44 @@
           </div>
           <div class="text-[10px] text-slate-400">Flow-Manager-Sweep</div>
         </div>
+      </section>
+    </template>
+
+    <!-- ════ LANE-INBOX (Autopilot W2): wartende Dispatches, Batch-Approve ════ -->
+    <template x-if="view==='board' && laneInboxOpen">
+      <section class="bg-white rounded-xl shadow-sm overflow-hidden">
+        <header class="px-5 py-2.5 border-b border-slate-200 bg-amber-50 flex items-center gap-3">
+          <h2 class="font-semibold text-sm text-amber-900">⏳ Lane-Inbox — <span x-text="laneInbox.length"></span> Entscheidungen</h2>
+          <button @click="laneInboxAdoptAll()" class="text-xs px-2.5 py-1 rounded-md bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 font-medium">Empfehlungen übernehmen</button>
+          <span class="text-[11px] text-slate-500">Dispatch bleibt dein Klick (lane-source=mario) — hier nur gebündelt. Skip = Karte bleibt im Gate.</span>
+          <button @click="laneInboxDispatch()" :disabled="laneInboxChosenCount() === 0 || laneInboxBusy"
+            class="ml-auto text-xs px-3 py-1.5 rounded-md font-semibold"
+            :class="laneInboxChosenCount() > 0 && !laneInboxBusy ? 'bg-amber-600 text-white hover:bg-amber-700' : 'bg-slate-100 text-slate-400'">
+            <span x-show="!laneInboxBusy" x-text="laneInboxChosenCount() + ' Dispatches ausführen'"></span>
+            <span x-show="laneInboxBusy" x-text="'läuft… ' + laneInboxProgress"></span>
+          </button>
+        </header>
+        <ul class="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+          <template x-for="it in laneInbox" :key="it.id">
+            <li class="px-5 py-2 flex items-center gap-3 text-sm hover:bg-slate-50">
+              <button @click="openDetail(it.id)" class="text-[10px] text-sky-700 font-mono hover:underline w-44 shrink-0 text-left truncate" x-text="it.id"></button>
+              <span class="flex-1 truncate" :title="it.begruendung" x-text="it.titel"></span>
+              <span class="text-[10px] px-1 rounded shrink-0" :class="it.confidence === 'hoch' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-500'"
+                :title="it.begruendung" x-text="it.confidence === 'hoch' ? 'Verwalter' : 'Heuristik'"></span>
+              <div class="flex gap-1 shrink-0">
+                <template x-for="opt in [['plan','⛏ Solartown'],['hack','⚡ VK'],['human','✋ Mensch'],['','Skip']]" :key="opt[0]">
+                  <button @click="laneInboxChoice[it.id] = opt[0]"
+                    class="text-[11px] px-2 py-0.5 rounded-full border transition-colors"
+                    :class="(laneInboxChoice[it.id] || '') === opt[0] && (opt[0] !== '' || laneInboxChoice[it.id] === '')
+                      ? (opt[0] === '' ? 'bg-slate-200 border-slate-300 text-slate-600' : 'bg-slate-800 border-slate-800 text-white')
+                      : 'bg-white border-slate-200 text-slate-500 hover:border-slate-400'"
+                    x-text="opt[1]"></button>
+                </template>
+              </div>
+            </li>
+          </template>
+        </ul>
+        <div x-show="!laneInbox.length" class="px-5 py-6 text-center text-sm text-slate-400">Keine wartenden Lane-Entscheidungen 🎉</div>
       </section>
     </template>
 
@@ -1019,6 +1059,11 @@ function liveKanban() {
     ],
     cards: [],
     kpis: null,
+    laneInbox: [],
+    laneInboxOpen: false,
+    laneInboxChoice: {},
+    laneInboxBusy: false,
+    laneInboxProgress: '',
     allPlans: [],
     plansCache: {},
     expanded: {},
@@ -1137,6 +1182,46 @@ function liveKanban() {
         if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-sky-400'); }
         await this.openDetail(h);
       });
+    },
+
+    // Lane-Inbox (Autopilot W2): wartende Dispatches mit Empfehlung,
+    // Batch-Approve feuert das BESTEHENDE /api/dispatch je Karte.
+    async toggleLaneInbox() {
+      this.laneInboxOpen = !this.laneInboxOpen;
+      if (this.laneInboxOpen) await this.loadLaneInbox();
+    },
+    async loadLaneInbox() {
+      try {
+        const r = this.authGuard(await fetch(this.apiBase + '/api/lane-inbox'));
+        const d = await r.json();
+        this.laneInbox = d.items || [];
+        this.laneInboxChoice = {};
+      } catch (e) { this.laneInbox = []; }
+    },
+    laneInboxAdoptAll() {
+      this.laneInbox.forEach(it => { if (it.empfehlung) this.laneInboxChoice[it.id] = it.empfehlung; });
+    },
+    laneInboxChosenCount() {
+      return Object.values(this.laneInboxChoice).filter(v => v).length;
+    },
+    async laneInboxDispatch() {
+      if (this.laneInboxBusy) return;
+      const total = this.laneInboxChosenCount();
+      if (!total || !confirm(total + ' Karten jetzt dispatchen? (setzt lane-Tag, öffnet ggf. das Decomposer-Gate)')) return;
+      this.laneInboxBusy = true;
+      let n = 0;
+      for (const [id, lane] of Object.entries(this.laneInboxChoice)) {
+        if (!lane) continue;
+        n++; this.laneInboxProgress = n + '/' + total;
+        try {
+          await fetch(this.apiBase + '/api/dispatch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, lane, note: 'Lane-Inbox Batch-Approve' }),
+          });
+        } catch (e) { /* Einzelfehler stoppen den Batch nicht; Karte bleibt in der Inbox */ }
+      }
+      this.laneInboxBusy = false; this.laneInboxProgress = '';
+      await this.loadLaneInbox(); this.loadKpis(); this.refresh(true);
     },
 
     // Prozess-Gesundheits-KPIs (Leiste ueberm Board + Spalten-Alter je Karte).

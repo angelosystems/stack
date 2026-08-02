@@ -120,6 +120,7 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 	}
 
 	diagnosedCount := 0
+	deliveryReportsWritten := 0 // Autopilot W1: Sturmbremse pro Sweep
 	// GLM-Sicherungsschalter: scheitert eine Diagnose an Limit/Erreichbarkeit,
 	// versucht dieser Sweep KEINE weitere (Flag-Delta bleibt offen, der
 	// naechste Sweep probiert wieder EINE). Ohne den Schalter rannten ~49
@@ -234,6 +235,14 @@ func runFlowManager(p *pgxpool.Pool, dryRun bool) error {
 					continue
 				} else if reason == "propose-only" {
 					fmt.Printf("  ⋯ %s (%s) watching→done VORGESCHLAGEN (propose-only quantbot, %s)\n", init.ID, init.Title, why)
+				}
+			} else if !move && why == "keine-delivery-evidenz" && deliveryReportsWritten < deliverySchreiberMaxPerSweep {
+				// Autopilot W1: Beleg fehlt, aber vielleicht ist die Arbeit
+				// laengst beweisbar fertig — dann schreibt sich der Report
+				// selbst (Datei + lokaler Commit + Link), und der NAECHSTE
+				// Sweep vollzieht den Move ueber den normalen Pfad oben.
+				if maybeWriteDeliveryReport(ctx, p, init, beads, dryRun) {
+					deliveryReportsWritten++
 				}
 			}
 		}

@@ -332,7 +332,7 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", os.Getenv("PORTFOLIO_DSN"), "Postgres DSN")
 
-	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings(), cmdParent(), cmdSessionClaim())
+	root.AddCommand(cmdList(), cmdAdd(), cmdMove(), cmdLink(), cmdSync(), cmdServe(), cmdEvents(), cmdResolveRepo(), cmdDeployReactor(), cmdDeployReactorOutbox(), cmdCapture(), cmdMcp(), cmdSage(), cmdFleetParse(), cmdParseTranscripts(), cmdSteward(), cmdFlowManager(), cmdVersion(), cmdDeployments(), cmdEventsTend(), cmdMerge(), cmdStewardFindings(), cmdParent(), cmdSessionClaim(), cmdBeadAttribute())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -2793,6 +2793,8 @@ func cmdServe() *cobra.Command {
 			// Expose WIP limits to cockpit UI (P2.3)
 			// Prozess-Gesundheit fuers Cockpit (KPI-Leiste, kpis.go).
 			http.HandleFunc("/api/kpis", handleKPIs(p))
+			// Lane-Inbox: wartende Dispatch-Entscheidungen + Empfehlung (W2, lane_inbox.go).
+			http.HandleFunc("/api/lane-inbox", handleLaneInbox(p))
 
 			http.HandleFunc("/api/wip-limits", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
