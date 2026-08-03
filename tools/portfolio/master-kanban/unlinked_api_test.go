@@ -36,7 +36,7 @@ func TestUnlinkedAPI_Endpoint(t *testing.T) {
 	// Insert test unlinked items
 	_, err = p.Exec(ctx, `
 		INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key, discovered_at)
-		VALUES ('test-unlinked-bead', 'bead', 'Test Unlinked Bead', 'solartown', 'st', 'some-join-key', $1)`,
+		VALUES ('test-unlinked-bead', 'bead', 'Test Unlinked Bead', 'code-factory', 'st', 'some-join-key', $1)`,
 		time.Now().Add(-1*time.Hour))
 	if err != nil {
 		t.Fatalf("failed to insert test unlinked bead: %v", err)
@@ -231,7 +231,7 @@ func TestLinkAPI_Endpoint(t *testing.T) {
 	// Insert test unlinked item
 	_, err = p.Exec(ctx, `
 		INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key, discovered_at)
-		VALUES ('test-unlinked-bead-link', 'bead', 'Test Link Bead', 'solartown', 'st', 'some-join-key', $1)`,
+		VALUES ('test-unlinked-bead-link', 'bead', 'Test Link Bead', 'code-factory', 'st', 'some-join-key', $1)`,
 		time.Now())
 	if err != nil {
 		t.Fatalf("failed to insert test unlinked bead: %v", err)
@@ -240,6 +240,16 @@ func TestLinkAPI_Endpoint(t *testing.T) {
 		_, _ = p.Exec(ctx, "DELETE FROM portfolio.unlinked_item WHERE id = 'test-unlinked-bead-link'")
 		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_link WHERE initiative_id = 'st-catch-all' AND kind = 'bead' AND ref = 'test-unlinked-bead-link'")
 	}()
+
+	// Ziel-Initiative für den Link muss existieren (FK initiative_link → initiative).
+	// Die ephemere Test-DB ist leer, daher die Catch-all-Karte hier anlegen.
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = 'st-catch-all'")
+	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
+		VALUES ('st-catch-all', 'code-factory', 'watching', 'Ad-hoc / Sonstiges', 'master')`)
+	if err != nil {
+		t.Fatalf("failed to insert st-catch-all initiative: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = 'st-catch-all'")
 
 	// Simulating /api/link endpoint request
 	mux := http.NewServeMux()
@@ -343,7 +353,7 @@ func TestCompletenessAPI_LivenessAndHonesty(t *testing.T) {
 	// Insert test unlinked rig
 	_, err = p.Exec(ctx, `
 		INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, join_key, discovered_at)
-		VALUES ('test-unlinked-rig', 'rig', 'Test Unlinked Rig', 'solartown', 'st', NULL, $1)`,
+		VALUES ('test-unlinked-rig', 'rig', 'Test Unlinked Rig', 'code-factory', 'st', NULL, $1)`,
 		time.Now())
 	if err != nil {
 		t.Fatalf("failed to insert test unlinked rig: %v", err)

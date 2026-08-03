@@ -20,6 +20,8 @@ func TestLiveGeldSchutzManagerSweep(t *testing.T) {
 	}
 	defer pPool.Close()
 
+	mkEnsureEventKinds(t, pPool)
+
 	testInitID := "qb-test-live-geld-protection"
 
 	// Cleanup

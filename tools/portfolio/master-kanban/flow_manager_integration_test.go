@@ -172,6 +172,11 @@ func TestFlowManager_API(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
+	// Bring the ephemeral DB's initiative_event_kind_check up to the canonical
+	// post-014/015 state (adds 'flow_action'). Sonst schlaegt der Test-INSERT unten
+	// am CHECK fehl (DB haengt sonst auf dem pre-014-Stand).
+	mkEnsureEventKinds(t, p)
+
 	testInitID := "init-flow-manager-api-test"
 
 	// Cleanup any previous test data

@@ -357,12 +357,21 @@ func TestApiDispatch(t *testing.T) {
 	testInitiativeID := "st-bead-native-reviewer"
 	testWorkspaceID := "550e8400-e29b-41d4-a716-446655440000"
 
-	// Cleanup test events
+	// Cleanup test events + Karte (die ephemere Test-DB hat die Karte nicht
+	// vorrätig — früher lag sie im Live-Board; hier legen wir sie selbst an).
 	cleanup := func() {
 		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1 AND kind = 'dispatched'", testInitiativeID)
+		_, _ = pPool.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 	}
 	cleanup()
 	defer cleanup()
+
+	// Testkarte anlegen, damit handleDispatch sie findet (sonst 404).
+	_, err = pPool.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
+		VALUES ($1, 'code-factory', 'idea', 'Native Reviewer Dispatch Test', 'Testing the /api/dispatch hack lane', 'plan_file')`, testInitiativeID)
+	if err != nil {
+		t.Fatalf("failed to insert test initiative: %v", err)
+	}
 
 	// 2. Create mock vk-delegate script
 	tmpDir, err := os.MkdirTemp("", "vk-mock")

@@ -27,6 +27,11 @@ func TestFlowManager_Handover_Integration(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
+	// Bring the ephemeral DB's initiative_event_kind_check up to the canonical
+	// post-014/015 state (adds 'flow_action' u.a.). Ohne das verwirft runFlowManager
+	// seinen flow_action-INSERT still am CHECK und die Assertion unten laeuft leer.
+	mkEnsureEventKinds(t, p)
+
 	// 1. Mock the GLM/LLM endpoint
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -67,14 +72,19 @@ func TestFlowManager_Handover_Integration(t *testing.T) {
 	defer p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id = $1", testInitiativeID)
 	defer p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitiativeID)
 
-	// 4. Force stagnation by updating updated_at to 10 days ago
+	// 4. Force stagnation. Der Flow-Manager misst Inaktivität NICHT mehr über
+	// updated_at (das setzt trg_initiative_stage_change bei jedem Update), sondern
+	// über die letzte echte Aktivität aus initiative_event mit Fallback auf
+	// created_at. Ohne Aktivitäts-Events zählt created_at — also das nach hinten
+	// datieren, damit die Karte als stagnant (>Stage-Threshold) erkannt wird.
 	_, err = p.Exec(ctx, `
-		UPDATE portfolio.initiative 
-		SET updated_at = now() - interval '10 days'
+		UPDATE portfolio.initiative
+		SET created_at = now() - interval '10 days',
+		    updated_at = now() - interval '10 days'
 		WHERE id = $1
 	`, testInitiativeID)
 	if err != nil {
-		t.Fatalf("failed to update initiative updated_at: %v", err)
+		t.Fatalf("failed to update initiative created_at: %v", err)
 	}
 
 	// We can manually call runFlowManager with dryRun = false

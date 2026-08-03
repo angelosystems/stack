@@ -50,9 +50,11 @@ func TestResolveTargetRepo(t *testing.T) {
 		t.Fatalf("failed to insert initiative_link: %v", err)
 	}
 
-	// Insert test-init-fallback (solartown, no plan_file links)
+	// Insert test-init-fallback (code-factory, no plan_file links).
+	// firma-Alias solartown/stack -> code-factory; rigTownMap['code-factory']
+	// bleibt verhaltensgleich /root/solartown (Test-Case 2 unten).
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-		VALUES ('test-init-fallback', 'solartown', 'idea', 'Test Fallback Initiative', 'vk')`)
+		VALUES ('test-init-fallback', 'code-factory', 'idea', 'Test Fallback Initiative', 'vk')`)
 	if err != nil {
 		t.Fatalf("failed to insert test-init-fallback: %v", err)
 	}
@@ -93,13 +95,15 @@ func TestDispatch(t *testing.T) {
 		t.Skip("skipping integration test; db ping failed:", err)
 	}
 
-	// Clean up any leftovers first
-	testID := "sk-test-dispatch"
+	// Clean up any leftovers first.
+	// id-Prefix 'cf-' passt zu firmaPrefix['code-factory']='cf', damit der
+	// Dispatch-Handler den Slug auf 'test-dispatch' kappt (Assertion unten).
+	testID := "cf-test-dispatch"
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testID)
 
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
-		VALUES ($1, 'stack', 'idea', 'Test Dispatching Card', 'Testing the dispatch endpoint scaffold generation', 'plan_file')`, testID)
+		VALUES ($1, 'code-factory', 'idea', 'Test Dispatching Card', 'Testing the dispatch endpoint scaffold generation', 'plan_file')`, testID)
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}
@@ -234,7 +238,7 @@ echo "workspace_url:       http://localhost:54682/workspaces/%s"
 
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
-		VALUES ($1, 'stack', 'idea', 'Test Dispatching Card Hack', 'Testing the dispatch endpoint for direct hacking lane', 'plan_file')`, testID)
+		VALUES ($1, 'code-factory', 'idea', 'Test Dispatching Card Hack', 'Testing the dispatch endpoint for direct hacking lane', 'plan_file')`, testID)
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}

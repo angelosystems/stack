@@ -60,6 +60,20 @@ func TestLinkageConfidenceAndPromoteReady(t *testing.T) {
 		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = $1", testInitID)
 	}()
 
+	// Voraussetzung für den 100%-Schwellen-Damping-Fall (Schritt 6a): die globale
+	// Linkage-Completeness muss < 100% sein. Die ephemere Test-DB ist sonst leer
+	// bzw. voll verknüpft -> getLinkageCompleteness liefert 100% und der
+	// Damping-Zweig würde nie greifen. Ein unverknüpftes Bead-Item senkt den Nenner.
+	_, _ = p.Exec(ctx, "DELETE FROM portfolio.unlinked_item WHERE id = 'sa-test-confidence-unlinked'")
+	_, err = p.Exec(ctx, `
+		INSERT INTO portfolio.unlinked_item (id, kind, title, firma, rig_prefix, discovered_at)
+		VALUES ('sa-test-confidence-unlinked', 'bead', 'Confidence Unlinked Bead', 'code-factory', 'cf', now())
+	`)
+	if err != nil {
+		t.Fatalf("failed to insert unlinked bead for completeness precondition: %v", err)
+	}
+	defer p.Exec(ctx, "DELETE FROM portfolio.unlinked_item WHERE id = 'sa-test-confidence-unlinked'")
+
 	// 3. Create mock beads in solartownPool
 	testBead1 := "sa-test-bead-conf-1"
 	testBead2 := "sa-test-bead-conf-2"

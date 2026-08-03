@@ -30,24 +30,32 @@ func TestSageSweep_FilteringAndChannel(t *testing.T) {
 	// Clean up any pre-existing test events to ensure clean state
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE payload->>'workspace_id' IN ('10101010', '20202020', '30303030')")
 
-	// Look up actual initiative IDs linked to real test beads
-	var initID1bpf string
-	err = p.QueryRow(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref='st-1bpf' AND kind='bead'").Scan(&initID1bpf)
-	if err != nil {
-		t.Fatalf("failed to find initiative_id for st-1bpf: %v", err)
+	// Seed the initiatives + Bead-Links the sweep resolves the workspaces to.
+	// Die ephemere Integrations-DB ist leer — früher lagen diese Karten als
+	// Live-Testdaten schon vor; jetzt legt der Test seine Fixtures selbst an
+	// (Workspace-Name sol-st-<ref> → Bead-Ref → initiative_link → Karte).
+	seedBead := func(initID, ref string) {
+		_, err := p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title)
+			VALUES ($1,'code-factory','now',$1) ON CONFLICT (id) DO NOTHING`, initID)
+		if err != nil {
+			t.Fatalf("failed to seed initiative %s: %v", initID, err)
+		}
+		_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+			VALUES ($1,'bead',$2) ON CONFLICT DO NOTHING`, initID, ref)
+		if err != nil {
+			t.Fatalf("failed to seed bead-link %s→%s: %v", initID, ref, err)
+		}
 	}
-
-	var initIDYozd string
-	err = p.QueryRow(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref='st-yozd' AND kind='bead'").Scan(&initIDYozd)
-	if err != nil {
-		t.Fatalf("failed to find initiative_id for st-yozd: %v", err)
-	}
-
-	var initIDIb5e string
-	err = p.QueryRow(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref='st-ib5e' AND kind='bead'").Scan(&initIDIb5e)
-	if err != nil {
-		t.Fatalf("failed to find initiative_id for st-ib5e: %v", err)
-	}
+	initID1bpf := "init-sweep-st-1bpf"
+	initIDYozd := "init-sweep-st-yozd"
+	initIDIb5e := "init-sweep-st-ib5e"
+	seedBead(initID1bpf, "st-1bpf")
+	seedBead(initIDYozd, "st-yozd")
+	seedBead(initIDIb5e, "st-ib5e")
+	defer func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = ANY($1)",
+			[]string{initID1bpf, initIDYozd, initIDIb5e})
+	}()
 
 	// 1. Create a temporary SQLite database for vibe-kanban
 	tmpFile, err := os.CreateTemp("", "vibe-kanban-sweep-test-*.sqlite")
@@ -211,11 +219,22 @@ func TestSageSweep_StagnationDetectorExclusion(t *testing.T) {
 	// Clean up any pre-existing test events to ensure clean state
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE payload->>'workspace_id' IN ('20202020')")
 
-	var initID1bpf string
-	err = p.QueryRow(ctx, "SELECT initiative_id FROM portfolio.initiative_link WHERE ref='st-1bpf' AND kind='bead'").Scan(&initID1bpf)
+	// Seed the Karte + Bead-Link the sweep resolves st-1bpf to (leere
+	// Integrations-DB — der Test stellt seine Fixtures selbst).
+	initID1bpf := "init-sweep-ex-st-1bpf"
+	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title)
+		VALUES ($1,'code-factory','now',$1) ON CONFLICT (id) DO NOTHING`, initID1bpf)
 	if err != nil {
-		t.Fatalf("failed to find initiative_id for st-1bpf: %v", err)
+		t.Fatalf("failed to seed initiative %s: %v", initID1bpf, err)
 	}
+	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+		VALUES ($1,'bead','st-1bpf') ON CONFLICT DO NOTHING`, initID1bpf)
+	if err != nil {
+		t.Fatalf("failed to seed bead-link for st-1bpf: %v", err)
+	}
+	defer func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id=$1", initID1bpf)
+	}()
 
 	// 1. Create a temporary SQLite database for vibe-kanban
 	tmpFile, err := os.CreateTemp("", "vibe-kanban-sweep-test-ex-*.sqlite")

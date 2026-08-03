@@ -30,7 +30,7 @@ func TestCmdMove(t *testing.T) {
 
 	// Insert test initiative with stage 'idea'
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-		VALUES ($1, 'solartown', 'idea', 'Test Move Initiative', 'plan_file')`, testInitID)
+		VALUES ($1, 'code-factory', 'idea', 'Test Move Initiative', 'plan_file')`, testInitID)
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}

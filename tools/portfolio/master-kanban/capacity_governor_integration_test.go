@@ -58,7 +58,7 @@ func TestDispatch_AdmissionStressThrottled(t *testing.T) {
 
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, description, primary_backend)
-		VALUES ($1, 'stack', 'idea', 'Test Gov Stress Dispatch', 'Testing the capacity-governor blocking dispatch', 'plan_file')`, testID)
+		VALUES ($1, 'code-factory', 'idea', 'Test Gov Stress Dispatch', 'Testing the capacity-governor blocking dispatch', 'plan_file')`, testID)
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}

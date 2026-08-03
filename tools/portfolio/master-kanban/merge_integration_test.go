@@ -6,7 +6,47 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// mkEnsureMergeEventKinds bringt den CHECK initiative_event_kind_check der
+// ephemeren Integrations-DB auf einen Stand, der auch 'merged_into' zulaesst —
+// den Event-kind, den mergeInitiatives (merge.go) auf die Dublette schreibt.
+// Achtung/Befund: 'merged_into' ist in KEINER schema/portfolio-*.sql-Migration
+// enthalten (canonical endet bei 015 mit flow_action/manager_flag/promote_damped);
+// merge.go emittiert es trotzdem. Gegen eine vollstaendig migrierte DB liefe der
+// Produkt-Merge also in denselben CHECK-Fehler — echte Schema-Luecke, nicht Test.
+// Diese Fixture (nur ephemere DB, mkIntegrationDSN verweigert das Live-Board)
+// laesst den Integrationstest das Merge-Verhalten trotzdem ausueben. Idempotent,
+// monoton, Produktcode bleibt unangetastet.
+func mkEnsureMergeEventKinds(t *testing.T, p *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := p.Begin(ctx)
+	if err != nil {
+		t.Fatalf("mkEnsureMergeEventKinds begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '15s'"); err != nil {
+		t.Fatalf("mkEnsureMergeEventKinds lock_timeout: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `ALTER TABLE portfolio.initiative_event DROP CONSTRAINT IF EXISTS initiative_event_kind_check`); err != nil {
+		t.Fatalf("mkEnsureMergeEventKinds drop: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `ALTER TABLE portfolio.initiative_event ADD CONSTRAINT initiative_event_kind_check
+		CHECK (kind = ANY (ARRAY[
+			'created','moved','edited','linked','unlinked','activity',
+			'stage_proposed','completed','commented','archived','dispatched',
+			'deployed','workspace_started','ai_message','ai_action','sage_action',
+			'flow_action','manager_flag','promote_damped','merged_into'
+		]))`); err != nil {
+		t.Fatalf("mkEnsureMergeEventKinds add: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("mkEnsureMergeEventKinds commit: %v", err)
+	}
+}
 
 // TestMergeInitiatives_Integration fährt den Merge gegen die DB: Links/Tags/
 // plan_items umhängen (mit Dedup gegen Ziel-Bestand), Events auf beide Karten,
@@ -16,6 +56,7 @@ func TestMergeInitiatives_Integration(t *testing.T) {
 	p := mkVollzugPool(t)
 	defer p.Close()
 	ctx := context.Background()
+	mkEnsureMergeEventKinds(t, p)
 
 	dup, ziel := "st-merge-dup", "st-merge-ziel"
 	cleanup := func() {
@@ -32,7 +73,7 @@ func TestMergeInitiatives_Integration(t *testing.T) {
 
 	mk := func(id string) {
 		if _, err := p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-			VALUES ($1,'solartown','now',$1,'plan_file')`, id); err != nil {
+			VALUES ($1,'code-factory','now',$1,'plan_file')`, id); err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
 	}
@@ -46,8 +87,8 @@ func TestMergeInitiatives_Integration(t *testing.T) {
 		VALUES ($1,'plan_file','/shared.md')`, ziel) // Kollision
 	_, _ = p.Exec(ctx, `INSERT INTO portfolio.initiative_tag (initiative_id, kind, value)
 		VALUES ($1,'software','x-svc')`, dup)
-	_, _ = p.Exec(ctx, `INSERT INTO portfolio.plan_item (id, initiative_id, slug, layer, status)
-		VALUES ($1,$2,'s','implementation','draft')`, dup+"-pi", dup)
+	_, _ = p.Exec(ctx, `INSERT INTO portfolio.plan_item (id, initiative_id, slug, path, layer, status)
+		VALUES ($1,$2,'s','/x/s-prd.md','implementation','draft')`, dup+"-pi", dup)
 
 	archivedAt := func(id string) *time.Time {
 		var a *time.Time
@@ -116,6 +157,7 @@ func TestMergeInitiatives_QuantbotGuard_Integration(t *testing.T) {
 	p := mkVollzugPool(t)
 	defer p.Close()
 	ctx := context.Background()
+	mkEnsureMergeEventKinds(t, p)
 
 	dup, ziel := "qb-merge-dup", "qb-merge-ziel"
 	cleanup := func() {

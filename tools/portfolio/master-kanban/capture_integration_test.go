@@ -29,7 +29,7 @@ func TestCaptureCommand(t *testing.T) {
 
 	// 1. Setup clean test initiatives
 	testInitID := "st-test-capture-specific"
-	testCatchAllID := "st-catch-all"
+	testCatchAllID := "cf-catch-all"
 
 	// Ensure any old test events are removed
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id IN ($1, $2)", testInitID, testCatchAllID)
@@ -37,7 +37,7 @@ func TestCaptureCommand(t *testing.T) {
 
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-		VALUES ($1, 'solartown', 'idea', 'Test Capture Initiative', 'plan_file')`, testInitID)
+		VALUES ($1, 'code-factory', 'idea', 'Test Capture Initiative', 'plan_file')`, testInitID)
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestCaptureCommand(t *testing.T) {
 	_ = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id = $1)`, testCatchAllID).Scan(&catchAllExists)
 	if !catchAllExists {
 		_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-			VALUES ($1, 'solartown', 'watching', 'Ad-hoc / Sonstiges', 'master')`, testCatchAllID)
+			VALUES ($1, 'code-factory', 'watching', 'Ad-hoc / Sonstiges', 'master')`, testCatchAllID)
 		if err != nil {
 			t.Fatalf("failed to insert st-catch-all: %v", err)
 		}
@@ -153,7 +153,7 @@ func TestCaptureAPIAndMCP(t *testing.T) {
 	}
 
 	testInitID := "st-test-capture-specific"
-	testCatchAllID := "st-catch-all"
+	testCatchAllID := "cf-catch-all"
 
 	// Ensure any old test events are removed
 	_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative_event WHERE initiative_id IN ($1, $2)", testInitID, testCatchAllID)
@@ -161,7 +161,7 @@ func TestCaptureAPIAndMCP(t *testing.T) {
 
 	// Insert test initiative
 	_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-		VALUES ($1, 'solartown', 'idea', 'Test Capture Initiative', 'plan_file')`, testInitID)
+		VALUES ($1, 'code-factory', 'idea', 'Test Capture Initiative', 'plan_file')`, testInitID)
 	if err != nil {
 		t.Fatalf("failed to insert test initiative: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestCaptureAPIAndMCP(t *testing.T) {
 	_ = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM portfolio.initiative WHERE id = $1)`, testCatchAllID).Scan(&catchAllExists)
 	if !catchAllExists {
 		_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend)
-			VALUES ($1, 'solartown', 'watching', 'Ad-hoc / Sonstiges', 'master')`, testCatchAllID)
+			VALUES ($1, 'code-factory', 'watching', 'Ad-hoc / Sonstiges', 'master')`, testCatchAllID)
 		if err != nil {
 			t.Fatalf("failed to insert st-catch-all: %v", err)
 		}
@@ -277,7 +277,7 @@ func TestCaptureAPIAndMCP(t *testing.T) {
 	if isErr {
 		t.Fatalf("callMcpToolCapture returned error on catch-all: %s", resText)
 	}
-	if !strings.Contains(resText, "Event erfolgreich erfasst für Initiative: st-catch-all") {
+	if !strings.Contains(resText, "Event erfolgreich erfasst für Initiative: cf-catch-all") {
 		t.Errorf("unexpected catch-all success message: %s", resText)
 	}
 

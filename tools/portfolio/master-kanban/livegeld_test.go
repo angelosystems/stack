@@ -30,6 +30,8 @@ func TestLiveGeldSchutz_StagnationAndPromoteReady(t *testing.T) {
 		pool = oldPool
 	}()
 
+	mkEnsureEventKinds(t, pPool)
+
 	testInitID := "qb-test-live-geld-init"
 	testBeadID := "bead-live-geld-test-1"
 

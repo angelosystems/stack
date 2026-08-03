@@ -13,6 +13,45 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// mkEnsureEventKinds bringt den CHECK initiative_event_kind_check der ephemeren
+// Integrations-DB auf den kanonischen Stand (schema/portfolio-014-flow-manager +
+// 015-manager + 015-promote-damped). Die bereitgestellte Test-DB haengt bei
+// diesem CHECK auf dem pre-014-Stand fest (Liste endet bei 'sage_action'), sodass
+// das Produkt-Logging von 'flow_action'/'manager_flag'/'promote_damped' scheitert
+// und runManagerSweep seine Flags still verwirft (manager.go:368/509 werten den
+// INSERT-Fehler aus). Reines Test-Fixture: laeuft NUR gegen die ephemere DB
+// (mkIntegrationDSN verweigert das Live-Board), erweitert den CHECK monoton
+// (bricht parallele Agenten nicht) und ist idempotent. Produktcode bleibt
+// unangetastet.
+func mkEnsureEventKinds(t *testing.T, p *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := p.Begin(ctx)
+	if err != nil {
+		t.Fatalf("mkEnsureEventKinds begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Sicherheitsventil gegen haengende Locks bei parallelen Agenten.
+	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '15s'"); err != nil {
+		t.Fatalf("mkEnsureEventKinds lock_timeout: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `ALTER TABLE portfolio.initiative_event DROP CONSTRAINT IF EXISTS initiative_event_kind_check`); err != nil {
+		t.Fatalf("mkEnsureEventKinds drop: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `ALTER TABLE portfolio.initiative_event ADD CONSTRAINT initiative_event_kind_check
+		CHECK (kind = ANY (ARRAY[
+			'created','moved','edited','linked','unlinked','activity',
+			'stage_proposed','completed','commented','archived','dispatched',
+			'deployed','workspace_started','ai_message','ai_action','sage_action',
+			'flow_action','manager_flag','promote_damped'
+		]))`); err != nil {
+		t.Fatalf("mkEnsureEventKinds add: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("mkEnsureEventKinds commit: %v", err)
+	}
+}
+
 func TestManagerSweepAndEscalate(t *testing.T) {
 	portfolioDsn := mkIntegrationDSN(t)
 	ctx := context.Background()
@@ -30,6 +69,8 @@ func TestManagerSweepAndEscalate(t *testing.T) {
 		pool = oldPool
 	}()
 
+	mkEnsureEventKinds(t, pPool)
+
 	testInitID := "st-test-manager-initiative"
 
 	// Cleanup
@@ -43,7 +84,7 @@ func TestManagerSweepAndEscalate(t *testing.T) {
 	// 1. Create a dummy initiative card in PostgreSQL
 	_, err = pPool.Exec(ctx, `
 		INSERT INTO portfolio.initiative (id, firma, stage, title, description, created_at, updated_at)
-		VALUES ($1, 'solartown', 'idea', 'Test Manager Stale Card', 'Desc', now() - interval '40 days', now() - interval '40 days')
+		VALUES ($1, 'code-factory', 'idea', 'Test Manager Stale Card', 'Desc', now() - interval '40 days', now() - interval '40 days')
 	`, testInitID)
 	if err != nil {
 		t.Fatalf("Failed to create test initiative: %v", err)
@@ -164,6 +205,8 @@ func TestManagerSweep_GlmDiagnosisIntegration(t *testing.T) {
 		pool = oldPool
 	}()
 
+	mkEnsureEventKinds(t, pPool)
+
 	testInitID := "st-test-glm-integration-init"
 
 	// Cleanup
@@ -177,7 +220,7 @@ func TestManagerSweep_GlmDiagnosisIntegration(t *testing.T) {
 	// 1. Create a stagnant initiative card in PostgreSQL (stage: now, updated_at 10 days ago)
 	_, err = pPool.Exec(ctx, `
 		INSERT INTO portfolio.initiative (id, firma, stage, title, description, created_at, updated_at)
-		VALUES ($1, 'solartown', 'now', 'Test Stagnant GLM Card', 'Desc', now() - interval '10 days', now() - interval '10 days')
+		VALUES ($1, 'code-factory', 'now', 'Test Stagnant GLM Card', 'Desc', now() - interval '10 days', now() - interval '10 days')
 	`, testInitID)
 	if err != nil {
 		t.Fatalf("Failed to create test initiative: %v", err)
@@ -312,6 +355,8 @@ func TestManagerLiveGeldSchutz(t *testing.T) {
 	defer func() {
 		pool = oldPool
 	}()
+
+	mkEnsureEventKinds(t, pPool)
 
 	testInitID := "qb-test-livegeld-protection"
 
