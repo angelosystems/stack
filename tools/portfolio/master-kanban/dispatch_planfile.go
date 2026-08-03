@@ -33,26 +33,52 @@ var decomposerLayers = map[string]bool{"prd": true, "vision": true, "phase": tru
 
 var layerLineRe = regexp.MustCompile(`(?m)^layer:\s*.*$`)
 
-// linkedPlanFile liefert die juengste verlinkte, existierende Plan-Datei einer
-// Karte (Delivery-Reports ausgeschlossen — die beschreiben Fertiges).
+// scaffoldMarker: Fingerabdruck der alten Generator-Leervorlage. Solche
+// Dateien duerfen NIE als Auftrags-Spec kopiert werden (Befund 2026-08-03:
+// an sa-hr-strecke haengen BEIDE — das leere 'hr-strecke-prd.md' und die
+// echte 203-Zeilen-'sa-hr-strecke-prd.md'; alphabetisch gewinnt das leere).
+func istScaffold(inhalt string) bool {
+	treffer := 0
+	for _, m := range []string{"- Feature 1", "### R1 - Core Flow", "Phase 1 - Prototype", "parent_plan: null"} {
+		if strings.Contains(inhalt, m) {
+			treffer++
+		}
+	}
+	return treffer >= 2
+}
+
+// linkedPlanFile liefert die SUBSTANZIELLSTE verlinkte, existierende Plan-Datei
+// einer Karte: Leervorlagen fliegen raus, danach gewinnt die groesste Datei
+// (Delivery-Reports sind ueber das -prd.md-Muster ohnehin ausgeschlossen).
+// Alphabetische Reihenfolge waere gefaehrlich — sie liefert bei Prefix-
+// Duplikaten die falsche (leere) Datei.
 func linkedPlanFile(ctx context.Context, p *pgxpool.Pool, initiativeID string) string {
 	rows, err := p.Query(ctx, `
 		SELECT ref FROM portfolio.initiative_link
-		 WHERE initiative_id=$1 AND kind='plan_file' AND ref LIKE '%-prd.md'
-		 ORDER BY ref`, initiativeID)
+		 WHERE initiative_id=$1 AND kind='plan_file' AND ref LIKE '%-prd.md'`, initiativeID)
 	if err != nil {
 		return ""
 	}
 	defer rows.Close()
+	best, bestLen := "", 0
 	for rows.Next() {
 		var ref string
-		if rows.Scan(&ref) == nil && strings.HasPrefix(ref, "/") {
-			if st, err := os.Stat(ref); err == nil && !st.IsDir() {
-				return ref
-			}
+		if rows.Scan(&ref) != nil || !strings.HasPrefix(ref, "/") {
+			continue
+		}
+		raw, rerr := os.ReadFile(ref)
+		if rerr != nil {
+			continue
+		}
+		if istScaffold(string(raw)) {
+			fmt.Fprintf(os.Stderr, "  · dispatch %s: Leervorlage %s uebersprungen (Scaffold-Fingerabdruck)\n", initiativeID, ref)
+			continue
+		}
+		if len(raw) > bestLen {
+			best, bestLen = ref, len(raw)
 		}
 	}
-	return ""
+	return best
 }
 
 // copyPlanToRig kopiert die echte Plan-Datei 1:1 in die Rig-Arbeitskopie und

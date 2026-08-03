@@ -115,7 +115,11 @@ func cmdSage() *cobra.Command {
 		Use:   "sage",
 		Short: "Führt den vk-Sage Workspace-Steward mit per-Bead-Lease und atomarem Heal-Counter aus",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vkDB := "/root/.local/share/vibe-kanban/db.v2.sqlite"
+			// Pfad parametrisierbar wie in runSageSweep (main.go) — der
+			// hartkodierte Pfad machte cmdSage untestbar (SC4-Integrationstest
+			// konnte nie gruen werden, Befund 2026-08-03) und band das Kommando
+			// an genau eine Box.
+			vkDB := envOr("VIBE_KANBAN_DB", "/root/.local/share/vibe-kanban/db.v2.sqlite")
 
 			// Check if SQLite DB exists
 			if _, err := os.Stat(vkDB); os.IsNotExist(err) {
