@@ -6,14 +6,90 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// vkTestSchema ist das Minimal-Schema der vibe-kanban-SQLite, das Sage abfragt:
+// workspaces/sessions/execution_processes (Sweep + cmdSage) plus die von cmdSage
+// zusaetzlich genutzte execution_process_repo_states (Partial-Progress-Probe).
+// Spalten und Typen spiegeln die relevanten Felder der Live-DB
+// (/root/.local/share/vibe-kanban/db.v2.sqlite) wider.
+const vkTestSchema = `
+CREATE TABLE workspaces (
+	id         BLOB PRIMARY KEY,
+	name       TEXT,
+	created_at TEXT,
+	updated_at TEXT,
+	task_id    BLOB,
+	archived   INTEGER DEFAULT 0
+);
+CREATE TABLE sessions (
+	id           BLOB PRIMARY KEY,
+	workspace_id BLOB,
+	created_at   TEXT
+);
+CREATE TABLE execution_processes (
+	id         BLOB PRIMARY KEY,
+	session_id BLOB,
+	status     TEXT,
+	exit_code  INTEGER,
+	started_at TEXT,
+	updated_at TEXT,
+	created_at TEXT,
+	run_reason TEXT
+);
+CREATE TABLE execution_process_repo_states (
+	id                   BLOB PRIMARY KEY,
+	execution_process_id BLOB,
+	repo_id              BLOB,
+	before_head_commit   TEXT,
+	after_head_commit    TEXT
+);
+`
+
+// newVKTestDB legt unter t.TempDir() eine eigene vibe-kanban-SQLite an, spielt
+// die uebergebenen Fixture-Statements ein und zeigt VIBE_KANBAN_DB via t.Setenv
+// darauf (kein os.Setenv, damit nichts in andere Tests leakt). Damit werden die
+// Sage-Tests hermetisch — sie haengen nicht mehr an den vier Juli-Workspaces der
+// Live-DB, die dort nicht mehr existieren (Befund 2026-08-03).
+func newVKTestDB(t *testing.T, fixtures string) string {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "vibe-kanban.sqlite")
+	if err := exec.Command("sqlite3", dbPath, vkTestSchema).Run(); err != nil {
+		t.Fatalf("failed to init vk sqlite schema: %v", err)
+	}
+	if strings.TrimSpace(fixtures) != "" {
+		if err := exec.Command("sqlite3", dbPath, fixtures).Run(); err != nil {
+			t.Fatalf("failed to insert vk fixtures: %v", err)
+		}
+	}
+	t.Setenv("VIBE_KANBAN_DB", dbPath)
+	return dbPath
+}
+
+// vkWSFixture liefert die SQLite-INSERTs fuer genau einen vk-Workspace inklusive
+// Session und einem codingagent-Execution-Prozess. wsIDHex ist der 32-stellige
+// Hex-String, wie hex(id) ihn liefert (also der Wert, den Sage in payload.workspace_id
+// erwartet); sessHex/epHex sind eindeutige Blob-IDs als Hex-Literal.
+func vkWSFixture(wsIDHex, name, sessHex, epHex, status string, exitCode int, ts string) string {
+	return fmt.Sprintf(`
+INSERT INTO workspaces (id, name, created_at, updated_at, task_id, archived)
+  VALUES (x'%[1]s', '%[2]s', '%[6]s', '%[6]s', x'01', 0);
+INSERT INTO sessions (id, workspace_id, created_at)
+  VALUES (x'%[3]s', x'%[1]s', '%[6]s');
+INSERT INTO execution_processes (id, session_id, status, exit_code, started_at, updated_at, created_at, run_reason)
+  VALUES (x'%[4]s', x'%[3]s', '%[5]s', %[7]d, '%[6]s', '%[6]s', '%[6]s', 'codingagent');
+`, wsIDHex, name, sessHex, epHex, status, ts, exitCode)
+}
 
 func TestSageSteward_API(t *testing.T) {
 	dsn := mkIntegrationDSN(t)
@@ -461,6 +537,13 @@ func TestSageSteward_Sweep(t *testing.T) {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
 
+	// Hermetische vk-SQLite: der Sweep loest Workspace B8427650... ueber seinen
+	// Namen (sol-st-ib5e) auf den Bead st-ib5e auf. Die Live-DB enthaelt diesen
+	// Juli-Workspace nicht mehr, also legt der Test seine eigene SQLite an und
+	// zeigt VIBE_KANBAN_DB darauf. failed/exit=1 -> Klassifikation "close-as-done".
+	ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	newVKTestDB(t, vkWSFixture("B842765043A04994B61AACF51E019956", "sol-st-ib5e", "a3", "e3", "failed", 1, ts))
+
 	// Trigger runSageSweepEx with onlyStuck = false
 	runSageSweepEx(ctx, p, false)
 
@@ -554,6 +637,12 @@ func TestSageSteward_Sweep_OnlyStuck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to insert test initiative link: %v", err)
 	}
+
+	// Hermetische vk-SQLite: gleicher failed/exit=1-Workspace sol-st-ib5e wie in
+	// TestSageSteward_Sweep. Da er failed (nicht running-and-stuck) ist, darf der
+	// onlyStuck-Lauf nichts loggen, der Voll-Lauf hingegen schon.
+	ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	newVKTestDB(t, vkWSFixture("B842765043A04994B61AACF51E019956", "sol-st-ib5e", "a3", "e3", "failed", 1, ts))
 
 	// Trigger runSageSweep with onlyStuck = true.
 	// Since st-ib5e is failed (not running-and-stuck), no event should be logged.

@@ -98,6 +98,47 @@ func TestSageDryRun_SC4(t *testing.T) {
 		}
 	}
 
+	// 1b. Seed the initiatives + Bead-Links that cmdSage resolves the three
+	// asserted workspaces to. Die ephemere Integrations-DB ist leer — frueher
+	// lagen diese Karten als Live-Testdaten vor; jetzt legt der Test seine
+	// Fixtures selbst an (firma='code-factory', da der CHECK kein 'solartown'/'stack'
+	// erlaubt). Cleanup per defer; ON DELETE CASCADE raeumt Links + Events mit weg.
+	seedBead := func(initID, ref string) {
+		_, err := p.Exec(ctx, `INSERT INTO portfolio.initiative (id, firma, stage, title)
+			VALUES ($1,'code-factory','now',$1) ON CONFLICT (id) DO NOTHING`, initID)
+		if err != nil {
+			t.Fatalf("failed to seed initiative %s: %v", initID, err)
+		}
+		_, err = p.Exec(ctx, `INSERT INTO portfolio.initiative_link (initiative_id, kind, ref)
+			VALUES ($1,'bead',$2) ON CONFLICT DO NOTHING`, initID, ref)
+		if err != nil {
+			t.Fatalf("failed to seed bead-link %s→%s: %v", initID, ref, err)
+		}
+	}
+	initYozd := "init-sc4-st-yozd"
+	init1bpf := "init-sc4-st-1bpf"
+	initIb5e := "init-sc4-st-ib5e"
+	seedBead(initYozd, "st-yozd")
+	seedBead(init1bpf, "st-1bpf")
+	seedBead(initIb5e, "st-ib5e")
+	defer func() {
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.initiative WHERE id = ANY($1)",
+			[]string{initYozd, init1bpf, initIb5e})
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_lease WHERE bead_id = ANY($1)",
+			[]string{"st-yozd", "st-1bpf", "st-ib5e"})
+		_, _ = p.Exec(ctx, "DELETE FROM portfolio.sage_heal_count WHERE bead_id = ANY($1)",
+			[]string{"st-yozd", "st-1bpf", "st-ib5e"})
+	}()
+
+	// 1c. Build a hermetic vk-SQLite containing exactly the three workspaces the
+	// test asserts on (IDs unchanged — they only need to exist in THIS SQLite).
+	// cmdSage resolves them by name (sol-st-<ref>) to the seeded beads.
+	ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	newVKTestDB(t,
+		vkWSFixture("05021F1F765846E299B6A36B39DC39F8", "sol-st-yozd", "a1", "e1", "failed", 1, ts)+
+			vkWSFixture("64D07879DB694345BFA59E9D321AAC08", "sol-st-1bpf", "a2", "e2", "failed", 1, ts)+
+			vkWSFixture("B842765043A04994B61AACF51E019956", "sol-st-ib5e", "a3", "e3", "failed", 1, ts))
+
 	// Ensure pool is reset so cmdSage connects with the correct dsn
 	pool = nil
 
