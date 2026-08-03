@@ -4050,6 +4050,36 @@ func handleDispatch(p *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if body.Lane == "plan" || body.Lane == "plan-deep" {
+			// Karte verlinkt eine ECHTE Plan-Datei? Dann DIESE in die
+			// Rig-Arbeitskopie uebernehmen — nie eine erfinden (Vorfall
+			// 2026-08-03: Scaffold "Goal: Feature 1, Feature 2" verdraengte
+			// eine 202-Zeilen-Spec inkl. Panel-Auflagen, die Fabrik baute am
+			// Auftrag vorbei; zwei unbrauchbare Branches).
+			if src := linkedPlanFile(r.Context(), p, body.Id); src != "" {
+				rigRepo, rerr := resolveTargetRepo(p, body.Id)
+				if rerr != nil || rigRepo == "" {
+					rigRepo = "/root/solartown"
+				}
+				planSlug := strings.TrimSuffix(filepath.Base(src), "-prd.md")
+				if dst, cerr := copyPlanToRig(src, rigRepo, planSlug); cerr == nil {
+					if eerr := emitPlanForDecomposer(r.Context(), planSlug, dst, rigRepo); eerr != nil {
+						http.Error(w, "lane-Tag gesetzt, Arbeitskopie liegt in "+dst+", aber Decomposer-Weckruf fehlgeschlagen: "+eerr.Error()+" — der Catch-up holt es nach", 500)
+						return
+					}
+					payloadBytes, _ := json.Marshal(map[string]string{
+						"lane": body.Lane, "ref": dst, "quelle": src, "via": "plan-kopie"})
+					_, _ = p.Exec(r.Context(),
+						`INSERT INTO portfolio.initiative_event (initiative_id, kind, source_backend, payload, actor)
+						 VALUES ($1, 'dispatched', 'master', $2::jsonb, 'master-kanban')`,
+						body.Id, string(payloadBytes))
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{
+						"ok": true, "lane": body.Lane, "arbeitskopie": dst, "quelle": src, "via": "plan-kopie"})
+					return
+				} else {
+					fmt.Fprintf(os.Stderr, "  ⚠ dispatch %s: Plan-Kopie fehlgeschlagen (%v) — falle auf den bisherigen Pfad zurueck\n", body.Id, cerr)
+				}
+			}
 			// Karte hat schon ein approved PRD? Dann KEIN neues Scaffold —
 			// Re-Emit weckt den Decomposer fuer die frisch vergebene Lane.
 			if slug, path, layer, status, repo := approvedPlanItem(r.Context(), p, body.Id); slug != "" {
