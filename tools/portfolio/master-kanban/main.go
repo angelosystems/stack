@@ -31,33 +31,44 @@ var (
 	pool   *pgxpool.Pool
 	stPool *pgxpool.Pool // Solartown-Ledger (read + Triage-Labels)
 	qbPool *pgxpool.Pool // Quantbot-Ledger (read KPI events)
-	// Build-Stamp — via `-ldflags "-X main.Version=… -X main.Sha=… -X main.BuiltAt=…"`
-	// gesetzt (siehe deploy.sh). Defaults markieren einen ungestampten Build.
+	// Build-Stamp — via `-ldflags "-X main.Version=… -X main.Sha=… -X main.BuiltAt=…
+	// -X main.SourceSha=…"` gesetzt (siehe deploy.sh). Defaults markieren einen
+	// ungestampten Build.
 	Version string = "dev"
 	Sha     string = "unknown"
 	BuiltAt string = "unknown"
+	// SourceSha ist der Commit im KANONISCHEN Edit-Baum /opt/master-kanban, aus
+	// dem der gespiegelte Build stammt. Sha allein ist die Mirror-SHA aus
+	// /opt/stack und existiert in master-kanban.git gar nicht — von der laufenden
+	// Version liess sich der Quell-Commit deshalb nicht bestimmen
+	// (mk-vorhaben-ebene WP-0). mirror-to-stack.sh schreibt den Trailer,
+	// deploy.sh liest ihn.
+	SourceSha string = "unknown"
 )
 
 // VersionInfo ist der einheitliche /version-Vertrag (Release-Pipeline-PRD, D18):
-// dieselben 5 Felder für HTTP GET /api/version und CLI `version --json`.
+// dieselben Felder für HTTP GET /api/version und CLI `version --json`.
+// source_sha kam mit mk-vorhaben-ebene WP-0 dazu (Build-Provenance-Gate).
 type VersionInfo struct {
-	Service string `json:"service"`
-	Version string `json:"version"`
-	Sha     string `json:"sha"`
-	BuiltAt string `json:"built_at"`
-	Env     string `json:"env"`
+	Service   string `json:"service"`
+	Version   string `json:"version"`
+	Sha       string `json:"sha"`
+	SourceSha string `json:"source_sha"`
+	BuiltAt   string `json:"built_at"`
+	Env       string `json:"env"`
 }
 
 // versionInfo baut den /version-Vertrag. `env` ist ein Laufzeit-Fakt (dieselbe
 // Binary läuft prod-mvp und staging), daher via MK_ENV überschreibbar; version/
-// sha/built_at sind Build-Fakten aus den ldflags.
+// sha/source_sha/built_at sind Build-Fakten aus den ldflags.
 func versionInfo() VersionInfo {
 	return VersionInfo{
-		Service: "master-kanban",
-		Version: Version,
-		Sha:     Sha,
-		BuiltAt: BuiltAt,
-		Env:     envOr("MK_ENV", "prod-mvp"),
+		Service:   "master-kanban",
+		Version:   Version,
+		Sha:       Sha,
+		SourceSha: SourceSha,
+		BuiltAt:   BuiltAt,
+		Env:       envOr("MK_ENV", "prod-mvp"),
 	}
 }
 

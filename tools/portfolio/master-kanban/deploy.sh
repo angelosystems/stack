@@ -21,11 +21,22 @@ SHA="${1:-$(git -C "${REPO_DIR}" rev-parse --short HEAD)}"
 # Kein Tag heute → version == Kurz-SHA (SHA-Fallback, wie im PRD/Auftrag verlangt).
 VERSION="$(git -C "${REPO_DIR}" describe --tags --always 2>/dev/null || echo "${SHA}")"
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-LDFLAGS="-X main.Version=${VERSION} -X main.Sha=${SHA} -X main.BuiltAt=${BUILT_AT}"
+
+# Build-Provenance (mk-vorhaben-ebene WP-0): ${SHA} ist die Mirror-SHA aus
+# stack.git und existiert in master-kanban.git nicht — von der laufenden
+# Instanz liess sich der Quell-Commit bisher nicht bestimmen. mirror-to-stack.sh
+# haengt einen "Source-SHA:"-Trailer an den Mirror-Commit; den lesen wir hier
+# und stampen ihn mit. Fehlt der Trailer (handgemachter Alt-Mirror), bleibt
+# source_sha ehrlich "unknown" statt zu raten.
+SOURCE_SHA="$(git -C "${REPO_DIR}" log -1 --format=%B "${SHA}" 2>/dev/null \
+  | sed -n 's/^Source-SHA:[[:space:]]*//p' | head -1)"
+SOURCE_SHA="${SOURCE_SHA:-unknown}"
+
+LDFLAGS="-X main.Version=${VERSION} -X main.Sha=${SHA} -X main.BuiltAt=${BUILT_AT} -X main.SourceSha=${SOURCE_SHA}"
 
 OUT="${OUT:-/opt/stack/bin/${BINARY_NAME}.${SHA}}"
 
-echo "Building ${BINARY_NAME}: version=${VERSION} sha=${SHA} built_at=${BUILT_AT}"
+echo "Building ${BINARY_NAME}: version=${VERSION} sha=${SHA} source_sha=${SOURCE_SHA} built_at=${BUILT_AT}"
 cd "${SRC_DIR}"
 go build -ldflags "${LDFLAGS}" -o "${OUT}" .
 
