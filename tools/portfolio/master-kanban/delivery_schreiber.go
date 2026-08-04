@@ -111,10 +111,13 @@ func maybeWriteDeliveryReport(ctx context.Context, p *pgxpool.Pool, init FlowIni
 		return false
 	}
 
-	// Dirty-Repo-Schutz: der Schreiber committet nur in sauberem Zustand
-	// (nie fremde WIP-Aenderungen einsammeln).
-	if out, err := exec.Command("git", "-C", repoRoot, "status", "--porcelain").Output(); err != nil || len(strings.TrimSpace(string(out))) > 0 {
-		fmt.Printf("  · delivery-schreiber: %s uebersprungen — %s hat uncommittete Aenderungen\n", init.ID, repoRoot)
+	// Dirty-Schutz NUR auf docs/plans/ (Befund 2026-08-04): die Repo-weite
+	// Pruefung machte den Schreiber im wichtigsten Rig wirkungslos —
+	// /root/solartown ist durch rotierende Laufzeit-Artefakte (.events.jsonl.*.gz,
+	// Mirror-Refs) NIE sauber. Was zaehlt, ist allein, dass niemand sonst
+	// gerade an den Plan-Dateien arbeitet: nur dort committet der Schreiber.
+	if out, err := exec.Command("git", "-C", repoRoot, "status", "--porcelain", "--", "docs/plans").Output(); err != nil || len(strings.TrimSpace(string(out))) > 0 {
+		fmt.Printf("  · delivery-schreiber: %s uebersprungen — %s/docs/plans hat uncommittete Aenderungen\n", init.ID, repoRoot)
 		return false
 	}
 
@@ -174,8 +177,9 @@ func maybeWriteDeliveryReport(ctx context.Context, p *pgxpool.Pool, init FlowIni
 	commit := exec.Command("git", "-C", repoRoot,
 		"-c", "user.name=delivery-schreiber", "-c", "user.email=mk@werkstatt",
 		"commit", "--no-verify", "-q", "-m",
-		fmt.Sprintf("delivery-schreiber: %s (auto-generiert aus Bead/Ledger-Evidenz, Karte %s)", slug, init.ID))
-	add := exec.Command("git", "-C", repoRoot, "add", outPath)
+		fmt.Sprintf("delivery-schreiber: %s (auto-generiert aus Bead/Ledger-Evidenz, Karte %s)", slug, init.ID),
+		"--", outPath) // nur DIESE Datei — nie fremde Laufzeit-Aenderungen mitnehmen
+	add := exec.Command("git", "-C", repoRoot, "add", "--", outPath)
 	if err := add.Run(); err == nil {
 		if err := commit.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠ delivery-schreiber %s: Commit fehlgeschlagen (Datei bleibt): %v\n", init.ID, err)

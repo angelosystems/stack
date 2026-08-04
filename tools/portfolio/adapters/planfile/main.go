@@ -356,6 +356,35 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 		initiativeID = adoptInit
 	}
 
+	// Eigentums-Regel (Befund 2026-08-04): Verlinkt eine Karte DIESE Plan-Datei
+	// und traegt sie den Slug in ihrer ID (cf-mk-autopilot-stufe2 <-> Slug
+	// mk-autopilot-stufe2), dann gehoert das plan_item IHR — nicht der vom
+	// Eltern-Plan geerbten Dach-Karte. Die Vererbung liess Vorhaben-Karten
+	// evidenzlos zurueck: Ampel leer, Lane-Gate schaute auf die falsche Karte
+	// (parkte den Autopilot-Bead), und der Dispatch fand kein approved PRD
+	// (=> Scaffold-Halluzination).
+	// Schatten-Pflicht (Lehre 2026-08-02): PLANFILE_LINK_WINS steuert das —
+	// "shadow" (Default) protokolliert nur, "on" vollzieht, "off" schweigt.
+	if modus := os.Getenv("PLANFILE_LINK_WINS"); modus != "off" {
+		var besitzerID string
+		_ = p.QueryRow(ctx, `
+			SELECT l.initiative_id FROM portfolio.initiative_link l
+			  JOIN portfolio.initiative i ON i.id = l.initiative_id AND i.archived_at IS NULL
+			 WHERE l.kind='plan_file' AND l.ref = $1
+			   AND (l.initiative_id = $2 OR l.initiative_id LIKE '%-' || $2)
+			 LIMIT 1`, path, fm.Slug).Scan(&besitzerID)
+		if besitzerID != "" && besitzerID != initiativeID {
+			if modus == "on" {
+				fmt.Printf("  ⇢ %s: plan_item wandert %s → %s (Karte verlinkt die Datei und traegt den Slug)\n",
+					fm.Slug, initiativeID, besitzerID)
+				initiativeID = besitzerID
+			} else {
+				fmt.Printf("  [schatten] %s: plan_item wuerde %s → %s wandern (PLANFILE_LINK_WINS=on zum Vollzug)\n",
+					fm.Slug, initiativeID, besitzerID)
+			}
+		}
+	}
+
 	isRootCard := parentID == "" &&
 		(strings.HasSuffix(path, "-prd.md") || fm.Layer == "prd" || fm.Layer == "vision" || fm.Layer == "roadmap")
 	if parentID == "" && !isRootCard {
@@ -380,11 +409,13 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 	created := false
 	if isRootCard {
 		if initiativeID == id {
-			// Initiative nur anlegen, nie verschieben — Stage-Hoheit bleibt beim Board
+			// Initiative nur anlegen, nie verschieben — Stage-Hoheit bleibt beim Board.
+			// owner_email: Adapter-Anlagen sind Maschinen-Pfad → Default-Owner aus
+			// MK_DEFAULT_OWNER (mk-user-management: nie wieder Owner-lose Karten).
 			tag, err := p.Exec(ctx,
-				`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend, tier)
-				 VALUES ($1,$2,'idea',$3,'plan_file',NULLIF($4,'')) ON CONFLICT (id) DO NOTHING`,
-				id, r.firma, fm.Title, tier)
+				`INSERT INTO portfolio.initiative (id, firma, stage, title, primary_backend, tier, owner_email)
+				 VALUES ($1,$2,'idea',$3,'plan_file',NULLIF($4,''),NULLIF($5,'')) ON CONFLICT (id) DO NOTHING`,
+				id, r.firma, fm.Title, tier, os.Getenv("MK_DEFAULT_OWNER"))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ upsert %s: %v\n", id, err)
 				return ""
