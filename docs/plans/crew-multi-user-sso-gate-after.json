@@ -1,0 +1,152 @@
+{
+  "bi": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": true
+  },
+  "cap-proxy": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "captable": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": true
+  },
+  "coder": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  },
+  "crew": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  },
+  "crm": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  },
+  "documenso": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": true
+  },
+  "fabrik-gate": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "finance": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "flows-cf": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "flows-qs": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "flows-sa": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  },
+  "flows-staging": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "gast-test": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "listmonk": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": true
+  },
+  "listmonk-oidc": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  },
+  "master-kanban": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  },
+  "obsidian": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "paperclip": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": true
+  },
+  "paperclip-cf": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "paperclip-staging": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "quant-wissen": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "sa-app": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "solartown": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "sso-domain-gate": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  },
+  "staging-documenso": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": true
+  },
+  "staging-finance": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  },
+  "staging-inbox-zero": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": true
+  },
+  "vibe-kanban": {
+    "angelo_calcagno": false,
+    "moritz": false,
+    "kontrolle_angelo_at": false
+  },
+  "zentrale": {
+    "angelo_calcagno": true,
+    "moritz": true,
+    "kontrolle_angelo_at": false
+  }
+}
