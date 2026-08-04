@@ -4,5 +4,11 @@ repos:
     services:
       - name: master-kanban-serve
         deploy_script: tools/portfolio/master-kanban/deploy.sh
-        health_probe: http://127.0.0.1:7770/api/version
+        # :7780 ist der Prod-Dienst (master-kanban-serve.service). :7770 ist die
+        # Staging-Unit master-kanban-serve-staging.service — sie laeuft aus
+        # demselben Binary, meldet aber env=staging und sha=unknown. Der Probe
+        # stand auf 7770 und haette einen Prod-Deploy also gegen Staging
+        # verifiziert (mk-vorhaben-ebene WP-0). Deckt sich jetzt mit
+        # deploy-reactor-manifest.yaml, das schon immer 7780 probte.
+        health_probe: http://127.0.0.1:7780/api/version
         env: prod
