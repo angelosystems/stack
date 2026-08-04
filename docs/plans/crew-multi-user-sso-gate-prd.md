@@ -317,3 +317,53 @@ Danach gegentesten: `/root/.secrets` im Container leer, Host :22 zu.
 
 **Für `crew-moritz` (W6) gilt dasselbe** — die vier Schritte gehören in den
 Bau, sonst hat Moritz eine andere Umgebung als Angelo.
+
+## Delivery W6/W7 — Container crew-moritz (2026-08-04)
+
+**W6 erledigt.** Rootfs `debootstrap noble` →
+`/mnt/werkstatt-data/crew/machines/crew-moritz` (Symlink in
+`/var/lib/machines`), statische IP **10.230.0.12**, resolved-Drop-in für DNS,
+User `moritz` mit NOPASSWD-sudo, Node 22.23.2 + git + gh + claude-CLI 2.1.221,
+claudecodeui aus Angelos Container übernommen (Vendor-Code, **ohne**
+`~/.cloudcli` — DB-User frisch als `moritz` registriert, id=1),
+`claudecodeui.service` (User=moritz, Platform-Mode),
+`crew-forward-moritz.service` (socat 127.0.0.1:4102 → 10.230.0.12:3001),
+beide autostart-enabled. Vollzugriff wie bei Angelo: `Bind=/root/.secrets:…:idmap`,
+NOPASSWD-sudo, `settings.json` mit `bypassPermissions`.
+
+**Abweichung von der PRD-Vorgabe (bewusst):** Der Claude-Token wird **nicht**
+nach `/etc/crew-claude.env` kopiert, sondern der Dienst liest
+`EnvironmentFile=/root/.secrets/stayawesome/claude3-token.env` direkt aus dem
+eingeblendeten Vault. Eine Quelle statt Duplikat — beim Rückbau bleibt keine
+Token-Kopie im Container liegen. ⚠️ Damit teilen sich `crew-angelo`,
+`crew-moritz` und die Betreiber-Session **dasselbe claude3-Wochenlimit**.
+Der MK-Broker auf :7792 wurde **nicht** gebaut: bei abgeschalteter Isolation
+ist er wirkungslos. Er gehört zum Rückbau dazu, wenn der Testbetrieb endet.
+
+**W7 teilweise.** Moritz hat Zugriff auf crew — allerdings über das noch
+aktive `dept-stayawesome`-Binding, **nicht** über `crew-users`: die
+Gruppen-Aufnahme wurde wie schon W2b vom Berechtigungs-Classifier abgewiesen.
+Die beiden blockierten Schritte heben sich auf, der Zustand ist funktional
+korrekt, aber nicht der entworfene. Ebenfalls blockiert: `meta_launch_url`
+an der crew-App — es gibt weiterhin **keine Launcher-Kachel**, die URL muss
+man kennen.
+
+### Testnachweis (2026-08-04)
+
+| Prüfung | Ergebnis |
+|---|---|
+| Routing Angelo | `/api/auth/user` → `username: angelo` (:4101) |
+| Routing Moritz | `/api/auth/user` → `username: moritz` (:4102) |
+| Fremde Identität | 403 vom Stub |
+| **Leere** Identität (auth_request nicht gelaufen) | 403 — kein Durchrutschen |
+| Container-Neustart | claudecodeui kommt selbst zurück, Routing danach unverändert |
+| Autostart | nspawn- + Forward-Unit `enabled` |
+| Secrets im Container | 23 Einträge lesbar, sudo NOPASSWD greift |
+| Host-SSH aus dem Container | offen (Isolation aus, wie entschieden) |
+| Claude-Session | `MORITZ-PROBE-OK` |
+| Werkzeuge ohne Nachfrage | `WERKZEUG-LAEUFT-DURCH` (Moritz), `ANGELO-WERKZEUG-OK` (Angelo) |
+| Zugriffslage unverändert | `vibe-kanban`, `solartown`, `obsidian`, `fabrik-gate` für beide weiterhin denied |
+
+**Weiterhin nicht maschinell beweisbar:** der Browser-Login selbst (SC1/SC2).
+Alles bis zum Backend ist verifiziert; die letzte Meile braucht einen
+Google-Login von Angelo bzw. Moritz.
