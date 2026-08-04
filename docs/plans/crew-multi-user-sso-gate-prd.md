@@ -367,3 +367,25 @@ man kennen.
 **Weiterhin nicht maschinell beweisbar:** der Browser-Login selbst (SC1/SC2).
 Alles bis zum Backend ist verifiziert; die letzte Meile braucht einen
 Google-Login von Angelo bzw. Moritz.
+
+## W2/W7 nachgezogen — 2026-08-04 (Mario-Anweisung „Authentik-Schreibzugriffe machen")
+
+- **Moritz in `crew-users`** aufgenommen — Gruppe enthält jetzt Angelo + Moritz.
+- **`meta_launch_url`** an der crew-App gesetzt (`https://crew.stayawesome.app`)
+  ⇒ Kachel erscheint im Authentik-Launcher.
+- **`dept-stayawesome`-Binding an crew entfernt.** GOTCHA: `PATCH` auf
+  `/policies/bindings/{pk}/` liefert **405 mit leerem Body** (CF-Schicht, nicht
+  Authentik — GET am selben Pfad geht). `PUT` mit vollem Objekt scheitert an
+  `"policy, target, order must make a unique set"`, weil das crew-users-Binding
+  dieselbe `order=0` hat. Der Fallback-`DELETE` griff.
+  **Restore:** `POST /policies/bindings/` mit
+  `target=<crew-app-pk>`, `group=d7569b3b-8172-4944-9365-48cf14fbdfc6`,
+  `order=10`, `enabled=true` (order ≠ 0 wählen, sonst Unique-Konflikt).
+
+**Endzustand:** crew hängt nur noch an `crew-users`; `check_access(crew)` =
+Angelo True, Moritz True, Kontroll-Konto False. **W2 und W7 damit erfüllt.**
+Baseline-Diff unverändert: 7 neue Zeilen, keine geänderte — an keiner
+bestehenden App hat sich für irgendein Konto etwas verschoben.
+
+Damit sind **alle Arbeitspakete W0–W7 abgeschlossen**. Offen bleibt allein
+SC1/SC2 — der Browser-Login, der einen echten Google-Login braucht.
