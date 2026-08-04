@@ -85,6 +85,61 @@ var firmaDefaultTier = map[string]string{
 
 var validTiers = map[string]bool{"library": true, "code-fabrik": true, "product": true}
 
+// ── Layer-Taxonomie und Karten-Politik (mk-vorhaben-ebene WP-1) ──────────────
+//
+// isRootCard verschmolz frueher DREI verschiedene Fragen in einem Boolean:
+//  1. Datei-Identitaet   — heisst die Datei *-prd.md?
+//  2. Baum-Position      — hat sie ein Eltern-Plan-File?
+//  3. Karten-Politik     — darf dieser layer eine eigene Board-Karte haben?
+//
+// Dadurch war eine Datei x-prd.md mit `layer: vision` gleichzeitig
+// "Suffix ⇒ Karte" und (nach der geplanten Politik) "vision ⇒ nie Karte".
+// Die drei Fragen sind jetzt getrennt; hier steht ausschliesslich (3).
+//
+// WICHTIG — dieser Stand ist VERHALTENSNEUTRAL: die Tabelle bildet exakt die
+// heutige Regel ab (prd|vision|roadmap bekommen eine Karte). Die Umstellung auf
+// die Zielpolitik (vision/roadmap/phase/epic bekommen NIE eine Karte, prd IMMER
+// eine eigene) ist die Identitaets-Migration und gehoert in WP-2 — sie braucht
+// das Freeze-Protokoll und den Link-Remap, nicht nur eine geaenderte Map.
+type layerPolicy struct {
+	hatKarte  bool // bekommt eine eigene portfolio.initiative
+	zielKarte bool // Politik NACH WP-2 — heute nur Dokumentation, nicht wirksam
+}
+
+var layerPolicies = map[string]layerPolicy{
+	"prd":            {hatKarte: true, zielKarte: true},
+	"vision":         {hatKarte: true, zielKarte: false},  // WP-2: wird zum Ziel
+	"roadmap":        {hatKarte: true, zielKarte: false},  // WP-2: wird zum Ziel
+	"phase":          {hatKarte: false, zielKarte: false}, // Etappe
+	"epic":           {hatKarte: false, zielKarte: false}, // Etappe (Bestandsname)
+	"implementation": {hatKarte: false, zielKarte: false},
+	"delivery":       {hatKarte: false, zielKarte: false},
+	"session":        {hatKarte: false, zielKarte: false},
+}
+
+// layerBekannt meldet, ob der Frontmatter-layer im Kanon steht. Unbekannte und
+// leere Werte werden NICHT verworfen (die Zeile bleibt in der DB) — sie
+// bekommen eine laute Sync-Warnung und den Marker triage:layer-check, damit
+// der Flow-Digest sie sichtbar macht. Im Bestand existieren u.a.
+// control-plane, experience, runbook, policy, execution, infra, product
+// sowie zwei leere Werte.
+func layerBekannt(layer string) bool {
+	_, ok := layerPolicies[layer]
+	return ok
+}
+
+// layerErlaubtKarte beantwortet allein Frage (3) der Politik.
+func layerErlaubtKarte(layer string) bool {
+	return layerPolicies[layer].hatKarte
+}
+
+// pfadIstPlanDatei beantwortet allein Frage (1): Datei-Identitaet ueber das
+// Namensschema. Ein unbekannter layer in einer *-prd.md-Datei bekommt dadurch
+// weiterhin eine Karte — genau wie bisher.
+func pfadIstPlanDatei(path string) bool {
+	return strings.HasSuffix(path, "-prd.md")
+}
+
 // firma-Tag-Wert: product-Karten tragen ihre Firma, geteilte Tiers 'shared';
 // mariobrain heißt auf der Tag-Achse 'personal' (Reconciliation-PRD §8/D4).
 func firmaTagValue(firma, tier string) string {
@@ -385,10 +440,20 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 		}
 	}
 
-	isRootCard := parentID == "" &&
-		(strings.HasSuffix(path, "-prd.md") || fm.Layer == "prd" || fm.Layer == "vision" || fm.Layer == "roadmap")
+	// Karten-Entscheidung aus drei getrennten Praedikaten (WP-1):
+	// Baum-Position (parentID) · Datei-Identitaet (Suffix) · Karten-Politik (layer).
+	// Verhalten identisch zur frueheren Inline-Bedingung.
+	isRootCard := parentID == "" && (pfadIstPlanDatei(path) || layerErlaubtKarte(fm.Layer))
 	if parentID == "" && !isRootCard {
 		return "" // lose Notiz ohne Eltern und ohne Karten-Layer — kein Board-Material
+	}
+
+	// Layer-Kanon: unbekannte/leere Werte werden nie stumm verworfen, sondern
+	// laut gemeldet und unten als triage:layer-check markiert (WP-1).
+	layerOK := layerBekannt(fm.Layer)
+	if !layerOK {
+		fmt.Fprintf(os.Stderr, "  ! %s: unbekannter layer %q (Kanon: prd|vision|roadmap|phase|epic|implementation|delivery|session) — Zeile bleibt, Frontmatter fixen\n",
+			fm.Slug, fm.Layer)
 	}
 
 	// Eingangs-Gate: tier aus Frontmatter > Repo-Registry > Firma-Default.
@@ -444,6 +509,16 @@ func syncFileRec(p *pgxpool.Pool, r repo, path string, seen map[string]bool) str
 		}
 		if tier == "" {
 			upsertTag(p, ctx, initiativeID, "triage", "tier-check")
+		}
+
+		// Layer-Kanon (WP-1): unbekannter/leerer layer wird markiert statt
+		// verworfen; ein korrigiertes Frontmatter räumt den Marker wieder ab.
+		if layerOK {
+			_, _ = p.Exec(ctx,
+				`DELETE FROM portfolio.initiative_tag
+				  WHERE initiative_id=$1 AND kind='triage' AND value='layer-check'`, initiativeID)
+		} else {
+			upsertTag(p, ctx, initiativeID, "triage", "layer-check")
 		}
 
 		// Überprojekt-Check: fehlender parent_plan-Key (≠ bewusstes null)
