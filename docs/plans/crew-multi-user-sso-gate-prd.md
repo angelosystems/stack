@@ -389,3 +389,42 @@ bestehenden App hat sich für irgendein Konto etwas verschoben.
 
 Damit sind **alle Arbeitspakete W0–W7 abgeschlossen**. Offen bleibt allein
 SC1/SC2 — der Browser-Login, der einen echten Google-Login braucht.
+
+## Nachtrag — „weiße Oberfläche" nach dem Login (2026-08-05)
+
+**Rückmeldung Moritz:** Login geht, danach komplett weiße Oberfläche.
+
+**Das Login-Gate ist damit produktiv bewiesen** (SC1/SC2, Auth-Hälfte):
+`authorize_application`-Events für **SSO Domain Gate** existieren jetzt —
+Moritz 2026-08-05T06:02:19, Angelo 2026-08-04T09:14:37. Vor dem Umbau hatte
+kein Mitarbeiter je ein solches Event für eine werkstatt-App.
+
+**Root Cause der weißen Seite — zwei Ursachen, die zusammenwirken:**
+
+1. **Sitzungsablauf nach genau einer Stunde.** Provider 19 stand auf
+   `access_token_validity = hours=1`, während der Domain-Provider und
+   flows-sa auf `hours=24` stehen. Log-Beleg: Moritz meldet sich 06:02:19 an,
+   WebSocket liefert bis **07:01** Status 101 — danach **365×
+   `GET /ws → 302`** im 4-Sekunden-Takt plus 43 abgewiesene API-Aufrufe, bei
+   offener Sitzung (Referer zeigt `/session/bb91acf4-…`).
+2. **Der Ablauf war unsichtbar.** Der crew-Vhost schickte auch XHR- und
+   WebSocket-Aufrufe in den Login-Redirect. Ein Cross-Origin-Redirect auf
+   `idp.*` lässt `fetch()` und den WS-Client **still** scheitern — das
+   Frontend bekommt weder Daten noch Fehler und rendert nichts. Genau dafür
+   existiert `snippets/authentik-domain-protect-api.conf` (401 als JSON);
+   master.stayawesome.app nutzte es bereits, crew nicht.
+
+**Behoben:**
+- Provider 19 `access_token_validity` → `hours=24` (PUT; PATCH ist an diesem
+  Endpunkt 405).
+- crew-Vhost um `location /api/` und `location /ws` ergänzt, beide mit
+  `authentik-domain-protect-api.conf`. Verifiziert anonym: Seite → 302
+  (Login-Redirect, korrekt), `/api/…` → 401 JSON, `/ws` → 401 JSON.
+  **Gotcha:** der erste Test zeigte für `/api/` noch 302 — Cloudflare-Cache;
+  mit Cache-Buster bzw. direkt am Origin kam sofort 401.
+
+**Offen / beobachten:** `master-kanban-forward-auth` (pk 13) und
+`crm-forward-auth` (pk 21) stehen ebenfalls auf `hours=1` — dieselbe
+Stolperfalle, dort aber sichtbar, weil master das API-Snippet schon nutzt.
+Ob claudecodeui auf ein 401 sichtbar re-authentifiziert oder nur sauberer
+scheitert, zeigt der nächste Ablauf; ein Reload holt die Sitzung in jedem Fall.
